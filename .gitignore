@@ -1,0 +1,47 @@
+# Model outputs
+model_evaluation/
+*.pth
+runs/
+checkpoints/
+
+# Data files
+*.npy
+*.csv
+data/raw/
+data/processed/
+
+# Documentation & Research
+research.txt
+code_citations.txt
+literature/
+*.pdf
+*.docx
+
+# Logs & Debug
+logs/
+*.log
+__pycache__/
+.pytest_cache/
+
+# Development files
+data_utils.py
+gcnn.py
+train_1.py
+pi_r_train.py
+pi_r_data_utils.py
+pi_gcrnn.py
+enhanced_soa
+evaluate_moopf
+run_soa_tuning_multiple
+
+
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System files
+.DS_Store
+Thumbs.db
