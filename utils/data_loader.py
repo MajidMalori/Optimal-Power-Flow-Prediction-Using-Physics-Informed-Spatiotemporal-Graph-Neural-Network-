@@ -41,30 +41,29 @@ class PowerSystemNormalizer:
 class PowerSystemDataset(Dataset):
     """
     Custom PyTorch Dataset for power system time-series data.
-    DEFINITIVE FIX: Correctly prepares a single target for a single model prediction.
+    Handles time-synchronized features, targets, and Ybus matrices.
     """
-    def __init__(self, features, adjacency_matrix, ybus_matrix_list, targets, 
-                 time_energy_coeffs, time_carbon_coeffs, sample_map, is_static, sequence_length=1):
+    def __init__(self, features, adjacency_matrix, ybus_matrices, targets, 
+                 time_energy_coeffs, time_carbon_coeffs, is_static, sequence_length=1):
         
         self.features = torch.from_numpy(features).float()
         self.adjacency = torch.from_numpy(adjacency_matrix).float()
-        self.ybus_matrices = [torch.from_numpy(m).cfloat() for m in ybus_matrix_list]
+        # --- START CORRECTION: Handle the concatenated Ybus array ---
+        self.ybus_matrices = torch.from_numpy(ybus_matrices).cfloat()
+        # --- END CORRECTION ---
         self.targets = torch.from_numpy(targets).float()
         self.time_energy_coeffs = torch.from_numpy(time_energy_coeffs).float()
         self.time_carbon_coeffs = torch.from_numpy(time_carbon_coeffs).float()
-        self.sample_map = sample_map
         
         self.is_static = is_static
         self.sequence_length = sequence_length
         self.num_samples = len(features)
         
     def __len__(self):
-        # --- FIX 1: Adjust length to prevent out-of-bounds access for the target ---
         # The last possible start_idx must leave room for one target time step after the sequence.
         return self.num_samples - self.sequence_length
 
     def __getitem__(self, idx):
-        # --- FIX 2: Select the correct single target time step ---
         if self.is_static:
             # For static models, input and target are the same single time step
             start_idx = idx
@@ -81,9 +80,9 @@ class PowerSystemDataset(Dataset):
             target_idx = end_idx
             target_tensor = self.targets[target_idx]
 
-        # Get coefficients corresponding to the target time step
-        ybus_idx = self.sample_map[target_idx]
-        ybus_for_item = self.ybus_matrices[ybus_idx]
+        # --- START CORRECTION: Select the Ybus matrix corresponding to the target time step ---
+        ybus_for_item = self.ybus_matrices[target_idx]
+        # --- END CORRECTION ---
         time_energy = self.time_energy_coeffs[target_idx]
         time_carbon = self.time_carbon_coeffs[target_idx]
 
@@ -114,6 +113,8 @@ def load_power_system_data(config, case_name):
     if not feature_files:
         raise FileNotFoundError(f"No data files found for pattern: '{case_name}_features_frac*.npy' in '{data_dir}'.")
     try:
+        # We assume the adjacency matrix is static across all scenarios for a given case
+        # and load it from the first available file.
         first_adj_path = feature_files[0].replace('features', 'adjacency')
         adj_object_array = np.load(first_adj_path, allow_pickle=True)
         edge_index = adj_object_array[0]
@@ -130,35 +131,43 @@ def load_power_system_data(config, case_name):
 
     all_features, all_ybus, all_targets = [], [], []
     all_energy_coeffs, all_carbon_coeffs = [], []
-    sample_map = []
-    for file_idx, f_path in enumerate(feature_files):
+    
+    for f_path in feature_files:
         print(f"  > Loading scenario from: {os.path.basename(f_path)}")
-        ybus_path = f_path.replace('features', 'ybus_matrix')
+        # --- START CORRECTION: Update filenames to match new saved data ---
+        ybus_path = f_path.replace('features', 'ybus_matrices')
+        # --- END CORRECTION ---
         targets_path = f_path.replace('features', 'targets')
         energy_path = f_path.replace('features', 'time_energy_coeffs').replace('.npy', '.txt')
         carbon_path = f_path.replace('features', 'time_carbon_coeffs').replace('.npy', '.txt')
         try:
-            features_chunk = np.load(f_path)
-            all_features.append(features_chunk)
-            all_ybus.append(np.load(ybus_path, allow_pickle=True))
+            all_features.append(np.load(f_path))
+            all_ybus.append(np.load(ybus_path))
             all_targets.append(np.load(targets_path))
             all_energy_coeffs.append(np.loadtxt(energy_path))
             all_carbon_coeffs.append(np.loadtxt(carbon_path))
-            sample_map.extend([file_idx] * len(features_chunk))
         except FileNotFoundError as e:
             print(f"\n[CRITICAL ERROR] A required data file is missing: {e.filename}")
+            print("Please ensure you have run 'gen_meas_best.py' to generate all necessary data files.")
             raise e
+
+    # --- START CORRECTION: Concatenate all data arrays along the time axis ---
     concatenated_features = np.concatenate(all_features, axis=0)
+    concatenated_ybus = np.concatenate(all_ybus, axis=0)
     concatenated_targets = np.concatenate(all_targets, axis=0)
     concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0)
     concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0)
+    # --- END CORRECTION ---
+
     print(f"[Data] All scenarios concatenated. Total samples: {concatenated_features.shape[0]}")
     normalizer = PowerSystemNormalizer(concatenated_features)
     features_norm = normalizer.normalize(concatenated_features)
     print("[Data] Full dataset loaded and normalized.")
-    return (features_norm, static_adjacency_matrix, all_ybus, concatenated_targets, 
-            concatenated_energy_coeffs, concatenated_carbon_coeffs, 
-            np.array(sample_map), normalizer)
+    
+    # --- START CORRECTION: Return concatenated Ybus array ---
+    return (features_norm, static_adjacency_matrix, concatenated_ybus, concatenated_targets, 
+            concatenated_energy_coeffs, concatenated_carbon_coeffs, normalizer)
+    # --- END CORRECTION ---
 
 def _collate_static(batch):
     # This collate function will now work correctly as targets are already single slices.
@@ -176,12 +185,12 @@ def _collate_sequential_padded(batch):
     collated_batch['targets'] = default_collate([item['targets'] for item in batch])
     return collated_batch
 
-def create_data_loaders(features, adjacency, ybus_list, targets, time_energy_coeffs, time_carbon_coeffs, sample_map, config, is_static):
+def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, config, is_static):
     seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
     dataset = PowerSystemDataset(
-        features, adjacency, ybus_list, targets, 
+        features, adjacency, ybus_matrices, targets, 
         time_energy_coeffs, time_carbon_coeffs, 
-        sample_map, is_static, seq_len
+        is_static, seq_len
     )
     dataset_size = len(dataset)
     train_size = int(config.TRAIN_SPLIT * dataset_size)

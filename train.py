@@ -233,7 +233,7 @@ def main():
         case_name = f"case{num_buses}"
         try:
             data_tuple = load_power_system_data(base_config, case_name)
-            _features, _adjacency, _ybus_list, _targets, _energy_coeffs, _carbon_coeffs, _sample_map, _normalizer = data_tuple
+            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _normalizer = data_tuple
         except FileNotFoundError as e:
             print(f"[CRITICAL ERROR] {e}"); continue
 
@@ -246,7 +246,10 @@ def main():
             uses_adaptive_graph = model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'PIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
 
             param_bounds = {'HIDDEN_DIM': model_config.HIDDEN_DIM_RANGE, 'NUM_GC_LAYERS': model_config.NUM_GC_LAYERS_RANGE}
-            if is_physics_informed: param_bounds['LAMBDA_P'] = (1.0, 50.0)
+            if is_physics_informed: 
+                # By adding these lines, we tell MoSoa to tune these values.
+                param_bounds['LAMBDA_P'] = (1.0, 50.0)
+                param_bounds['LAMBDA_V'] = (1.0, 50.0)
             if is_sequential: param_bounds.update({'SEQUENCE_LENGTH': model_config.SEQUENCE_LENGTH_RANGE, 'RNN_LAYERS': model_config.RNN_LAYERS_RANGE})
             if uses_adaptive_graph: param_bounds.update({'EMBEDDING_DIM': model_config.EMBEDDING_DIM_RANGE, 'PHI': model_config.PHI_RANGE})
 
@@ -267,7 +270,7 @@ def main():
 
                 try:
                     setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
-                    loaders = create_data_loaders(_features, _adjacency, _ybus_list, _targets, _energy_coeffs, _carbon_coeffs, _sample_map, run_config, is_static=(not is_sequential))
+                    loaders = create_data_loaders(_features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, run_config, is_static=(not is_sequential))
                     train_loader, val_loader, test_loader = loaders
 
                     model_kwargs = { 'feature_dim': model_config.FEATURE_DIM, 'hidden_dim': params['HIDDEN_DIM'], 'num_gc_layers': params['NUM_GC_LAYERS'],
@@ -308,7 +311,7 @@ def main():
             best_model_name = best_run['model_name']
             is_sequential_best = 'LSTM' in best_model_name.upper() or 'GRU' in best_model_name.upper()
 
-            loaders_best = create_data_loaders(_features, _adjacency, _ybus_list, _targets, _energy_coeffs, _carbon_coeffs, _sample_map, best_config, is_static=(not is_sequential_best))
+            loaders_best = create_data_loaders(_features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, best_config, is_static=(not is_sequential_best))
             _, _, test_loader_best = loaders_best
 
             best_model_config = model_config_map[best_model_name]

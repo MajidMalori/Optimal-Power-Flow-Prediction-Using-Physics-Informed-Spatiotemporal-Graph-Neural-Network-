@@ -16,7 +16,7 @@ import copy
 # =============================================================================
 CONFIG = {
     "test_cases": ["case33bw", "case57", "case118"],
-    "time_steps": 10000,
+    "time_steps": 100,
     "output_dir": "./data", # Save to a dedicated data folder
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 5.0,
@@ -100,6 +100,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     feature_matrix = np.zeros((time_steps, num_buses, 6))
     target_matrix = np.zeros((time_steps, num_buses, 6))
     adjacency_array = np.empty((time_steps,), dtype=object)
+    ybus_array = np.zeros((time_steps, num_buses, num_buses), dtype=np.complex128)
     time_energy_coeffs = np.zeros(time_steps)
     time_carbon_coeffs = np.zeros(time_steps)
     
@@ -108,11 +109,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     solar_gens = net.sgen[net.sgen.type == 'solar'] if 'type' in net.sgen.columns else pd.DataFrame()
     wind_gens = net.sgen[net.sgen.type == 'wind'] if 'type' in net.sgen.columns else pd.DataFrame()
     max_total_renewable_mw = (len(solar_gens) * config['max_solar_mw'] + len(wind_gens) * config['max_wind_mw']) or 1.0
-
-    try:
-        pp.runpp(net); ybus_matrix = net._ppc['internal']['Ybus'].toarray()
-    except Exception as e:
-        print(f"CRITICAL: Could not calculate initial Ybus matrix. Error: {e}"); raise
         
     dropped_line_idx = None
     with tqdm(total=time_steps, desc=f"Simulating {net.name}", unit="step") as pbar:
@@ -143,16 +139,42 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                     feature_matrix[t], target_matrix[t] = feature_matrix[t-1], target_matrix[t-1]
                     time_energy_coeffs[t], time_carbon_coeffs[t] = time_energy_coeffs[t-1], time_carbon_coeffs[t-1]
                     adjacency_array[t] = adjacency_array[t-1]
+                    ybus_array[t] = ybus_array[t-1]
                 pbar.update(1); continue
+            
+            # --- START STRICT CORRECTION: Aggregate by bus THEN re-order ---
+            # Get the mapping from internal (0 to N-1) to external bus indices
+            bus_lookup = net._pd2ppc_lookups['bus']
+            
+            # 1. Get bus voltages and angles (already indexed by bus) and re-order
+            vm_pu = net.res_bus.vm_pu.loc[bus_lookup].values
+            va_rad = np.deg2rad(net.res_bus.va_degree.loc[bus_lookup].values)
+            
+            # 2. Aggregate loads by bus, create a full vector, then re-order
+            load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+            load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+            p_load = load_p_by_bus.loc[bus_lookup].values
+            q_load = load_q_by_bus.loc[bus_lookup].values
+
+            # 3. Aggregate conventional generators by bus, create a full vector
+            gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+            gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+
+            # 4. Aggregate static generators by bus, create a full vector
+            sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+            sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+
+            # 5. Combine generator types and re-order
+            p_gen = (gen_p_by_bus + sgen_p_by_bus).loc[bus_lookup].values
+            q_gen = (gen_q_by_bus + sgen_q_by_bus).loc[bus_lookup].values
+            
+            # 6. The Ybus is already in the correct internal order
+            ybus_array[t] = net._ppc['internal']['Ybus'].toarray()
+            # --- END STRICT CORRECTION ---
             
             renewable_util_frac = current_total_renewable_p_mw / max_total_renewable_mw
             time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
             time_energy_coeffs[t] = config['max_energy_utilization_coeff'] - (net.res_line.pl_mw.sum() * config['loss_sensitivity'])
-            
-            vm_pu, va_rad = net.res_bus.vm_pu.values, np.deg2rad(net.res_bus.va_degree.values)
-            p_load, q_load = net.res_load.p_mw.reindex(net.bus.index, fill_value=0).values, net.res_load.q_mvar.reindex(net.bus.index, fill_value=0).values
-            p_gen = net.res_gen.p_mw.reindex(net.bus.index, fill_value=0).values + net.res_sgen.p_mw.reindex(net.bus.index, fill_value=0).values
-            q_gen = net.res_gen.q_mvar.reindex(net.bus.index, fill_value=0).values + net.res_sgen.q_mvar.reindex(net.bus.index, fill_value=0).values
             
             true_state = np.stack([vm_pu, va_rad, p_load, q_load, p_gen, q_gen], axis=1)
             target_matrix[t] = true_state
@@ -165,9 +187,8 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
             pbar.update(1)
             
     return { "features": feature_matrix, "targets": target_matrix, "adjacency": adjacency_array, 
-             "ybus_matrix": ybus_matrix, "time_energy_coeffs": time_energy_coeffs, "time_carbon_coeffs": time_carbon_coeffs }
+             "ybus_matrices": ybus_array, "time_energy_coeffs": time_energy_coeffs, "time_carbon_coeffs": time_carbon_coeffs }
 
-# --- START CORRECTION: Modified `save_data` to save coefficients as .txt files ---
 def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output_dir: str):
     """
     Saves generated data arrays. Multi-dimensional arrays are saved as binary .npy files,
@@ -189,7 +210,6 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
             filename = os.path.join(output_dir, base_filename + ".npy")
             print(f"Saving array data to '{filename}'...")
             np.save(filename, data, allow_pickle=True)
-# --- END CORRECTION ---
 
 # =============================================================================
 # SECTION 4: MAIN EXECUTION BLOCK
@@ -217,4 +237,4 @@ if __name__ == "__main__":
             print("\nSkipping to the next test case.")
             continue
             
-    print("\n\nAll data generation scenarios complete.")
+    print("\n\nAll data generation processes are complete.")

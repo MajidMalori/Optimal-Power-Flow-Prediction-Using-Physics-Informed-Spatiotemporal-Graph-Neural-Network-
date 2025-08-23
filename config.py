@@ -34,7 +34,7 @@ class Config:
     NUM_WORKERS = 0
     BATCH_SIZE = 64
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 500
+    NUM_EPOCHS = 50
     EARLY_STOPPING_PATIENCE = 25
     
     # Weights for the multi-objective score, normalized to sum to 1.0.
@@ -43,9 +43,12 @@ class Config:
     MOOPF_WEIGHT_CARBON = 1/3
 
     # Physical constraints for voltage and power
-    V_MIN = 0.95
-    V_MAX = 1.05
+    V_MIN = 0.90
+    V_MAX = 1.10
     S_MAX = 1.2
+    
+    LAMBDA_P = 10.0  # Weight for power balance violation in the loss function
+    LAMBDA_V = 10.0  # Weight for voltage limit violation in the
 
     # =============================================================================
     # Model-Specific Hyperparameter Search Ranges

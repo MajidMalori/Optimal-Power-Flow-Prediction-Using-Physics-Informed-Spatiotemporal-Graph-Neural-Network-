@@ -16,8 +16,9 @@ class PowerSystemTrainer(BaseTrainer):
 
     def _train_epoch(self, train_loader):
         self.model.train()
-        total_loss = 0
-        # The f-string here will now work because self.current_epoch is set by the BaseTrainer's train() method
+        # --- START CORRECTION: Initialize trackers for each loss component ---
+        epoch_losses = {'total': 0, 'mse': 0, 'power': 0, 'voltage': 0}
+        # --- END CORRECTION ---
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Train]")
 
         for batch in pbar:
@@ -39,19 +40,41 @@ class PowerSystemTrainer(BaseTrainer):
 
             outputs = self.model(features, adjacency_input)
             
-            loss = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
-            loss.backward()
+            loss_dict = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
+            total_loss = loss_dict['total_loss']
+
+            total_loss.backward()
             self.optimizer.step()
             
-            total_loss += loss.item()
-            pbar.set_postfix(train_loss=loss.item())
+           # Update running totals for the epoch
+            epoch_losses['total'] += total_loss.item()
+            epoch_losses['mse'] += loss_dict['mse'].item()
+            epoch_losses['power'] += loss_dict['power_violation'].item()
+            epoch_losses['voltage'] += loss_dict['voltage_violation'].item()
+            
+            # Update the progress bar with detailed metrics for the current batch
+            pbar.set_postfix(
+                mse=f"{loss_dict['mse'].item():.4f}", 
+                p_viol=f"{loss_dict['power_violation'].item():.4f}", 
+                v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
+            )
+            # --- END CORRECTION ---
 
-        return {'loss': total_loss / len(train_loader)}
+        # --- START CORRECTION: Return the average of all loss components ---
+        num_batches = len(train_loader)
+        return {
+            'loss': epoch_losses['total'] / num_batches,
+            'mse': epoch_losses['mse'] / num_batches,
+            'power_violation': epoch_losses['power'] / num_batches,
+            'voltage_violation': epoch_losses['voltage'] / num_batches
+        }
+        # --- END CORRECTION ---
 
     def _val_epoch(self, val_loader):
         self.model.eval()
-        total_loss = 0
-        # The f-string here will also work correctly
+        # --- START CORRECTION: Initialize trackers for each loss component ---
+        epoch_losses = {'total': 0, 'mse': 0, 'power': 0, 'voltage': 0}
+        # --- END CORRECTION ---
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
         with torch.no_grad():
@@ -72,8 +95,29 @@ class PowerSystemTrainer(BaseTrainer):
 
                 outputs = self.model(features, adjacency_input)
                 
-                loss = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
-                total_loss += loss.item()
-                pbar.set_postfix(val_loss=loss.item())
+                # --- START CORRECTION: Process the dictionary of losses ---
+                loss_dict = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
+                
+                # Update running totals for the epoch
+                epoch_losses['total'] += loss_dict['total_loss'].item()
+                epoch_losses['mse'] += loss_dict['mse'].item()
+                epoch_losses['power'] += loss_dict['power_violation'].item()
+                epoch_losses['voltage'] += loss_dict['voltage_violation'].item()
+
+                # Update the progress bar with detailed metrics for the current batch
+                pbar.set_postfix(
+                    mse=f"{loss_dict['mse'].item():.4f}", 
+                    p_viol=f"{loss_dict['power_violation'].item():.4f}", 
+                    v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
+                )
+                # --- END CORRECTION ---
         
-        return {'loss': total_loss / len(val_loader)}
+        # --- START CORRECTION: Return the average of all loss components ---
+        num_batches = len(val_loader)
+        return {
+            'loss': epoch_losses['total'] / num_batches,
+            'mse': epoch_losses['mse'] / num_batches,
+            'power_violation': epoch_losses['power'] / num_batches,
+            'voltage_violation': epoch_losses['voltage'] / num_batches
+        }
+        # --- END CORRECTION ---
