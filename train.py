@@ -61,21 +61,84 @@ def evaluate_model(model, test_loader, device, config, normalizer, is_sequential
 
     return compute_metrics(outputs_denorm, targets_denorm)
 
-def plot_training_history(history: dict, title: str, save_path: str, metric_name: str = 'Loss'):
-    """Plots and saves the convergence history."""
-    plt.style.use('ggplot'); plt.figure(figsize=(12, 7))
-    for key, values in history.items():
-        valid_values = [v for v in values if v is not None and v != float('inf')]
-        if not valid_values: continue
-        plt.plot(range(1, len(valid_values) + 1), valid_values, marker='o', linestyle='-', label=key)
-    plt.title(title, fontsize=16, weight='bold'); plt.xlabel('Iteration', fontsize=12)
-    plt.ylabel(metric_name, fontsize=12)
-    if any(valid_values): plt.legend(fontsize=10)
-    plt.grid(True); os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300); plt.close()
-    print(f"Convergence plot saved to {save_path}")
+# def plot_training_history(history: dict, title: str, save_path: str, metric_name: str = 'Loss'):
+#     """Plots and saves the convergence history."""
+#     plt.style.use('ggplot'); plt.figure(figsize=(12, 7))
+#     for key, values in history.items():
+#         valid_values = [v for v in values if v is not None and v != float('inf')]
+#         if not valid_values: continue
+#         plt.plot(range(1, len(valid_values) + 1), valid_values, marker='o', linestyle='-', label=key)
+#     plt.title(title, fontsize=16, weight='bold'); plt.xlabel('Iteration', fontsize=12)
+#     plt.ylabel(metric_name, fontsize=12)
+#     if any(valid_values): plt.legend(fontsize=10)
+#     plt.grid(True); os.makedirs(os.path.dirname(save_path), exist_ok=True)
+#     plt.savefig(save_path, dpi=300); plt.close()
+#     print(f"Convergence plot saved to {save_path}")
 
-def plot_renewable_impact(data_df: pd.DataFrame, y_col: str, y_label: str, title: str, save_path: str):
+def plot_training_history(history, model, config, run_name):
+    """
+    Plots and saves the training history with proper configuration naming.
+    Args:
+        history (dict): Dictionary containing training and validation metrics
+        model (nn.Module): The trained model instance
+        config (Config): Configuration object containing parameters
+    """
+    # Create a figure with 4 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Add configuration to main title
+    fig.suptitle(f'Training History\nConfiguration: {run_name}', fontsize=16)
+
+
+    # Plot total loss
+    axes[0, 0].plot(history['train_total_loss'], label='Train')
+    axes[0, 0].plot(history['val_total_loss'], label='Validation')
+    axes[0, 0].set_title('Total Loss')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
+    
+    # Plot MSE
+    axes[0, 1].plot(history['train_mse'], label='Train')
+    axes[0, 1].plot(history['val_mse'], label='Validation')
+    axes[0, 1].set_title('MSE Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('MSE')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
+    
+    # Plot power violation
+    axes[1, 0].plot(history['train_power_violation'], label='Train')
+    axes[1, 0].plot(history['val_power_violation'], label='Validation')
+    axes[1, 0].set_title('Power Balance Violation')
+    axes[1, 0].set_xlabel('Epoch')
+    axes[1, 0].set_ylabel('Violation')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True)
+    
+    # Plot voltage violation
+    axes[1, 1].plot(history['train_voltage_violation'], label='Train')
+    axes[1, 1].plot(history['val_voltage_violation'], label='Validation')
+    axes[1, 1].set_title('Voltage Violation')
+    axes[1, 1].set_xlabel('Epoch')
+    axes[1, 1].set_ylabel('Violation')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True)
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    # Save in configuration-specific directory
+    config_dir = os.path.join(
+        config.get_evaluation_path(f"{config.NUM_BUSES}bus/configurations/{run_name}/")
+    )
+    os.makedirs(config_dir, exist_ok=True)
+    save_path = os.path.join(config_dir, "training_history.png")
+    plt.savefig(save_path)
+    print(f"Training history plot saved to: {save_path}")
+    plt.close()
+
+def plot_renewable_impact(data_df: pd.DataFrame, y_col: str, y_label: str, title: str, save_dir: str, run_name: str):
     """Generates and saves a scatter plot of a given metric vs. the renewable energy fraction."""
     x_col = 'renewable_fraction'
     if data_df.empty or x_col not in data_df.columns or y_col not in data_df.columns:
@@ -103,12 +166,17 @@ def plot_renewable_impact(data_df: pd.DataFrame, y_col: str, y_label: str, title
     except (np.linalg.LinAlgError, ValueError) as e:
         print(f"Could not fit a trendline for the '{y_col}' renewable impact plot: {e}")
 
-    plt.title(title, fontsize=16, weight='bold')
+    plt.title(f"{title}\nConfiguration: {run_name}", fontsize=16, weight='bold')
     plt.xlabel('Renewable Energy Fraction', fontsize=12)
     plt.ylabel(y_label, fontsize=12)
     plt.legend(fontsize=10); plt.grid(True)
+
+    # Save in configuration-specific directory
+    plot_name = f'renewable_impact_{y_col}.png'
+    save_path = os.path.join(save_dir, "configurations", run_name, plot_name)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300); plt.close()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
     print(f"Renewable impact plot saved to {save_path}")
 
 def evaluate_moopf_objectives(model, data_loader, config, device, normalizer):
@@ -287,6 +355,60 @@ def main():
 
                     test_metrics = evaluate_model(model, test_loader, device, run_config, _normalizer, is_sequential)
                     model_specific_results.append({'run_name': run_name, 'model_name': model_name, **params, **test_metrics})
+
+                    # --- START MODIFICATION 1: Generate graphs for each run ---
+                    base_results_path_each = base_config.get_evaluation_path(f"{num_buses}bus/each_run/")  # Create a subdirectory for each run
+                    os.makedirs(base_results_path_each, exist_ok=True)  # Ensure the directory exists
+                    run_name_sanitized = run_name  # Use current run name
+
+                    # Evaluate MOOPF objectives and get renewable impact data
+                    model_to_eval = model  # Use the current model
+                    moopf_results, renewable_impact_data = evaluate_moopf_objectives(model_to_eval, test_loader, run_config, device, _normalizer)
+
+                    # Create base directory for this configuration
+                    config_dir = os.path.join(
+                        base_config.get_evaluation_path(f"{num_buses}bus/configurations/{run_name}/")
+                    )
+                    os.makedirs(config_dir, exist_ok=True)
+
+                    # Plot the impact of renewable energy fraction on multiple objectives
+                    plot_renewable_impact(
+                        data_df=renewable_impact_data,
+                        y_col='normalized_carbon_emissions',
+                        y_label='Normalized Carbon Emissions',
+                        title='Impact of Renewable Fraction on Carbon Emissions',
+                        save_dir=base_config.get_evaluation_path(f"{num_buses}bus/"),
+                        run_name=run_name_sanitized
+                    )
+
+                    plot_renewable_impact(
+                        data_df=renewable_impact_data,
+                        y_col='voltage_deviation',
+                        y_label='Normalized Voltage Deviation',
+                        title='Impact of Renewable Fraction on Voltage Deviation',
+                        save_dir=base_config.get_evaluation_path(f"{num_buses}bus/"),
+                        run_name=run_name_sanitized
+                    )
+
+                    plot_renewable_impact(
+                        data_df=renewable_impact_data,
+                        y_col='power_loss',
+                        y_label='Normalized Power Loss',
+                        title='Impact of Renewable Fraction on Power Loss',
+                        save_dir=base_config.get_evaluation_path(f"{num_buses}bus/"),
+                        run_name=run_name_sanitized
+                    )
+
+                    # Plot the history
+                    training_history = trainer.get_training_history()
+                    plot_training_history(
+                        history=training_history,
+                        model=model,
+                        config=run_config,
+                        run_name=run_name
+                    )
+                    # --- END MODIFICATION 1 ---
+
                     return test_metrics['mse']
                 except Exception as e:
                     logging.error(f"Run {run_name} failed: {e}", exc_info=True); return float('inf')
@@ -343,7 +465,10 @@ def main():
             moopf_results.to_csv(os.path.join(base_results_path, f"moopf_{run_name_sanitized}.csv"), index=False)
             renewable_impact_data.to_csv(os.path.join(base_results_path, f"renewable_impact_data_{run_name_sanitized}.csv"), index=False)
 
-            # --- START: MODIFICATION ---
+            # --- START MODIFICATION 2: Generate graphs for the best run (original code) ---
+            base_results_path_best = base_config.get_evaluation_path(f"{num_buses}bus/")  # Original path for best run
+            run_name_sanitized_best = best_run['run_name']
+
             # Plot the impact of renewable energy fraction on multiple objectives
             # Plot for Carbon Emissions (using NORMALIZED value)
             plot_renewable_impact(
@@ -351,9 +476,8 @@ def main():
                 y_col='normalized_carbon_emissions',
                 y_label='Normalized Carbon Emissions',
                 title='Impact of Renewable Fraction on Carbon Emissions',
-                save_path=os.path.join(base_results_path, f'renew_impact_emissions_{run_name_sanitized}.png')
+                save_path=os.path.join(base_results_path_best, f'renew_impact_emissions_{run_name_sanitized_best}_BEST.png')  # Add "_BEST" to filename
             )
-            # --- END: MODIFICATION ---
 
             # Plot for Voltage Deviation
             plot_renewable_impact(
@@ -361,7 +485,7 @@ def main():
                 y_col='voltage_deviation',
                 y_label='Normalized Voltage Deviation',
                 title='Impact of Renewable Fraction on Voltage Deviation',
-                save_path=os.path.join(base_results_path, f'renew_impact_vdev_{run_name_sanitized}.png')
+                save_path=os.path.join(base_results_path_best, f'renew_impact_vdev_{run_name_sanitized_best}_BEST.png')  # Add "_BEST" to filename
             )
 
             # Plot for Power Loss
@@ -370,8 +494,10 @@ def main():
                 y_col='power_loss',
                 y_label='Normalized Power Loss',
                 title='Impact of Renewable Fraction on Power Loss',
-                save_path=os.path.join(base_results_path, f'renew_impact_ploss_{run_name_sanitized}.png')
+                save_path=os.path.join(base_results_path_best, f'renew_impact_ploss_{run_name_sanitized_best}_BEST.png')  # Add "_BEST" to filename
             )
+
+            # --- END MODIFICATION 2 ---
 
         if not all_bus_system_results: print(f"\n--- No successful runs for {num_buses}-bus system. ---"); continue
 

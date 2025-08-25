@@ -125,6 +125,18 @@ class PowerSystemLoss(nn.Module):
         q_inj_pu = q_inj_mvar / self.s_base_mva
         
         return p_inj_pu, q_inj_pu
+    
+    def _get_power_injections(self, state: torch.Tensor):
+        """Extracts power injections from the state tensor in original units (MW, MVAr)."""
+        p_load_mw = state[..., 2]
+        q_load_mvar = state[..., 3]
+        p_gen_mw = state[..., 4]
+        q_gen_mvar = state[..., 5]
+        
+        p_inj_mw = p_gen_mw - p_load_mw
+        q_inj_mvar = q_gen_mvar - q_load_mvar
+        
+        return p_inj_mw, q_inj_mvar, p_load_mw, q_load_mvar
 
     # --- START CORRECTION: This function now works with a batch of Ybus matrices ---
     def _compute_power_balance_violation(self, state: torch.Tensor, ybus_batch: torch.Tensor) -> torch.Tensor:
@@ -155,12 +167,14 @@ class PowerSystemLoss(nn.Module):
 
     def _compute_normalized_power_balance_violation(self, state: torch.Tensor, Ybus: torch.Tensor, epsilon: float = 1e-9) -> torch.Tensor:
         """Computes power balance violation, normalized by the total load for MOOPF evaluation."""
-        Vm, Va, P_inj, Q_inj, P_load, Q_load = self._get_power_injections(state)
+        p_inj_mw, q_inj_mvar, p_load_mw, q_load_mvar = self._get_power_injections(state)
+        Vm = state[..., 0]
+        Va = state[..., 1]
         V = Vm * torch.exp(1j * Va)
         I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)
         S_calc = V * torch.conj(I)
-        squared_mismatch = (P_inj - S_calc.real)**2 + (Q_inj - S_calc.imag)**2
-        total_load_s_squared = torch.sum(P_load**2 + Q_load**2, dim=1)
+        squared_mismatch = (p_inj_mw - S_calc.real)**2 + (q_inj_mvar - S_calc.imag)**2
+        total_load_s_squared = torch.sum(p_load_mw**2 + q_load_mvar**2, dim=1)
         return torch.mean(squared_mismatch, dim=1) / (total_load_s_squared + epsilon)
 
     def _compute_normalized_voltage_limit_violation(self, state: torch.Tensor) -> torch.Tensor:

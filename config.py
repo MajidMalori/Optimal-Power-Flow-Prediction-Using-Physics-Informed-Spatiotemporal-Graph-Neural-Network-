@@ -27,14 +27,14 @@ class Config:
     # Global Training & System Parameters
     # =============================================================================
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    NUM_BUSES = [33, 57, 118]
+    NUM_BUSES = [57] #[33, 57, 118]
     SEED = 42
     TRAIN_SPLIT = 0.7
     VAL_SPLIT = 0.15
     NUM_WORKERS = 0
     BATCH_SIZE = 64
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 50
+    NUM_EPOCHS = 100
     EARLY_STOPPING_PATIENCE = 25
     
     # Weights for the multi-objective score, normalized to sum to 1.0.

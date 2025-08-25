@@ -3,6 +3,7 @@
 import torch
 from abc import ABC, abstractmethod
 import os
+import matplotlib.pyplot as plt
 
 class BaseTrainer(ABC):
     """
@@ -21,6 +22,14 @@ class BaseTrainer(ABC):
         self.current_epoch = 0
         self.best_val_loss = float('inf')
         self.epochs_no_improve = 0
+
+        # Add history tracking
+        self.history = {
+            'train_total_loss': [], 'train_mse': [], 
+            'train_power_violation': [], 'train_voltage_violation': [],
+            'val_total_loss': [], 'val_mse': [], 
+            'val_power_violation': [], 'val_voltage_violation': []
+        }
 
     @abstractmethod
     def _train_epoch(self, train_loader):
@@ -44,9 +53,21 @@ class BaseTrainer(ABC):
             
             # Call the specific implementation for one training epoch
             train_metrics = self._train_epoch(train_loader)
+
+            # Store training metrics
+            self.history['train_total_loss'].append(train_metrics['loss'])
+            self.history['train_mse'].append(train_metrics['mse'])
+            self.history['train_power_violation'].append(train_metrics['power_violation'])
+            self.history['train_voltage_violation'].append(train_metrics['voltage_violation'])
             
             # Call the specific implementation for one validation epoch
             val_metrics = self._val_epoch(val_loader)
+
+            # Store validation metrics
+            self.history['val_total_loss'].append(val_metrics['loss'])
+            self.history['val_mse'].append(val_metrics['mse'])
+            self.history['val_power_violation'].append(val_metrics['power_violation'])
+            self.history['val_voltage_violation'].append(val_metrics['voltage_violation'])
 
             print(f"Epoch {epoch}/{self.config.NUM_EPOCHS} | "
                   f"Train Loss: {train_metrics.get('loss', float('nan')):.4f} | "
@@ -74,3 +95,9 @@ class BaseTrainer(ABC):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             torch.save(self.model.state_dict(), path)
             print(f"Checkpoint saved to {path}")
+
+    def get_training_history(self):
+        """Return the training history dictionary."""
+        return self.history
+
+    

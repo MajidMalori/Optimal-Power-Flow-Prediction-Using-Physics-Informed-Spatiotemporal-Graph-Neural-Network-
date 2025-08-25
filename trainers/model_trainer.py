@@ -17,7 +17,7 @@ class PowerSystemTrainer(BaseTrainer):
     def _train_epoch(self, train_loader):
         self.model.train()
         # --- START CORRECTION: Initialize trackers for each loss component ---
-        epoch_losses = {'total': 0, 'mse': 0, 'power': 0, 'voltage': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'power_violation': 0, 'voltage_violation': 0}
         # --- END CORRECTION ---
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Train]")
 
@@ -47,11 +47,11 @@ class PowerSystemTrainer(BaseTrainer):
             self.optimizer.step()
             
            # Update running totals for the epoch
-            epoch_losses['total'] += total_loss.item()
+            epoch_losses['total_loss'] += total_loss.item()
             epoch_losses['mse'] += loss_dict['mse'].item()
-            epoch_losses['power'] += loss_dict['power_violation'].item()
-            epoch_losses['voltage'] += loss_dict['voltage_violation'].item()
-            
+            epoch_losses['power_violation'] += loss_dict['power_violation'].item()
+            epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
+
             # Update the progress bar with detailed metrics for the current batch
             pbar.set_postfix(
                 mse=f"{loss_dict['mse'].item():.4f}", 
@@ -63,17 +63,17 @@ class PowerSystemTrainer(BaseTrainer):
         # --- START CORRECTION: Return the average of all loss components ---
         num_batches = len(train_loader)
         return {
-            'loss': epoch_losses['total'] / num_batches,
+            'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
-            'power_violation': epoch_losses['power'] / num_batches,
-            'voltage_violation': epoch_losses['voltage'] / num_batches
+            'power_violation': epoch_losses['power_violation'] / num_batches,
+            'voltage_violation': epoch_losses['voltage_violation'] / num_batches
         }
         # --- END CORRECTION ---
 
     def _val_epoch(self, val_loader):
         self.model.eval()
         # --- START CORRECTION: Initialize trackers for each loss component ---
-        epoch_losses = {'total': 0, 'mse': 0, 'power': 0, 'voltage': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'power_violation': 0, 'voltage_violation': 0}
         # --- END CORRECTION ---
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
@@ -99,10 +99,10 @@ class PowerSystemTrainer(BaseTrainer):
                 loss_dict = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
                 
                 # Update running totals for the epoch
-                epoch_losses['total'] += loss_dict['total_loss'].item()
+                epoch_losses['total_loss'] += loss_dict['total_loss'].item()
                 epoch_losses['mse'] += loss_dict['mse'].item()
-                epoch_losses['power'] += loss_dict['power_violation'].item()
-                epoch_losses['voltage'] += loss_dict['voltage_violation'].item()
+                epoch_losses['power_violation'] += loss_dict['power_violation'].item()
+                epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
 
                 # Update the progress bar with detailed metrics for the current batch
                 pbar.set_postfix(
@@ -115,9 +115,9 @@ class PowerSystemTrainer(BaseTrainer):
         # --- START CORRECTION: Return the average of all loss components ---
         num_batches = len(val_loader)
         return {
-            'loss': epoch_losses['total'] / num_batches,
+            'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
-            'power_violation': epoch_losses['power'] / num_batches,
-            'voltage_violation': epoch_losses['voltage'] / num_batches
+            'power_violation': epoch_losses['power_violation'] / num_batches,
+            'voltage_violation': epoch_losses['voltage_violation'] / num_batches
         }
         # --- END CORRECTION ---
