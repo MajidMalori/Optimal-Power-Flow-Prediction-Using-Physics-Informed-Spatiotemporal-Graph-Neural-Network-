@@ -14,8 +14,9 @@ class GCN(BaseModel):
                  num_buses: int = 118,
                  dropout: float = 0.1):
         
+        output_dim = num_buses * 6  # 6 features per bus
         super().__init__(
-            feature_dim=feature_dim, hidden_dim=hidden_dim,
+            feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim,
             num_gc_layers=num_gc_layers, num_buses=num_buses, dropout=dropout
         )
         

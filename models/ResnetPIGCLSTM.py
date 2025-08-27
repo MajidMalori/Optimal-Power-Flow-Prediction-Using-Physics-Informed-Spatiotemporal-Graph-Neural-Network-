@@ -22,21 +22,19 @@ class ResnetPIGCLSTM(BaseModel):
 
         self.phi = phi
         self.embedding_dim = embedding_dim
-        self.rnn_layers = rnn_layers
-        self.num_buses = num_buses
-        self.hidden_dim = hidden_dim
+        # Note: rnn_layers, num_buses, hidden_dim are stored in BaseModel
 
         # Learnable node embeddings to create an adaptive graph
-        self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        self.node_embedding2 = nn.Parameter(torch.randn(num_buses, embedding_dim))
+        self.node_embedding1 = nn.Parameter(torch.randn(self.num_buses, embedding_dim))
+        self.node_embedding2 = nn.Parameter(torch.randn(self.num_buses, embedding_dim))
 
         # Graph Convolutional layers
-        self.gc_layers = nn.ModuleList([nn.Linear(feature_dim, hidden_dim)])
-        for _ in range(num_gc_layers - 1):
-            self.gc_layers.append(nn.Linear(hidden_dim, hidden_dim))
+        self.gc_layers = nn.ModuleList([nn.Linear(feature_dim, self.hidden_dim)])
+        for _ in range(self.num_gc_layers - 1):
+            self.gc_layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
 
         # LSTM layers with residual connections and scalable sizing
-        flattened_size = hidden_dim * num_buses  
+        flattened_size = self.hidden_dim * self.num_buses  
         # Use a reduced LSTM hidden size for larger systems to prevent memory explosion
         lstm_hidden_size = min(flattened_size, max(256, flattened_size // 2))
         
@@ -44,13 +42,13 @@ class ResnetPIGCLSTM(BaseModel):
         self.lstm_layer_norms = nn.ModuleList()
         self.lstm_projections = nn.ModuleList()  # Project between different sizes
 
-        for _ in range(rnn_layers):
+        for _ in range(self.rnn_layers):
             self.residual_lstms.append(nn.LSTM(flattened_size, lstm_hidden_size, num_layers=1, batch_first=True))
             self.lstm_projections.append(nn.Linear(lstm_hidden_size, flattened_size))  # Project back to original size
             self.lstm_layer_norms.append(nn.LayerNorm(flattened_size))
 
-        self.output_transform = nn.Linear(hidden_dim, feature_dim)
-        self.dropout_layer = nn.Dropout(dropout)
+        self.output_transform = nn.Linear(self.hidden_dim, feature_dim)
+        self.dropout_layer = nn.Dropout(self.dropout)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
         """

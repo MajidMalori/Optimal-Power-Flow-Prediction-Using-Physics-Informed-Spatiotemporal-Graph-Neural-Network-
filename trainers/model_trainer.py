@@ -10,9 +10,10 @@ class PowerSystemTrainer(BaseTrainer):
     Specific trainer for power system models. Implements the logic for a single
     training and validation epoch.
     """
-    def __init__(self, model, criterion, optimizer, config, device):
+    def __init__(self, model, criterion, optimizer, config, device, is_physics_informed=True):
         # The __init__ from BaseTrainer is called, which sets up self.current_epoch
         super().__init__(model, criterion, optimizer, config, device)
+        self.is_physics_informed = is_physics_informed
 
     def _train_epoch(self, train_loader):
         self.model.train()
@@ -27,8 +28,6 @@ class PowerSystemTrainer(BaseTrainer):
             features = batch['features'].to(self.device)
             targets = batch['targets'].to(self.device)
             ybus = batch['ybus_matrix'].to(self.device)
-            time_carbon = batch['time_carbon_coeffs'].to(self.device)
-            time_energy = batch['time_energy_coeffs'].to(self.device)
             
             adjacency_batch = batch['adjacency']
             if isinstance(adjacency_batch, list):
@@ -40,7 +39,7 @@ class PowerSystemTrainer(BaseTrainer):
 
             outputs = self.model(features, adjacency_input)
             
-            loss_dict = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
+            loss_dict = self.criterion(outputs, targets, ybus)
             total_loss = loss_dict['total_loss']
 
             total_loss.backward()
@@ -53,11 +52,16 @@ class PowerSystemTrainer(BaseTrainer):
             epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
 
             # Update the progress bar with detailed metrics for the current batch
-            pbar.set_postfix(
-                mse=f"{loss_dict['mse'].item():.4f}", 
-                p_viol=f"{loss_dict['power_violation'].item():.4f}", 
-                v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
-            )
+            if self.is_physics_informed:
+                pbar.set_postfix(
+                    mse=f"{loss_dict['mse'].item():.4f}", 
+                    p_viol=f"{loss_dict['power_violation'].item():.4f}", 
+                    v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
+                )
+            else:
+                pbar.set_postfix(
+                    mse=f"{loss_dict['mse'].item():.4f}"
+                )
             # --- END CORRECTION ---
 
         # --- START CORRECTION: Return the average of all loss components ---
@@ -82,8 +86,6 @@ class PowerSystemTrainer(BaseTrainer):
                 features = batch['features'].to(self.device)
                 targets = batch['targets'].to(self.device)
                 ybus = batch['ybus_matrix'].to(self.device)
-                time_carbon = batch['time_carbon_coeffs'].to(self.device)
-                time_energy = batch['time_energy_coeffs'].to(self.device)
                 
                 adjacency_batch = batch['adjacency']
                 if isinstance(adjacency_batch, list):
@@ -96,7 +98,7 @@ class PowerSystemTrainer(BaseTrainer):
                 outputs = self.model(features, adjacency_input)
                 
                 # --- START CORRECTION: Process the dictionary of losses ---
-                loss_dict = self.criterion(outputs, targets, ybus, time_carbon, time_energy)
+                loss_dict = self.criterion(outputs, targets, ybus)
                 
                 # Update running totals for the epoch
                 epoch_losses['total_loss'] += loss_dict['total_loss'].item()
@@ -105,11 +107,16 @@ class PowerSystemTrainer(BaseTrainer):
                 epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
 
                 # Update the progress bar with detailed metrics for the current batch
-                pbar.set_postfix(
-                    mse=f"{loss_dict['mse'].item():.4f}", 
-                    p_viol=f"{loss_dict['power_violation'].item():.4f}", 
-                    v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
-                )
+                if self.is_physics_informed:
+                    pbar.set_postfix(
+                        mse=f"{loss_dict['mse'].item():.4f}", 
+                        p_viol=f"{loss_dict['power_violation'].item():.4f}", 
+                        v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
+                    )
+                else:
+                    pbar.set_postfix(
+                        mse=f"{loss_dict['mse'].item():.4f}"
+                    )
                 # --- END CORRECTION ---
         
         # --- START CORRECTION: Return the average of all loss components ---

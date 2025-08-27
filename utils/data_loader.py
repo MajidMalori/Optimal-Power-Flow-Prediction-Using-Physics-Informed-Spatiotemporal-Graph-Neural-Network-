@@ -26,6 +26,15 @@ class PowerSystemNormalizer:
         elif data.dim() == 2:
             if num_buses <= 0: raise ValueError("num_buses must be positive for 2D tensor denormalization.")
             num_output_features = data.shape[-1] // num_buses
+            if num_output_features == 0:
+                total_features = data.shape[-1]
+                expected_features_per_bus = 6
+                if total_features % expected_features_per_bus == 0:
+                    actual_num_buses = total_features // expected_features_per_bus
+                    raise ValueError(f"Shape mismatch: Expected {num_buses} buses but model output suggests {actual_num_buses} buses. "
+                                   f"Data shape: {data.shape}. This may indicate a model architecture issue.")
+                else:
+                    raise ValueError(f"Invalid tensor shape: {data.shape} for {num_buses} buses. Cannot determine features per bus.")
             data_reshaped = data.view(-1, num_buses, num_output_features)
         else:
             raise ValueError(f"denormalize expects a 2D or 3D tensor, but got {data.dim()}D.")

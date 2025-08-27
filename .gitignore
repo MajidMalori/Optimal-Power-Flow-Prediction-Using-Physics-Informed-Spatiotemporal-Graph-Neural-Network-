@@ -18,6 +18,17 @@ debug_*.py
 train_adaptive*.py
 comprehensive_evaluation.py
 train_scalable.py
+test_physics_loss.py
+maxsea.py
+
+# JSON files (configurations, results, etc.)
+*.json
+
+# Runs directory (automatically created by some frameworks)
+runs/
+
+# Checkpoints directory (legacy - models now saved in model_evaluation/)
+checkpoints/
 
 # Model evaluation results
 model_evaluation/

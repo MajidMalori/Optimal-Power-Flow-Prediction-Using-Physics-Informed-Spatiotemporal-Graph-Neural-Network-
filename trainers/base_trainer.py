@@ -2,8 +2,6 @@
 
 import torch
 from abc import ABC, abstractmethod
-import os
-import matplotlib.pyplot as plt
 
 class BaseTrainer(ABC):
     """

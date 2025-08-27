@@ -21,7 +21,6 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
     bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]  # Standard fractions from gen_meas_best.py
     
-    required_files = []
     missing_files = []
     
     data_dir = "./data"
@@ -44,7 +43,6 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
             for file_type in required_file_types:
                 filename = base_name.format(file_type=file_type.split('.')[0]) + '.' + file_type.split('.')[1]
                 filepath = os.path.join(data_dir, filename)
-                required_files.append(filepath)
                 
                 if not os.path.exists(filepath):
                     missing_files.append(filepath)

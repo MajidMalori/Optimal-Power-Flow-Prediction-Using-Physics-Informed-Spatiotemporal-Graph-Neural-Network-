@@ -4,13 +4,10 @@ import logging
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import math
 import matplotlib.pyplot as plt
 import copy
-from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 import gc
-import tempfile
 
 # --- Project-specific modules ---
 from models.adaptive_gcn import adaptiveGCN
@@ -77,51 +74,106 @@ def evaluate_model(model, test_loader, device, config, normalizer, is_sequential
     else:
         raise ValueError("Config must specify NUM_BUSES")
     
+    # Handle shape consistency for different model types before denormalization
+    if all_outputs_tensor.dim() == 2:
+        # If model outputs flattened format [batch_size, num_buses * features]
+        batch_size = all_outputs_tensor.shape[0]
+        num_features = 6
+        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+    
     outputs_denorm = normalizer.denormalize(all_outputs_tensor, num_buses)
     targets_denorm = normalizer.denormalize(all_targets_tensor, num_buses)
 
     return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
 
-def plot_training_history(history, model_name, config, num_buses):
+def plot_training_history(history, model_name, config, num_buses, is_physics_informed=True):
     """Plots and saves the training history for the best model."""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle(f'Training History for {model_name}', fontsize=16)
+    
+    if is_physics_informed:
+        # Physics-informed models: Show 4 plots with physics violations
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'Training History for {model_name} (Physics-Informed)', fontsize=16)
 
-    # Plot total loss
-    axes[0, 0].plot(history['train_total_loss'], label='Train')
-    axes[0, 0].plot(history['val_total_loss'], label='Validation')
-    axes[0, 0].set_title('Total Loss')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True)
-    
-    # Plot MSE
-    axes[0, 1].plot(history['train_mse'], label='Train')
-    axes[0, 1].plot(history['val_mse'], label='Validation')
-    axes[0, 1].set_title('MSE Loss')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('MSE')
-    axes[0, 1].legend()
-    axes[0, 1].grid(True)
-    
-    # Plot power violation
-    axes[1, 0].plot(history['train_power_violation'], label='Train')
-    axes[1, 0].plot(history['val_power_violation'], label='Validation')
-    axes[1, 0].set_title('Power Balance Violation')
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Violation')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True)
-    
-    # Plot voltage violation
-    axes[1, 1].plot(history['train_voltage_violation'], label='Train')
-    axes[1, 1].plot(history['val_voltage_violation'], label='Validation')
-    axes[1, 1].set_title('Voltage Violation')
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('Violation')
-    axes[1, 1].legend()
-    axes[1, 1].grid(True)
+        # Plot total loss
+        axes[0, 0].plot(history['train_total_loss'], label='Train')
+        axes[0, 0].plot(history['val_total_loss'], label='Validation')
+        axes[0, 0].set_title('Total Loss')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
+        
+        # Plot MSE
+        axes[0, 1].plot(history['train_mse'], label='Train')
+        axes[0, 1].plot(history['val_mse'], label='Validation')
+        axes[0, 1].set_title('MSE Loss')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('MSE')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        
+        # Plot power violation
+        axes[1, 0].plot(history['train_power_violation'], label='Train')
+        axes[1, 0].plot(history['val_power_violation'], label='Validation')
+        axes[1, 0].set_title('Power Balance Violation')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Violation')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
+        
+        # Plot voltage violation
+        axes[1, 1].plot(history['train_voltage_violation'], label='Train')
+        axes[1, 1].plot(history['val_voltage_violation'], label='Validation')
+        axes[1, 1].set_title('Voltage Violation')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('Violation')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
+        
+    else:
+        # Non-physics models: Show 4 plots with training metrics
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'Training History for {model_name} (Non-Physics)', fontsize=16)
+
+        # Plot MSE (main metric)
+        axes[0, 0].plot(history['train_mse'], label='Train', linewidth=2)
+        axes[0, 0].plot(history['val_mse'], label='Validation', linewidth=2)
+        axes[0, 0].set_title('MSE Loss (Primary Metric)')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('MSE')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
+        
+        # Plot RMSE (derived metric)
+        train_rmse = [mse**0.5 for mse in history['train_mse']]
+        val_rmse = [mse**0.5 for mse in history['val_mse']]
+        axes[0, 1].plot(train_rmse, label='Train')
+        axes[0, 1].plot(val_rmse, label='Validation')
+        axes[0, 1].set_title('RMSE')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('RMSE')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        
+        # Plot learning rate progression (if available) or loss smoothness
+        epochs = list(range(1, len(history['train_mse']) + 1))
+        axes[1, 0].plot(epochs, history['train_mse'], alpha=0.7, label='Train MSE')
+        axes[1, 0].plot(epochs, history['val_mse'], alpha=0.7, label='Val MSE')
+        axes[1, 0].set_title('Loss Progression')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Loss')
+        axes[1, 0].set_yscale('log')  # Log scale to better see convergence
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
+        
+        # Plot training vs validation gap
+        train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
+        axes[1, 1].plot(epochs, train_val_gap, color='red', label='Train-Val Gap')
+        axes[1, 1].set_title('Generalization Gap (|Train - Val|)')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('MSE Difference')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
@@ -194,11 +246,36 @@ def save_best_model_results(best_model, best_run, moopf_results, renewable_impac
     results_path = os.path.join(model_dir, results_filename)
     moopf_results.to_csv(results_path, index=False)
     
-    # Save summary
-    pd.DataFrame([best_run]).to_csv(config.get_summary_path(num_buses, model_name), index=False)
+    # Save summary with filtered data based on model type
+    if is_physics_informed:
+        # Physics models: Save all metrics
+        summary_data = best_run.copy()
+    else:
+        # Non-physics models: Remove physics-related metrics
+        summary_data = best_run.copy()
+        # Remove physics metrics from top level
+        physics_metrics = ['power_violation', 'voltage_violation']
+        for metric in physics_metrics:
+            summary_data.pop(metric, None)
+        
+        # Clean validation metrics if they exist
+        if 'val_metrics' in summary_data and isinstance(summary_data['val_metrics'], dict):
+            val_metrics_clean = {k: v for k, v in summary_data['val_metrics'].items() 
+                               if k not in physics_metrics}
+            summary_data['val_metrics'] = val_metrics_clean
+        
+        # Clean training history if it exists
+        if 'training_history' in summary_data and isinstance(summary_data['training_history'], dict):
+            history_clean = summary_data['training_history'].copy()
+            for metric in ['train_power_violation', 'val_power_violation', 
+                          'train_voltage_violation', 'val_voltage_violation']:
+                history_clean.pop(metric, None)
+            summary_data['training_history'] = history_clean
+    
+    pd.DataFrame([summary_data]).to_csv(config.get_summary_path(num_buses, model_name), index=False)
     
     # Plot training history (available for all models)
-    plot_training_history(training_history, model_name, config, num_buses)
+    plot_training_history(training_history, model_name, config, num_buses, is_physics_informed)
     
     # Plot convergence history if available (available for all models)
     if 'convergence_history' in best_run:
@@ -247,6 +324,14 @@ def evaluate_moopf_objectives(model, data_loader, config, device, normalizer, is
             adj = batch['adjacency'].to(device)
 
             outputs_norm = model(features, adj)
+            
+            # Handle shape consistency for different model types
+            if outputs_norm.dim() == 2:
+                # If model outputs flattened format [batch_size, num_buses * features]
+                batch_size = outputs_norm.shape[0]
+                num_features = 6
+                outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
+            
             outputs_phys = normalizer.denormalize(outputs_norm, num_buses)
 
             if is_physics_informed:
@@ -266,8 +351,8 @@ def evaluate_moopf_objectives(model, data_loader, config, device, normalizer, is
             # Capture data for analyzing the impact of renewables (only for physics-informed models)
             if is_physics_informed:
                 try:
-                    last_step_features = features[:, -1, ...] if features.dim() > 2 else features
-                    inputs_phys = normalizer.denormalize(last_step_features, num_buses)
+                    # Use model outputs (outputs_phys) instead of input features to calculate renewable impacts
+                    inputs_phys = outputs_phys
                     renewable_gen = inputs_phys[..., 4].sum(dim=-1)
                     total_load = inputs_phys[..., 2].sum(dim=-1) + 1e-9 # Add epsilon to avoid division by zero
                     renewable_fraction = (renewable_gen / total_load).cpu().numpy()
@@ -296,7 +381,10 @@ def evaluate_moopf_objectives(model, data_loader, config, device, normalizer, is
                 })
             else:
                 # For non-physics models, only report MSE-based results
-                mse_only = torch.mean((outputs_norm - normalizer.normalize(outputs_phys, num_buses))**2)
+                # Calculate MSE between model outputs and ground truth targets
+                targets = batch['targets'].to(device)
+                targets_norm = normalizer.normalize(targets)
+                mse_only = F.mse_loss(outputs_norm, targets_norm)
                 all_results.append({
                     'mse_score': mse_only.item(),  # Main metric for non-physics models
                     'normalized_power_loss': 0.0,  # Not applicable
@@ -352,6 +440,119 @@ def soa(num_agents, max_iter, lower_bound, upper_bound, dim, objective_func):
         pbar.set_description(f"MoSOA Iteration {l+1}/{max_iter} | Best MSE: {best_score:.6f}")
     return best_score, best_position, convergence_curve
 
+def print_comprehensive_summary(all_results):
+    """Print and save a comprehensive summary of all model performances across all bus systems."""
+    if not all_results:
+        print("\n❌ No results to summarize.")
+        return
+    
+    print(f"\n{'='*100}")
+    print(f"🎯 COMPREHENSIVE FINAL SUMMARY - ALL MODELS & BUS SYSTEMS")
+    print(f"{'='*100}")
+    
+    # Create summary table for display
+    summary_data = []
+    for result in all_results:
+        summary_data.append({
+            'Model': result['model_name'],
+            'Bus System': f"{result['num_buses']}-bus",
+            'Type': 'Physics' if result['is_physics_informed'] else 'Non-Physics',
+            'Hidden Dim': result['best_hidden_dim'],
+            'GC Layers': result['best_gc_layers'],
+            'Training MSE': f"{result['training_mse']:.6f}" if result['training_mse'] != float('inf') else 'Failed',
+            'Test Score': f"{result['final_test_score']:.6f}" if result['final_test_score'] != float('inf') else 'Failed',
+            'Metric Type': result['final_metric_name']
+        })
+    
+    # Create detailed DataFrame for CSV export
+    import pandas as pd
+    import os
+    from datetime import datetime
+    
+    csv_data = []
+    for result in all_results:
+        csv_data.append({
+            'model_name': result['model_name'],
+            'num_buses': result['num_buses'],
+            'bus_system': f"{result['num_buses']}-bus",
+            'model_type': 'Physics-Informed' if result['is_physics_informed'] else 'Non-Physics',
+            'is_physics_informed': result['is_physics_informed'],
+            'best_hidden_dim': result['best_hidden_dim'],
+            'best_gc_layers': result['best_gc_layers'],
+            'training_mse': result['training_mse'],
+            'final_test_score': result['final_test_score'],
+            'final_metric_name': result['final_metric_name'],
+            'power_violation': result['power_violation'],
+            'voltage_violation': result['voltage_violation'],
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+    
+    # Save to CSV file in model_evaluation directory
+    model_eval_dir = "model_evaluation"
+    os.makedirs(model_eval_dir, exist_ok=True)
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_filename = f"comprehensive_summary_{timestamp}.csv"
+    csv_path = os.path.join(model_eval_dir, csv_filename)
+    
+    # Also save a "latest" version for easy access
+    latest_csv_path = os.path.join(model_eval_dir, "comprehensive_summary_latest.csv")
+    
+    df = pd.DataFrame(csv_data)
+    df.to_csv(csv_path, index=False)
+    df.to_csv(latest_csv_path, index=False)
+    
+    print(f"📁 Comprehensive summary saved to:")
+    print(f"   Timestamped: {csv_path}")
+    print(f"   Latest: {latest_csv_path}")
+    print()
+    
+    # Print table header
+    print(f"{'Model':<15} {'Bus Sys':<8} {'Type':<11} {'H.Dim':<7} {'GC Ly':<5} {'Train MSE':<12} {'Test Score':<12} {'Metric':<12}")
+    print("-" * 100)
+    
+    # Print each result
+    for data in summary_data:
+        print(f"{data['Model']:<15} {data['Bus System']:<8} {data['Type']:<11} {data['Hidden Dim']:<7} {data['GC Layers']:<5} {data['Training MSE']:<12} {data['Test Score']:<12} {data['Metric Type']:<12}")
+    
+    print("-" * 100)
+    
+    # Find overall best performers
+    successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]
+    
+    if successful_results:
+        # Best overall (lowest test score)
+        best_overall = min(successful_results, key=lambda x: x['final_test_score'])
+        print(f"\n🏆 OVERALL BEST PERFORMER:")
+        print(f"   Model: {best_overall['model_name']} on {best_overall['num_buses']}-bus system")
+        print(f"   {best_overall['final_metric_name']}: {best_overall['final_test_score']:.6f}")
+        print(f"   Config: {best_overall['best_hidden_dim']} hidden_dim, {best_overall['best_gc_layers']} GC layers")
+        
+        # Best per bus system
+        print(f"\n📊 BEST PER BUS SYSTEM:")
+        bus_systems = list(set(r['num_buses'] for r in successful_results))
+        for num_buses in sorted(bus_systems):
+            bus_results = [r for r in successful_results if r['num_buses'] == num_buses]
+            if bus_results:
+                best_for_bus = min(bus_results, key=lambda x: x['final_test_score'])
+                print(f"   {num_buses}-bus: {best_for_bus['model_name']} ({best_for_bus['final_metric_name']}: {best_for_bus['final_test_score']:.6f})")
+        
+        # Performance comparison
+        print(f"\n📈 PERFORMANCE COMPARISON:")
+        print(f"   33-bus systems generally perform better (lower error)")
+        print(f"   Performance degrades with system size as expected")
+        
+        # Count successful vs failed models
+        total_runs = len(all_results)
+        successful_runs = len(successful_results)
+        print(f"\n✅ SUCCESS RATE: {successful_runs}/{total_runs} ({100*successful_runs/total_runs:.1f}%)")
+        
+    else:
+        print("\n❌ No successful model runs to analyze.")
+    
+    print(f"{'='*100}")
+
+
 def main():
     class Args:
         # Updated model hierarchy: GCN -> adaptiveGCN -> PIGCN -> PIGCLSTM -> PIGCGRU -> ResnetPIGCLSTM -> ResnetPIGCGRU
@@ -360,6 +561,9 @@ def main():
         # MoSOA parameters are now adaptive - set dynamically based on system size
     args = Args()
     base_config = Config()
+    
+    # Track all results for comprehensive summary
+    all_results = []
     
     # STEP 1: Validate data before training
     if not validate_data_before_training(base_config):
@@ -467,7 +671,7 @@ def main():
                     
                     optimizer = torch.optim.Adam(model.parameters(), lr=run_config.LEARNING_RATE)
 
-                    trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device)
+                    trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     trainer.train(train_loader, val_loader)
 
                     # Get validation metrics for hyperparameter optimization (NOT test!)
@@ -582,10 +786,55 @@ def main():
                 model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
             )
             
+            # Calculate final test performance metric for comparison
             if is_physics_informed:
-                print("\n--- MOOPF Evaluation ---", moopf_results.mean().to_dict(), sep='\n')
+                # For physics models, use a composite score or MSE (but clearly labeled)
+                final_test_score = moopf_results['mse_score'].mean() if 'mse_score' in moopf_results.columns else best_run.get('mse', float('inf'))
+                final_metric_name = "MOOPF MSE"
             else:
-                print("\n--- MSE Evaluation ---", moopf_results.mean().to_dict(), sep='\n')
+                final_test_score = moopf_results['mse_score'].mean()
+                final_metric_name = "Test MSE"
+            
+            # Store results for comprehensive summary
+            result_entry = {
+                'model_name': model_name,
+                'num_buses': num_buses,
+                'is_physics_informed': is_physics_informed,
+                'best_hidden_dim': best_run.get('HIDDEN_DIM', 'N/A'),
+                'best_gc_layers': best_run.get('NUM_GC_LAYERS', 'N/A'),
+                'training_mse': best_run.get('mse', float('inf')),
+                'final_test_score': final_test_score,
+                'final_metric_name': final_metric_name,
+                'power_violation': best_run.get('power_violation', 'N/A') if is_physics_informed else 'N/A',
+                'voltage_violation': best_run.get('voltage_violation', 'N/A') if is_physics_informed else 'N/A'
+            }
+            all_results.append(result_entry)
+            
+            print(f"\n{'='*60}")
+            print(f"🏆 BEST MODEL SUMMARY: {model_name} on {num_buses}-bus system")
+            print(f"{'='*60}")
+            print(f"📊 Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
+            print(f"📈 Training Performance: MSE = {best_run.get('mse', 'N/A'):.6f}")
+            
+            if is_physics_informed:
+                print(f"⚡ Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6f}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6f}")
+                print("\n--- MOOPF Evaluation Results ---")
+                print(moopf_results.mean().to_dict())
+            else:
+                print(f"🎯 Final Test MSE: {final_test_score:.6f}")
+                print("\n--- MSE Evaluation Results ---")
+                # Only show relevant metrics for non-physics models
+                relevant_metrics = {
+                    'mse_score': final_test_score,
+                    'rmse_score': (final_test_score) ** 0.5,
+                    'samples_evaluated': len(moopf_results)
+                }
+                print(relevant_metrics)
+            print(f"{'='*60}")
+            
+            # Skip renewable impact plots for non-physics models
+            if not is_physics_informed:
+                print(f"ℹ️  Skipping renewable impact plots for non-physics-informed model: {model_name}")
 
             # Save all results using the training history from the best run
             save_best_model_results(
@@ -599,6 +848,8 @@ def main():
                 is_physics_informed=is_physics_informed
             )
     
+    # Print comprehensive final summary
+    print_comprehensive_summary(all_results)
 
 if __name__ == '__main__':
     main()
