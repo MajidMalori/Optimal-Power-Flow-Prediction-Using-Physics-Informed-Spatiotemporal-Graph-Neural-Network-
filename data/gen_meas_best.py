@@ -15,12 +15,12 @@ import copy
 # SECTION 1: CONFIGURATION
 # =============================================================================
 CONFIG = {
-    "test_cases": ["case33bw", "case57", "case118"],
+    "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
     "time_steps": 100,
-    "output_dir": "./data", # Save to a dedicated data folder
+    "output_dir": "./data", # Save to the data subdirectory
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
-    "max_solar_mw": 5.0,
-    "max_wind_mw": 8.0,
+    "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
+    "max_wind_mw": 0.04,    # Per-unit scaling: 4% of total load per generator
     "contingency_rate": 0.05,
     "voltage_error_std": 0.005,
     "power_error_std": 0.01,
@@ -38,7 +38,7 @@ CONFIG = {
 def load_network(case_name: str) -> pp.pandapowerNet:
     """Loads a pandapower network based on its name."""
     print(f"\n----- Loading Base Test Case: {case_name} -----")
-    if case_name == "case33bw": return pn.case33bw()
+    if case_name == "case33": return pn.case33bw()
     if case_name == "case57": return pn.case57()
     if case_name == "case118": return pn.case118()
     raise ValueError(f"Unknown test case: {case_name}")
@@ -180,9 +180,20 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
     
+    # Calculate realistic renewable capacity based on system load
+    total_system_load_mw = base_load_p.sum()
+    print(f"Total system load: {total_system_load_mw:.2f} MW")
+    
     solar_gens = net.sgen[net.sgen.type == 'solar'] if 'type' in net.sgen.columns else pd.DataFrame()
     wind_gens = net.sgen[net.sgen.type == 'wind'] if 'type' in net.sgen.columns else pd.DataFrame()
-    max_total_renewable_mw = (len(solar_gens) * config['max_solar_mw'] + len(wind_gens) * config['max_wind_mw']) or 1.0
+    
+    # Scale renewable capacity to be proportional to system load
+    # This ensures renewable fraction can realistically range from 0% to 100%
+    max_individual_solar_mw = config['max_solar_mw'] * total_system_load_mw
+    max_individual_wind_mw = config['max_wind_mw'] * total_system_load_mw
+    
+    max_total_renewable_mw = (len(solar_gens) * max_individual_solar_mw + len(wind_gens) * max_individual_wind_mw) or 1.0
+    print(f"Max total renewable capacity: {max_total_renewable_mw:.2f} MW")
         
     dropped_line_idx = None
     with tqdm(total=time_steps, desc=f"Simulating {net.name}", unit="step") as pbar:
@@ -210,9 +221,9 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                 for i, sgen in net.sgen.iterrows():
                     p_gen = 0
                     if sgen.type == 'solar':
-                        p_gen = np.random.uniform(0, config['max_solar_mw']) if 7 <= (t % 24) < 19 else 0
+                        p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
                     elif sgen.type == 'wind':
-                        p_gen = np.random.uniform(0, config['max_wind_mw'])
+                        p_gen = np.random.uniform(0, max_individual_wind_mw)
                     net.sgen.at[i, 'p_mw'] = p_gen
                     current_total_renewable_p_mw += p_gen
             
@@ -327,7 +338,15 @@ if __name__ == "__main__":
                 net_with_renewables = configure_renewables(net_for_run, frac, CONFIG)
                 generated_data = simulate_time_series(net_with_renewables, CONFIG)
                 
-                output_path = CONFIG.get("output_dir", os.path.dirname(os.path.abspath(__file__)))
+                # Ensure we save to the data directory regardless of where script is run from
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                if "data" in script_dir:
+                    # Script is being run from data/ subdirectory
+                    output_path = script_dir  # Save directly to data/ directory
+                else:
+                    # Script is being run from main directory
+                    output_path = os.path.join(script_dir, "data")  # Save to data/ subdirectory
+                    
                 save_data(generated_data, save_case_name, frac, output_path)
 
         except Exception as e:
