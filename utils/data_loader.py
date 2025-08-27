@@ -113,16 +113,18 @@ def load_power_system_data(config, case_name):
     if not feature_files:
         raise FileNotFoundError(f"No data files found for pattern: '{case_name}_features_frac*.npy' in '{data_dir}'.")
     try:
-        # We assume the adjacency matrix is static across all scenarios for a given case
-        # and load it from the first available file.
+        # Extract number of buses from case name
+        num_buses = int(''.join(filter(str.isdigit, case_name)))
+        
+        # Load adjacency matrix
         first_adj_path = feature_files[0].replace('features', 'adjacency')
         adj_object_array = np.load(first_adj_path, allow_pickle=True)
         edge_index = adj_object_array[0]
         print(f"[Data] Loaded edge index from: {os.path.basename(first_adj_path)} with shape {edge_index.shape}")
-        num_buses_val = 33 if 'case33' in case_name else getattr(config, 'NUM_BUSES')
-        num_buses = int(num_buses_val[0]) if isinstance(num_buses_val, list) else int(num_buses_val)
+        
         static_adjacency_matrix = _convert_edge_index_to_adj(edge_index, num_buses)
         print(f"[Data] Converted to dense adjacency matrix with shape: {static_adjacency_matrix.shape}")
+        
         if static_adjacency_matrix.ndim != 2 or static_adjacency_matrix.shape[0] != static_adjacency_matrix.shape[1]:
              raise ValueError(f"Conversion to dense matrix failed. Final shape is not square: {static_adjacency_matrix.shape}.")
     except Exception as e:
