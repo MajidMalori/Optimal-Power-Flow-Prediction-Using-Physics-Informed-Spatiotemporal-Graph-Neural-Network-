@@ -35,14 +35,19 @@ class ResnetPIGCLSTM(BaseModel):
         for _ in range(num_gc_layers - 1):
             self.gc_layers.append(nn.Linear(hidden_dim, hidden_dim))
 
-        # LSTM layers with residual connections
-        lstm_io_size = hidden_dim * num_buses  # Flatten spatial features for LSTM
+        # LSTM layers with residual connections and scalable sizing
+        flattened_size = hidden_dim * num_buses  
+        # Use a reduced LSTM hidden size for larger systems to prevent memory explosion
+        lstm_hidden_size = min(flattened_size, max(256, flattened_size // 2))
+        
         self.residual_lstms = nn.ModuleList()
         self.lstm_layer_norms = nn.ModuleList()
+        self.lstm_projections = nn.ModuleList()  # Project between different sizes
 
         for _ in range(rnn_layers):
-            self.residual_lstms.append(nn.LSTM(lstm_io_size, lstm_io_size, num_layers=1, batch_first=True))
-            self.lstm_layer_norms.append(nn.LayerNorm(lstm_io_size))
+            self.residual_lstms.append(nn.LSTM(flattened_size, lstm_hidden_size, num_layers=1, batch_first=True))
+            self.lstm_projections.append(nn.Linear(lstm_hidden_size, flattened_size))  # Project back to original size
+            self.lstm_layer_norms.append(nn.LayerNorm(flattened_size))
 
         self.output_transform = nn.Linear(hidden_dim, feature_dim)
         self.dropout_layer = nn.Dropout(dropout)
@@ -88,8 +93,9 @@ class ResnetPIGCLSTM(BaseModel):
         for i in range(self.rnn_layers):
             residual = h_res
             # Pass hidden and cell states from the previous layer's output
-            h_res, (hidden_state, cell_state) = self.residual_lstms[i](h_res, (hidden_state, cell_state) if hidden_state is not None else None)
-            h_res = h_res + residual  # Add residual connection
+            lstm_out, (hidden_state, cell_state) = self.residual_lstms[i](h_res, (hidden_state, cell_state) if hidden_state is not None else None)
+            # Project back to original size for residual connection
+            h_res = self.lstm_projections[i](lstm_out) + residual  # Add residual connection
             h_res = self.lstm_layer_norms[i](h_res) # Apply layer normalization
             if i < self.rnn_layers - 1:
                 h_res = self.dropout_layer(h_res)

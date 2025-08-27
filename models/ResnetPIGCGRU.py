@@ -35,14 +35,19 @@ class ResnetPIGCGRU(BaseModel):
         for _ in range(num_gc_layers - 1):
             self.gc_layers.append(nn.Linear(hidden_dim, hidden_dim))
         
-        # GRU layers with residual connections
-        gru_io_size = hidden_dim * num_buses
+        # GRU layers with residual connections and scalable sizing
+        flattened_size = hidden_dim * num_buses
+        # Use a reduced GRU hidden size for larger systems to prevent memory explosion
+        gru_hidden_size = min(flattened_size, max(256, flattened_size // 2))
+        
         self.residual_grus = nn.ModuleList()
         self.gru_layer_norms = nn.ModuleList()
+        self.gru_projections = nn.ModuleList()  # Project between different sizes
 
         for _ in range(rnn_layers):
-            self.residual_grus.append(nn.GRU(gru_io_size, gru_io_size, num_layers=1, batch_first=True))
-            self.gru_layer_norms.append(nn.LayerNorm(gru_io_size))
+            self.residual_grus.append(nn.GRU(flattened_size, gru_hidden_size, num_layers=1, batch_first=True))
+            self.gru_projections.append(nn.Linear(gru_hidden_size, flattened_size))  # Project back to original size
+            self.gru_layer_norms.append(nn.LayerNorm(flattened_size))
         
         self.output_transform = nn.Linear(hidden_dim, feature_dim)
         self.dropout_layer = nn.Dropout(dropout)
@@ -83,6 +88,8 @@ class ResnetPIGCGRU(BaseModel):
             # Pass the hidden state from the previous layer to the current one.
             # The GRU returns the full output sequence and the final hidden state.
             h_res, hidden_state = self.residual_grus[i](h_res, hidden_state)
+            # Project GRU output back to original size for residual connection
+            h_res = self.gru_projections[i](h_res)
             h_res = h_res + residual  # Add residual connection
             h_res = self.gru_layer_norms[i](h_res) # Apply layer normalization
             if i < self.rnn_layers - 1:

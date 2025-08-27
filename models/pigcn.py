@@ -55,17 +55,22 @@ class AdaptivePIGCN(BaseModel):
             nn.BatchNorm1d(hidden_dim) for _ in range(num_gc_layers)
         ])
 
-        # --- MLP layers for final prediction ---
+        # --- Scalable MLP layers for final prediction ---
+        # Scale intermediate layer sizes based on system size to avoid bottlenecks
+        input_size = hidden_dim * num_buses
+        intermediate_size1 = max(256, input_size // 4)  # At least 256, but scales with system size
+        intermediate_size2 = max(128, input_size // 8)  # At least 128, but scales with system size
+        
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim * num_buses, 256),
+            nn.Linear(input_size, intermediate_size1),
             nn.ReLU(),
-            nn.BatchNorm1d(256),
+            nn.BatchNorm1d(intermediate_size1),
             nn.Dropout(dropout),
-            nn.Linear(256, 128),
+            nn.Linear(intermediate_size1, intermediate_size2),
             nn.ReLU(),
-            nn.BatchNorm1d(128),
+            nn.BatchNorm1d(intermediate_size2),
             nn.Dropout(dropout),
-            nn.Linear(128, output_dim)
+            nn.Linear(intermediate_size2, output_dim)
         )
         
         self.dropout_layer = nn.Dropout(dropout)
@@ -76,7 +81,7 @@ class AdaptivePIGCN(BaseModel):
 
         Args:
             x (torch.Tensor): The input node features. Shape: [batch_size, num_buses, feature_dim].
-            static_adj (torch.Tensor): The static (physical) adjacency matrix. Shape: [num_buses, num_buses].
+            static_adj (torch.Tensor): The static (physical) adjacency matrix. Shape: [1, batch_size, num_buses, num_buses].
 
         Returns:
             torch.Tensor: The final model output.
@@ -87,10 +92,17 @@ class AdaptivePIGCN(BaseModel):
         # Learned (data-driven) adjacency matrix
         learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
         
-        # This part correctly handles the `batch1 must be a 3D tensor` error
-        # by ensuring the adjacency matrix is 3D.
-        static_adj_batch = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
-        learned_adj_batch = learned_adj.unsqueeze(0).expand(batch_size, -1, -1)
+        # Handle adjacency matrix - ensure it's 3D: [batch_size, num_buses, num_buses]
+        if static_adj.dim() == 4:
+            static_adj_batch = static_adj.squeeze(0)  # Remove the first dimension
+        elif static_adj.dim() == 3:
+            static_adj_batch = static_adj  # Already correct shape
+        else:
+            static_adj_batch = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
+            
+        # Create learned adjacency batch: [batch_size, num_buses, num_buses]
+        # learned_adj is [num_buses, num_buses], expand to [batch_size, num_buses, num_buses]
+        learned_adj_batch = learned_adj.unsqueeze(0).repeat(batch_size, 1, 1)
         
         # Combine the static and learned matrices
         adaptive_adj = self.phi * static_adj_batch + (1 - self.phi) * learned_adj_batch

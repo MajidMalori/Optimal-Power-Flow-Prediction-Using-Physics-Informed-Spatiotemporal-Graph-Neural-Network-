@@ -25,7 +25,7 @@ class GCN(BaseModel):
         ])
         
         self.dropout_layer = nn.Dropout(dropout)
-        self.output_layer = nn.Linear(hidden_dim, 2)  # V_mag, V_angle
+        self.output_layer = nn.Linear(hidden_dim, 6)  # All 6 features: V_mag, V_angle, P_load, Q_load, P_gen, Q_gen
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
         batch_size, num_nodes, _ = x.shape
@@ -35,4 +35,4 @@ class GCN(BaseModel):
             x = self.dropout_layer(x)
         
         out = self.output_layer(x)
-        return out.reshape(batch_size, -1)
+        return out.reshape(batch_size, -1)  # Flatten to [batch_size, num_buses * 6]

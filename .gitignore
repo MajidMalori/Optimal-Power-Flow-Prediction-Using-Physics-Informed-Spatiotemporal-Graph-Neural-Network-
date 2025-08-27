@@ -1,47 +1,82 @@
-# Model outputs
+# Data files - exclude generated data but keep generation script
+data/*.npy
+data/*.txt
+data/case*
+
+# Keep the data generation script
+!data/gen_meas_best.py
+!data/check_data.py
+
+# Explicitly exclude time coefficient files
+data/*time_energy_coeffs.txt
+data/*time_carbon_coeffs.txt
+
+# Test and debug scripts
+test_*.py
+debug_*.py
+*_test.py
+train_adaptive*.py
+comprehensive_evaluation.py
+train_scalable.py
+
+# Model evaluation results
 model_evaluation/
-*.pth
-runs/
-checkpoints/
+ResnetPIGCLSTM/
 
-# Data files
-*.npy
-*.csv
-data/raw/
-data/processed/
-
-# Documentation & Research
-research.txt
-code_citations.txt
-literature/
-*.pdf
-*.docx
-
-# Logs & Debug
-logs/
-*.log
+# Python cache
 __pycache__/
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
 
-# Development files
-data_utils.py
-gcnn.py
-train_1.py
-pi_r_train.py
-pi_r_data_utils.py
-pi_gcrnn.py
-enhanced_soa
-evaluate_moopf
-run_soa_tuning_multiple
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
+# PyInstaller
+*.manifest
+*.spec
 
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# IDEs and editors
+# pyenv
+.python-version
+
+# Environment variables
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# System files
+# OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+logs/

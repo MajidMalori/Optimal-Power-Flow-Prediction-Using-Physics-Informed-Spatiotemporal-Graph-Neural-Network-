@@ -35,8 +35,19 @@ class adaptiveGCN(nn.Module):
         # ... (forward pass logic as corrected before) ...
         batch_size = x.size(0)
         learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
-        physical_adj_batch = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
-        A_adp_batch = self.phi * physical_adj_batch + (1 - self.phi) * learned_adj.unsqueeze(0)
+        
+        # Handle adjacency matrix - ensure it's 3D: [batch_size, num_buses, num_buses]
+        if static_adj.dim() == 4:
+            physical_adj_batch = static_adj.squeeze(0)  # Remove the first dimension
+        elif static_adj.dim() == 3:
+            physical_adj_batch = static_adj  # Already correct shape
+        else:
+            physical_adj_batch = static_adj.unsqueeze(0).expand(batch_size, -1, -1)
+        
+        # Create learned adjacency batch: [batch_size, num_buses, num_buses]
+        learned_adj_batch = learned_adj.unsqueeze(0).repeat(batch_size, 1, 1)
+        
+        A_adp_batch = self.phi * physical_adj_batch + (1 - self.phi) * learned_adj_batch
 
         h = x
         for layer in self.layers:
@@ -49,6 +60,6 @@ class adaptiveGCN(nn.Module):
         # The output layer is now applied directly to the final node embeddings 'h'.
         # The result will have the correct shape [batch_size, num_buses, num_output_features].
         output = self.output_layer(h)
-        # The final .view() is no longer needed as the shape is already correct.
-        return output
+        # Flatten to match expected output shape [batch_size, num_buses * 6]
+        return output.reshape(output.size(0), -1)
         # --- END CORRECTION ---
