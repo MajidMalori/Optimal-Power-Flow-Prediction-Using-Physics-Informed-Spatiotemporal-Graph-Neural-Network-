@@ -10,13 +10,14 @@ import pandas as pd
 from tqdm import tqdm
 import networkx as nx
 import copy
+from datetime import datetime
 
 # =============================================================================
 # SECTION 1: CONFIGURATION
 # =============================================================================
 CONFIG = {
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
-    "time_steps": 10000,
+    "time_steps": 100,
     "output_dir": "./data", # Save to the data subdirectory
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
@@ -299,15 +300,27 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     }
 
     
-def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output_dir: str):
+def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output_dir: str, timestamp: str = None):
     """
     Saves generated data arrays. Multi-dimensional arrays are saved as binary .npy files,
     while 1D coefficient arrays are saved as human-readable .txt files.
+    
+    Args:
+        data_dict: Dictionary containing data arrays
+        case_name: Name of the test case (e.g., 'case33')
+        renewable_fraction: Renewable energy fraction
+        output_dir: Directory to save files
+        timestamp: Optional timestamp string to ensure data consistency
     """
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate timestamp if not provided
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     for key, data in data_dict.items():
-        # Create a base filename that includes the case and renewable fraction
-        base_filename = f"{case_name}_{key}_frac{renewable_fraction:.1f}"
+        # Create a base filename that includes the case, renewable fraction, and timestamp
+        base_filename = f"{case_name}_{key}_frac{renewable_fraction:.1f}_{timestamp}"
         
         # Check if the key indicates a coefficient file
         if "coeffs" in key:
@@ -325,6 +338,11 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
 # SECTION 4: MAIN EXECUTION BLOCK
 # =============================================================================
 if __name__ == "__main__":
+    # Generate a single timestamp for this entire data generation run
+    generation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    print(f"\nStarting data generation with timestamp: {generation_timestamp}")
+    print("All files will be tagged with this timestamp to ensure data consistency.")
+    
     for case in CONFIG["test_cases"]:
         try:
             base_net = load_network(case)
@@ -347,7 +365,8 @@ if __name__ == "__main__":
                     # Script is being run from main directory
                     output_path = os.path.join(script_dir, "data")  # Save to data/ subdirectory
                     
-                save_data(generated_data, save_case_name, frac, output_path)
+                # Pass the generation timestamp to ensure all files have the same timestamp
+                save_data(generated_data, save_case_name, frac, output_path, generation_timestamp)
 
         except Exception as e:
             print(f"\nAn unrecoverable error occurred while processing {case}:")
