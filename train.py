@@ -216,7 +216,9 @@ def plot_renewable_impact(data_df, metric_name, y_label, title, config, num_buse
 def plot_convergence(history, model_name, config, num_buses):
     """Plots the convergence curve of the MoSOA algorithm."""
     plt.figure(figsize=(10, 6))
-    plt.plot(history, 'b-', label='Convergence curve')
+    # Create explicit iteration numbers for x-axis (1-based indexing for readability)
+    iterations = list(range(1, len(history) + 1))
+    plt.plot(iterations, history, 'b-', label='Convergence curve')
     plt.title(f'MoSOA Convergence for {model_name}', fontsize=14)
     plt.xlabel('Iteration', fontsize=12)
     plt.ylabel('Best MSE + Physics-Informed Loss', fontsize=12)
@@ -225,7 +227,7 @@ def plot_convergence(history, model_name, config, num_buses):
     
     save_path = config.get_convergence_plot_path(num_buses, model_name)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=300)
     plt.close()
 
 
