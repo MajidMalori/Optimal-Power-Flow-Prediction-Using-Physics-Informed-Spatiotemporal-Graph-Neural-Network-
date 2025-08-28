@@ -21,8 +21,12 @@ train_scalable.py
 test_physics_loss.py
 maxsea.py
 
+profile.md
+Readme1.md
+
 # JSON files (configurations, results, etc.)
 *.json
+
 
 # Runs directory (automatically created by some frameworks)
 runs/
