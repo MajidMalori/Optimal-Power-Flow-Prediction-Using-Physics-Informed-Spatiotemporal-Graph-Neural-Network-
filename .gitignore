@@ -34,7 +34,10 @@ runs/
 # Checkpoints directory (legacy - models now saved in model_evaluation/)
 checkpoints/
 
-# Model evaluation results
+# Experimental results (new structure)
+experimental_results/
+
+# Model evaluation results (legacy)
 model_evaluation/
 ResnetPIGCLSTM/
 

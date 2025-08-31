@@ -305,10 +305,9 @@ class PowerSystemLoss(nn.Module):
         # The total_loss is already in per-unit since we used per-unit R and I values
         # No need for additional normalization by load - that would be double normalization
         
-        # Sanity check: Clamp unrealistic power loss values (due to poor model predictions)
-        # Typical power system losses are 2-15% of total load
-        max_reasonable_loss = 0.20  # 20% maximum (very conservative upper bound)
-        total_loss = torch.clamp(total_loss, min=0.0, max=max_reasonable_loss)
+        # Let the loss function handle unrealistic power loss values naturally
+        # Clamping would hide model errors and reduce learning signals
+        # Note: Negative losses indicate serious model errors that should be penalized
         
         return total_loss
 
@@ -339,15 +338,13 @@ class PowerSystemLoss(nn.Module):
 
     def _compute_normalized_power_flow(self, state: torch.Tensor, Ybus: torch.Tensor, epsilon: float = 1e-9) -> torch.Tensor:
         """
-        Computes normalized power flow using equation (3.5):
-        f1 = Σ_t Σ_i Σ_j D_ijt * [α_ijt * (P_it*P_jt + Q_it*Q_jt) + β_ijt * (Q_it*P_jt - Q_jt*P_it)]
+        Computes normalized power flow magnitudes using ACOPF equation (3.8):
+        P_i^DG + P_i = P_i^load + V_i Σ_(s=1)^(B_n) V_s (G_is cos θ_is + B_is sin θ_is)
+        Q_i^DG + Q_i = Q_i^load + V_i Σ_(s=1)^(B_n) V_s (G_is sin θ_is - B_is cos θ_is)
         
-        Where:
-        - α_ijt = R_ijt / (|V_it| * |V_jt|) * cos(θ_it - θ_jt)
-        - β_ijt = R_ijt * |V_it| * |V_jt| * sin(θ_it - θ_jt)
-        - D_ijt = branch connectivity (1 if branch exists, 0 otherwise)
-        
-        This represents the actual power flow through the network, different from power loss.
+        This implementation calculates the actual power flow magnitudes through the network
+        using the standard AC power flow equations, same foundation as power balance violation
+        but measuring flow magnitudes instead of balance mismatches.
         
         Args:
             state: Tensor containing [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
@@ -355,102 +352,59 @@ class PowerSystemLoss(nn.Module):
             epsilon: Small value to avoid division by zero
             
         Returns:
-            Tensor containing normalized power flow values [batch_size]
+            Tensor containing normalized power flow magnitudes [batch_size]
         """
-        # Extract state variables
-        Vm = state[..., 0]  # Voltage magnitudes (p.u.) [batch_size, num_buses]
-        Va = state[..., 1]  # Voltage angles (rad) [batch_size, num_buses]
+        # Extract voltage state variables
+        vm_pu = state[..., 0]  # Voltage magnitudes (p.u.) [batch_size, num_buses]
+        va_rad = state[..., 1]  # Voltage angles (rad) [batch_size, num_buses]
         
-        # Get power injections in per-unit
-        p_inj_pu, q_inj_pu = self._get_power_injections_pu(state)  # [batch_size, num_buses]
-        
-        batch_size, num_buses = Vm.shape[:2]
+        batch_size, num_buses = vm_pu.shape[:2]
         
         # Check if we have any data
         if batch_size == 0 or num_buses == 0:
             return torch.zeros(batch_size, device=state.device, dtype=state.dtype)
         
-        # Create branch connectivity mask from Ybus (D_ij matrix)
-        # A branch exists if there's a non-zero admittance between buses
-        branch_exists = torch.abs(Ybus) > 1e-6  # [batch_size, num_buses, num_buses]
+        # Calculate complex voltages: V = |V| * e^(jθ)
+        V = vm_pu * torch.exp(1j * va_rad)  # [batch_size, num_buses]
         
-        # Remove self-loops (diagonal elements) - no power flow to self
-        branch_exists = branch_exists & ~torch.eye(num_buses, dtype=torch.bool, device=state.device)
+        # Calculate currents using Ybus: I = Ybus * V
+        # This implements: I_i = Σ_s Y_is * V_s
+        I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)  # [batch_size, num_buses]
         
-        # Extract series impedance for each branch: Z_ij = 1/Y_ij
-        z_series = torch.where(branch_exists, 1.0 / Ybus, torch.zeros_like(Ybus))
-        r_series = torch.abs(z_series.real)  # Resistance (always positive)
+        # Calculate complex power flows: S = V * conj(I)
+        # This implements the ACOPF equation (3.8):
+        # S_i = V_i * conj(I_i) = V_i * Σ_s Y_is* * V_s*
+        # Where Y_is = G_is + jB_is, so:
+        # P_i = Re(S_i) = V_i Σ_s V_s (G_is cos θ_is + B_is sin θ_is)
+        # Q_i = Im(S_i) = V_i Σ_s V_s (G_is sin θ_is - B_is cos θ_is)
+        S_calc_pu = V * torch.conj(I)  # [batch_size, num_buses]
         
-        # Skip branches with very small resistance
-        valid_branches = branch_exists & (r_series > 1e-6)
+        # Extract active and reactive power flow magnitudes
+        p_flow_magnitudes = torch.abs(S_calc_pu.real)  # |P_calculated| [batch_size, num_buses]
+        q_flow_magnitudes = torch.abs(S_calc_pu.imag)  # |Q_calculated| [batch_size, num_buses]
         
-        # Create expanded tensors for vectorized operations
-        # Expand voltages to [batch_size, num_buses, num_buses]
-        Vm_i = Vm.unsqueeze(2).expand(-1, -1, num_buses)  # [batch_size, num_buses, num_buses]
-        Vm_j = Vm.unsqueeze(1).expand(-1, num_buses, -1)  # [batch_size, num_buses, num_buses]
+        # Calculate total apparent power flow magnitude per bus
+        s_flow_magnitudes = torch.sqrt(p_flow_magnitudes**2 + q_flow_magnitudes**2)  # [batch_size, num_buses]
         
-        # Expand voltage angles
-        Va_i = Va.unsqueeze(2).expand(-1, -1, num_buses)  # [batch_size, num_buses, num_buses]
-        Va_j = Va.unsqueeze(1).expand(-1, num_buses, -1)  # [batch_size, num_buses, num_buses]
+        # Calculate mean apparent power flow magnitude per bus (normalized metric)
+        # This gives a per-bus average that's naturally bounded and comparable
+        mean_flow_magnitude_per_bus = torch.mean(s_flow_magnitudes, dim=-1)  # [batch_size]
         
-        # Expand power injections (using actual power from nodes)
-        P_i = p_inj_pu.unsqueeze(2).expand(-1, -1, num_buses)  # [batch_size, num_buses, num_buses]
-        P_j = p_inj_pu.unsqueeze(1).expand(-1, num_buses, -1)  # [batch_size, num_buses, num_buses]
-        Q_i = q_inj_pu.unsqueeze(2).expand(-1, -1, num_buses)  # [batch_size, num_buses, num_buses]
-        Q_j = q_inj_pu.unsqueeze(1).expand(-1, num_buses, -1)  # [batch_size, num_buses, num_buses]
+        # Alternative: Use total load as normalization base (more physically meaningful)
+        # Total system load provides a natural scale for power flow magnitudes
+        total_load = torch.sum(state[..., 2], dim=-1)  # Total P_load in MW [batch_size]
+        total_load_pu = total_load / self.s_base_mva  # Convert to per-unit [batch_size]
         
-        # Calculate voltage magnitude products
-        V_prod = Vm_i * Vm_j  # [batch_size, num_buses, num_buses]
+        # Normalize by total load + small epsilon to avoid division by zero
+        normalized_power_flow = mean_flow_magnitude_per_bus / (total_load_pu + epsilon)
         
-        # Calculate angle differences (θ_it - θ_jt)
-        angle_diff = Va_i - Va_j  # [batch_size, num_buses, num_buses]
+        # Debug check: Warn if we get negative values (shouldn't happen mathematically)
+        if torch.any(normalized_power_flow < 0):
+            print(f"Warning: Negative power flow detected! Min value: {torch.min(normalized_power_flow).item()}")
+            print(f"This indicates potential numerical instability or extreme model predictions")
         
-        # Avoid division by zero for V_prod
-        V_prod_safe = torch.where(V_prod > epsilon, V_prod, torch.ones_like(V_prod))
-        
-        # Calculate α_ijt = R_ijt / (|V_it| * |V_jt|) * cos(θ_it - θ_jt)
-        alpha_ijt = torch.where(
-            valid_branches,
-            (r_series / V_prod_safe) * torch.cos(angle_diff),
-            torch.zeros_like(r_series)
-        )
-        
-        # Calculate β_ijt = R_ijt * |V_it| * |V_jt| * sin(θ_it - θ_jt)
-        beta_ijt = torch.where(
-            valid_branches,
-            r_series * V_prod * torch.sin(angle_diff),
-            torch.zeros_like(r_series)
-        )
-        
-        # Calculate the power flow terms according to equation (3.5)
-        # Term 1: α_ijt * (P_it*P_jt + Q_it*Q_jt)
-        power_product_term = alpha_ijt * (P_i * P_j + Q_i * Q_j)
-        
-        # Term 2: β_ijt * (Q_it*P_jt - Q_jt*P_it)
-        cross_product_term = beta_ijt * (Q_i * P_j - Q_j * P_i)
-        
-        # Total power flow for each branch
-        branch_power_flow = torch.where(
-            valid_branches,
-            power_product_term + cross_product_term,
-            torch.zeros_like(power_product_term)
-        )
-        
-        # Sum over all branches (only upper triangle to avoid double counting)
-        # Create upper triangle mask
-        upper_triangle = torch.triu(torch.ones(num_buses, num_buses, dtype=torch.bool, device=state.device), diagonal=1)
-        upper_triangle = upper_triangle.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, num_buses, num_buses]
-        
-        # Apply upper triangle mask and sum
-        total_power_flow = torch.sum(branch_power_flow * upper_triangle, dim=(1, 2))  # [batch_size]
-        
-        # Normalize by total system power to get per-unit value
-        total_power = torch.sum(torch.abs(p_inj_pu) + torch.abs(q_inj_pu), dim=1) + epsilon
-        normalized_power_flow = torch.abs(total_power_flow) / total_power
-        
-        # Only clamp minimum to avoid negative values (which would be non-physical)
-        normalized_power_flow = torch.clamp(normalized_power_flow, min=0.0)
-        
+        # Return raw values to let the loss function handle unphysical predictions
+        # This preserves the learning signal for the physics-informed training
         return normalized_power_flow
 
     def _compute_carbon_emissions(
@@ -501,8 +455,8 @@ class PowerSystemLoss(nn.Module):
         # 0.0: renewable_penetration = 1.0 (100% renewable, zero emissions)
         normalized_emissions = 1.0 - renewable_penetration
         
-        # Apply bounds for the discrete renewable fractions used in data generation
         # Values outside [0, 1] indicate model predictions beyond training data distribution
-        normalized_emissions = torch.clamp(normalized_emissions, min=0.0, max=1.0)
+        # Let the loss function handle these cases to preserve learning signals
+        # Extreme values will naturally be penalized during physics-informed training
         
         return {'raw': raw_emissions, 'normalized': normalized_emissions}

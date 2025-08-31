@@ -53,7 +53,7 @@ class PowerSystemDataset(Dataset):
     Handles time-synchronized features, targets, and Ybus matrices.
     """
     def __init__(self, features, adjacency_matrix, ybus_matrices, targets, 
-                 time_energy_coeffs, time_carbon_coeffs, is_static, sequence_length=1):
+                 time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1):
         
         self.features = torch.from_numpy(features).float()
         self.adjacency = torch.from_numpy(adjacency_matrix).float()
@@ -63,6 +63,7 @@ class PowerSystemDataset(Dataset):
         self.targets = torch.from_numpy(targets).float()
         self.time_energy_coeffs = torch.from_numpy(time_energy_coeffs).float()
         self.time_carbon_coeffs = torch.from_numpy(time_carbon_coeffs).float()
+        self.renewable_fractions = torch.from_numpy(renewable_fractions).float()
         
         self.is_static = is_static
         self.sequence_length = sequence_length
@@ -94,6 +95,7 @@ class PowerSystemDataset(Dataset):
         # --- END CORRECTION ---
         time_energy = self.time_energy_coeffs[target_idx]
         time_carbon = self.time_carbon_coeffs[target_idx]
+        renewable_fraction = self.renewable_fractions[target_idx]
 
         return {
             'features': features_tensor,
@@ -102,6 +104,7 @@ class PowerSystemDataset(Dataset):
             'targets': target_tensor,
             'time_energy_coeffs': time_energy,
             'time_carbon_coeffs': time_carbon,
+            'renewable_fraction': renewable_fraction,
         }
 
 # ... all other functions below this line remain the same ...
@@ -142,6 +145,7 @@ def load_power_system_data(config, case_name):
 
     all_features, all_ybus, all_targets = [], [], []
     all_energy_coeffs, all_carbon_coeffs = [], []
+    all_renewable_fractions = []  # Track renewable fractions for each data file
     
     for f_path in feature_files:
         print(f"  > Loading scenario from: {os.path.basename(f_path)}")
@@ -151,12 +155,23 @@ def load_power_system_data(config, case_name):
         targets_path = f_path.replace('features', 'targets')
         energy_path = f_path.replace('features', 'time_energy_coeffs').replace('.npy', '.txt')
         carbon_path = f_path.replace('features', 'time_carbon_coeffs').replace('.npy', '.txt')
+        
+        # Extract renewable fraction from filename (e.g., "case33_features_frac0.2_timestamp.npy" -> 0.2)
+        import re
+        frac_match = re.search(r'frac(\d+\.\d+)', os.path.basename(f_path))
+        renewable_fraction = float(frac_match.group(1)) if frac_match else 0.0
+        
         try:
-            all_features.append(np.load(f_path))
+            features_data = np.load(f_path)
+            all_features.append(features_data)
             all_ybus.append(np.load(ybus_path))
             all_targets.append(np.load(targets_path))
             all_energy_coeffs.append(np.loadtxt(energy_path))
             all_carbon_coeffs.append(np.loadtxt(carbon_path))
+            
+            # Create renewable fraction array for this data file
+            renewable_fractions_for_file = np.full(features_data.shape[0], renewable_fraction)
+            all_renewable_fractions.append(renewable_fractions_for_file)
         except FileNotFoundError as e:
             print(f"\n[CRITICAL ERROR] A required data file is missing: {e.filename}")
             print("Please ensure you have run 'gen_meas_best.py' to generate all necessary data files.")
@@ -168,6 +183,7 @@ def load_power_system_data(config, case_name):
     concatenated_targets = np.concatenate(all_targets, axis=0)
     concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0)
     concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0)
+    concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0)
     # --- END CORRECTION ---
 
     print(f"[Data] All scenarios concatenated. Total samples: {concatenated_features.shape[0]}")
@@ -175,9 +191,9 @@ def load_power_system_data(config, case_name):
     features_norm = normalizer.normalize(concatenated_features)
     print("[Data] Full dataset loaded and normalized.")
     
-    # --- START CORRECTION: Return concatenated Ybus array ---
+    # --- START CORRECTION: Return concatenated arrays including renewable fractions ---
     return (features_norm, static_adjacency_matrix, concatenated_ybus, concatenated_targets, 
-            concatenated_energy_coeffs, concatenated_carbon_coeffs, normalizer)
+            concatenated_energy_coeffs, concatenated_carbon_coeffs, concatenated_renewable_fractions, normalizer)
     # --- END CORRECTION ---
 
 def _collate_static(batch):
@@ -196,11 +212,11 @@ def _collate_sequential_padded(batch):
     collated_batch['targets'] = default_collate([item['targets'] for item in batch])
     return collated_batch
 
-def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, config, is_static):
+def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static):
     seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
     dataset = PowerSystemDataset(
         features, adjacency, ybus_matrices, targets, 
-        time_energy_coeffs, time_carbon_coeffs, 
+        time_energy_coeffs, time_carbon_coeffs, renewable_fractions,
         is_static, seq_len
     )
     dataset_size = len(dataset)

@@ -1,5 +1,6 @@
 import os
 import torch
+from datetime import datetime
 
 class Config:
     """
@@ -39,28 +40,27 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 10,     # More agents for better exploration 
-                    'max_iterations': 25,   # More iterations for convergence 
+                    'num_seagulls': 10,     # Temporarily set to 10 for quick testing
+                    'max_iterations': 25,   # Temporarily set to 25 for quick testing
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 6,      # Moderate number of agents 
-                    'max_iterations': 15,   # Reasonable convergence time 
+                    'num_seagulls': 8,      # Temporarily set to 6 for quick testing
+                    'max_iterations': 25,   # Temporarily set to 15 for quick testing
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 4,      # Fewer agents for speed 
-                    'max_iterations': 8,    # Quick convergence 
+                    'num_seagulls': 4,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 25,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
-        
         # Static ranges for other parameters
         HIDDEN_DIM_RANGE = (16, 128)  # Default fallback
         NUM_GC_LAYERS_RANGE = (1, 5)
@@ -70,7 +70,28 @@ class Config:
     # =============================================================================
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(ROOT_DIR, 'data')
-    EVALUATION_DIR = os.path.join(ROOT_DIR, 'model_evaluation')
+    
+    # New timestamped experimental results structure
+    EXPERIMENTAL_RESULTS_DIR = os.path.join(ROOT_DIR, 'experimental_results')
+    
+    # Current run timestamp (set at import time)
+    _CURRENT_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    @property
+    def CURRENT_RUN_DIR(self):
+        """Get the current run directory with timestamp."""
+        return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, f'run_{self._CURRENT_RUN_TIMESTAMP}')
+    
+    @property
+    def LATEST_RUN_DIR(self):
+        """Get the latest run directory (symlink/copy target)."""
+        return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run')
+    
+    # Backward compatibility - use current run dir as evaluation dir
+    @property
+    def EVALUATION_DIR(self):
+        """Backward compatibility property."""
+        return self.CURRENT_RUN_DIR
 
     # =============================================================================
     # Global Training & System Parameters
@@ -157,9 +178,19 @@ class Config:
     # --- END CORRECTION ---
 
     def __init__(self):
-        """Initializes directories."""
-        for dir_path in [self.DATA_DIR, self.EVALUATION_DIR]:
+        """Initializes directories and sets up experimental run structure."""
+        # Create base directories
+        for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
             os.makedirs(dir_path, exist_ok=True)
+        
+        # Create current run directory
+        os.makedirs(self.CURRENT_RUN_DIR, exist_ok=True)
+        
+        # Update latest run (copy current run info)
+        self._update_latest_run_link()
+        
+        # Create run metadata
+        self._create_run_metadata()
 
     def get_evaluation_path(self, filename):
         """Constructs a path in the evaluation directory."""
@@ -192,3 +223,195 @@ class Config:
     def get_summary_path(self, num_buses: int, model_name: str) -> str:
         """Returns the summary CSV path for a specific model."""
         return os.path.join(self.get_model_eval_dir(num_buses, model_name), "summary.csv")
+    
+    # =============================================================================
+    # Model Registry & Testing Configuration
+    # =============================================================================
+    
+    # Model classes mapping - centralized configuration
+    @staticmethod
+    def get_model_class_map():
+        """Returns mapping of model names to their classes."""
+        # Import here to avoid circular imports
+        from models.adaptive_gcn import adaptiveGCN
+        from models.gcn import GCN
+        from models.pigcn import AdaptivePIGCN
+        from models.pigclstm import PIGCLSTM
+        from models.pigcgru import PIGCGRU
+        from models.ResnetPIGCGRU import ResnetPIGCGRU
+        from models.ResnetPIGCLSTM import ResnetPIGCLSTM
+        
+        return {
+            'adaptiveGCN': adaptiveGCN, 
+            'GCN': GCN, 
+            'PIGCN': AdaptivePIGCN, 
+            'PIGCLSTM': PIGCLSTM,
+            'PIGCGRU': PIGCGRU, 
+            'ResnetPIGCGRU': ResnetPIGCGRU, 
+            'ResnetPIGCLSTM': ResnetPIGCLSTM
+        }
+    
+    # Model configuration mapping
+    @property
+    def model_config_map(self):
+        """Returns mapping of model names to their configurations."""
+        return {
+            'GCN': self.GCNConfig, 
+            'adaptiveGCN': self.adaptiveGCNConfig, 
+            'PIGCN': self.PIGCNConfig,
+            'PIGCLSTM': self.PIGCLSTMConfig, 
+            'PIGCGRU': self.PIGCGRUConfig,
+            'ResnetPIGCGRU': self.ResnetPIGCGRUConfig, 
+            'ResnetPIGCLSTM': self.ResnetPIGCLSTMConfig
+        }
+    
+    # Models to test - configurable list
+    MODELS_TO_TEST = ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Test all models
+    
+    # Alternative model test configurations for different scenarios
+    MODEL_TEST_CONFIGS = {
+        'quick': ['PIGCN'],  # Fast testing
+        'core': ['adaptiveGCN', 'PIGCN'],  # Core comparison: best non-physics vs physics
+        'comprehensive': ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU'],  # Full comparison
+        'physics_only': ['PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU'],  # Physics-informed only
+        'non_physics_only': ['GCN', 'adaptiveGCN'],  # Non-physics-informed only
+        'all': ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Everything
+    }
+    
+    @staticmethod
+    def get_models_to_test(test_config='quick'):
+        """
+        Get list of models to test based on configuration.
+        
+        Available configurations:
+        - 'quick': Fast testing with one model (PIGCN)
+        - 'comprehensive': Full comparison of key models
+        - 'physics_only': Only physics-informed models
+        - 'non_physics_only': Only non-physics-informed models  
+        - 'all': Every available model
+        """
+        return Config.MODEL_TEST_CONFIGS.get(test_config, Config.MODEL_TEST_CONFIGS['quick'])
+    
+    @staticmethod
+    def is_sequential_model(model_name):
+        """Check if model is sequential (LSTM/GRU based)."""
+        return 'LSTM' in model_name.upper() or 'GRU' in model_name.upper()
+    
+    @staticmethod
+    def is_physics_informed(model_name):
+        """Check if model is physics-informed."""
+        return 'PI' in model_name
+    
+    @staticmethod
+    def uses_adaptive_graph(model_name):
+        """Check if model uses adaptive graph features."""
+        return model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'PIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
+    
+    def _update_latest_run_link(self):
+        """Update the latest_run directory to point to current run."""
+        import shutil
+        
+        # Remove existing latest_run if it exists
+        if os.path.exists(self.LATEST_RUN_DIR):
+            shutil.rmtree(self.LATEST_RUN_DIR)
+        
+        # Create latest_run as a copy of current run structure
+        # Note: We'll copy the structure after the run completes in train.py
+        latest_info_file = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run_info.txt')
+        with open(latest_info_file, 'w') as f:
+            f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\n")
+            f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    
+    def _create_run_metadata(self):
+        """Create metadata for the current run."""
+        import json
+        
+        metadata = {
+            'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}',
+            'start_time': datetime.now().isoformat(),
+            'timestamp': self._CURRENT_RUN_TIMESTAMP,
+            'config': {
+                'device': self.DEVICE,
+                'num_buses': self.NUM_BUSES,
+                'learning_rate': self.LEARNING_RATE,
+                'num_epochs': self.NUM_EPOCHS,
+                'batch_size': self.BATCH_SIZE,
+                's_base_mva': self.S_BASE_MVA,
+                'lambda_p': self.LAMBDA_P,
+                'lambda_v': self.LAMBDA_V
+            },
+            'directory_structure': {
+                'root': self.ROOT_DIR,
+                'data': self.DATA_DIR,
+                'results': self.CURRENT_RUN_DIR,
+                'experimental_results': self.EXPERIMENTAL_RESULTS_DIR
+            }
+        }
+        
+        metadata_file = os.path.join(self.CURRENT_RUN_DIR, 'run_metadata.json')
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+    
+    def finalize_run(self, run_summary: dict = None):
+        """Finalize the current run by updating latest_run and logging."""
+        import shutil
+        import json
+        import csv
+        
+        # Copy current run to latest_run
+        if os.path.exists(self.LATEST_RUN_DIR):
+            shutil.rmtree(self.LATEST_RUN_DIR)
+        shutil.copytree(self.CURRENT_RUN_DIR, self.LATEST_RUN_DIR)
+        
+        # Update run metadata with completion info
+        metadata_file = os.path.join(self.CURRENT_RUN_DIR, 'run_metadata.json')
+        if os.path.exists(metadata_file):
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            metadata['end_time'] = datetime.now().isoformat()
+            metadata['status'] = 'completed'
+            if run_summary:
+                metadata['results_summary'] = run_summary
+            
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            # Also save to latest_run
+            latest_metadata_file = os.path.join(self.LATEST_RUN_DIR, 'run_metadata.json')
+            with open(latest_metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+        
+        # Log to experiment tracking CSV
+        experiment_log = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'experiment_log.csv')
+        log_entry = {
+            'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}',
+            'start_time': metadata.get('start_time', ''),
+            'end_time': metadata.get('end_time', ''),
+            'status': 'completed',
+            'models_tested': run_summary.get('models_tested', []) if run_summary else [],
+            'best_model': run_summary.get('best_model', '') if run_summary else '',
+            'best_score': run_summary.get('best_score', '') if run_summary else ''
+        }
+        
+        # Write to CSV (append mode)
+        file_exists = os.path.exists(experiment_log)
+        with open(experiment_log, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=log_entry.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(log_entry)
+        
+        print(f"🏁 Run finalized: {self.CURRENT_RUN_DIR}")
+        print(f"📁 Latest run updated: {self.LATEST_RUN_DIR}")
+        print(f"📊 Experiment logged to: {experiment_log}")
+    
+    def get_run_info(self):
+        """Get information about the current run."""
+        return {
+            'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}',
+            'timestamp': self._CURRENT_RUN_TIMESTAMP,
+            'current_run_dir': self.CURRENT_RUN_DIR,
+            'latest_run_dir': self.LATEST_RUN_DIR,
+            'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }

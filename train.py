@@ -4,25 +4,21 @@ import logging
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import copy
-import torch.nn.functional as F
 import gc
 
 # --- Project-specific modules ---
-from models.adaptive_gcn import adaptiveGCN
-from models.gcn import GCN
-from models.pigcn import AdaptivePIGCN
-from models.pigclstm import PIGCLSTM
-from models.pigcgru import PIGCGRU
-from models.ResnetPIGCGRU import ResnetPIGCGRU
-from models.ResnetPIGCLSTM import ResnetPIGCLSTM
 from utils.data_loader import load_power_system_data, create_data_loaders
-from utils.metrics import PowerSystemLoss, compute_metrics
+from utils.metrics import PowerSystemLoss
 from utils.data_validation import validate_data_before_training
+from utils.optimization import (soa, setup_hyperparameter_bounds, create_model_kwargs, 
+                               generate_run_name, process_optimization_params, 
+                               calculate_objective_score)
+from utils.evaluation import (evaluate_model, evaluate_moopf_objectives, 
+                             save_best_model_results, print_comprehensive_summary,
+                             print_model_summary)
 from trainers.model_trainer import PowerSystemTrainer
 from config import Config
-# --- End of imports ---
 
 
 def setup_logging(log_path: str):
@@ -30,562 +26,53 @@ def setup_logging(log_path: str):
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     log_dir = os.path.dirname(log_path)
-    if log_dir: os.makedirs(log_dir, exist_ok=True)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                        handlers=[logging.FileHandler(log_path, mode='w'), logging.StreamHandler()])
-
-def evaluate_model(model, test_loader, device, config, normalizer, is_sequential):
-    """Evaluates the model on the test set and returns performance metrics."""
-    model.eval()
-    all_outputs, all_targets = [], []
-    all_ybus = []  # Add this to collect Ybus matrices
-    
-    with torch.no_grad():
-        pbar = tqdm(test_loader, desc=f"Evaluating {model.__class__.__name__}", leave=False)
-        for batch in pbar:
-            features = batch['features'].to(device)
-            targets = batch['targets'].to(device)
-            adj = batch['adjacency'].to(device)
-            ybus = batch['ybus_matrix'].to(device)  # Get Ybus from batch
-
-            # Handle sequential vs non-sequential models
-            if is_sequential and features.dim() == 3:
-                # For sequential models, use the last timestep
-                features_input = features[:, -1, :]
-            else:
-                # For non-sequential models, use features as-is
-                features_input = features
-            
-            outputs = model(features_input, adj)
-
-            all_outputs.append(outputs)
-            all_targets.append(targets)
-            all_ybus.append(ybus)  # Store Ybus matrices
-
-    all_outputs_tensor = torch.cat(all_outputs, dim=0)
-    all_targets_tensor = torch.cat(all_targets, dim=0)
-    all_ybus_tensor = torch.cat(all_ybus, dim=0)
-
-    # Get num_buses dynamically from config without hardcoding
-    if hasattr(config, 'NUM_BUSES'):
-        num_buses = config.NUM_BUSES
-        if isinstance(num_buses, list):
-            num_buses = num_buses[0]  # Take first value if it's a list
-    else:
-        raise ValueError("Config must specify NUM_BUSES")
-    
-    # Handle shape consistency for different model types before denormalization
-    if all_outputs_tensor.dim() == 2:
-        # If model outputs flattened format [batch_size, num_buses * features]
-        batch_size = all_outputs_tensor.shape[0]
-        num_features = 6
-        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
-    
-    outputs_denorm = normalizer.denormalize(all_outputs_tensor, num_buses)
-    targets_denorm = normalizer.denormalize(all_targets_tensor, num_buses)
-
-    return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
-
-def plot_training_history(history, model_name, config, num_buses, is_physics_informed=True):
-    """Plots and saves the training history for the best model."""
-    
-    if is_physics_informed:
-        # Physics-informed models: Show 4 plots with physics violations
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle(f'Training History for {model_name} (Physics-Informed)', fontsize=16)
-
-        # Plot total loss
-        axes[0, 0].plot(history['train_total_loss'], label='Train')
-        axes[0, 0].plot(history['val_total_loss'], label='Validation')
-        axes[0, 0].set_title('Total Loss')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
-        
-        # Plot MSE
-        axes[0, 1].plot(history['train_mse'], label='Train')
-        axes[0, 1].plot(history['val_mse'], label='Validation')
-        axes[0, 1].set_title('MSE Loss')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('MSE')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # Plot power violation
-        axes[1, 0].plot(history['train_power_violation'], label='Train')
-        axes[1, 0].plot(history['val_power_violation'], label='Validation')
-        axes[1, 0].set_title('Power Balance Violation')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Violation')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Plot voltage violation
-        axes[1, 1].plot(history['train_voltage_violation'], label='Train')
-        axes[1, 1].plot(history['val_voltage_violation'], label='Validation')
-        axes[1, 1].set_title('Voltage Violation')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Violation')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
-        
-    else:
-        # Non-physics models: Show 4 plots with training metrics
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle(f'Training History for {model_name} (Non-Physics)', fontsize=16)
-
-        # Plot MSE (main metric)
-        axes[0, 0].plot(history['train_mse'], label='Train', linewidth=2)
-        axes[0, 0].plot(history['val_mse'], label='Validation', linewidth=2)
-        axes[0, 0].set_title('MSE Loss (Primary Metric)')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('MSE')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
-        
-        # Plot RMSE (derived metric)
-        train_rmse = [mse**0.5 for mse in history['train_mse']]
-        val_rmse = [mse**0.5 for mse in history['val_mse']]
-        axes[0, 1].plot(train_rmse, label='Train')
-        axes[0, 1].plot(val_rmse, label='Validation')
-        axes[0, 1].set_title('RMSE')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('RMSE')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # Plot learning rate progression (if available) or loss smoothness
-        epochs = list(range(1, len(history['train_mse']) + 1))
-        axes[1, 0].plot(epochs, history['train_mse'], alpha=0.7, label='Train MSE')
-        axes[1, 0].plot(epochs, history['val_mse'], alpha=0.7, label='Val MSE')
-        axes[1, 0].set_title('Loss Progression')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Loss')
-        axes[1, 0].set_yscale('log')  # Log scale to better see convergence
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Plot training vs validation gap
-        train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
-        axes[1, 1].plot(epochs, train_val_gap, color='red', label='Train-Val Gap')
-        axes[1, 1].set_title('Generalization Gap (|Train - Val|)')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('MSE Difference')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
-    
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
-    # Save in the new directory structure
-    save_path = config.get_training_history_path(num_buses, model_name)
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path)
-    plt.close()
-
-
-def plot_renewable_impact(data_df, metric_name, y_label, title, config, num_buses, model_name):
-    """Plots renewable impact for the best model."""
-    x_col = 'renewable_fraction'
-    y_col = metric_name
-    
-    plt.figure(figsize=(12, 8))
-    x, y = data_df[x_col], data_df[y_col]
-    plt.scatter(x, y, alpha=0.6, label='Test Scenario')
-
-    # Fit trendline
-    z = np.polyfit(x, y, 1)
-    p = np.poly1d(z)
-    plt.plot(x.sort_values(), p(x.sort_values()), "r--", linewidth=2, 
-             label=f'Trendline (y={z[0]:.2f}x + {z[1]:.2f})')
-
-    plt.title(title, fontsize=16)
-    plt.xlabel('Renewable Energy Fraction', fontsize=12)
-    plt.ylabel(y_label, fontsize=12)
-    plt.legend(fontsize=10)
-    plt.grid(True)
-
-    # Save in the new directory structure
-    save_dir = config.get_renewable_impacts_dir(num_buses, model_name)
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"{metric_name}.png")
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-# Add this new function after the existing plotting functions
-def plot_convergence(history, model_name, config, num_buses):
-    """Plots the convergence curve of the MoSOA algorithm."""
-    plt.figure(figsize=(10, 6))
-    # Create explicit iteration numbers for x-axis (1-based indexing for readability)
-    iterations = list(range(1, len(history) + 1))
-    plt.plot(iterations, history, 'b-', label='Convergence curve')
-    plt.title(f'MoSOA Convergence for {model_name}', fontsize=14)
-    plt.xlabel('Iteration', fontsize=12)
-    plt.ylabel('Best MSE + Physics-Informed Loss', fontsize=12)
-    plt.grid(True)
-    plt.legend()
-    
-    save_path = config.get_convergence_plot_path(num_buses, model_name)
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-
-def save_best_model_results(best_model, best_run, moopf_results, renewable_impact_data, 
-                          training_history, config, num_buses, is_physics_informed=True):
-    """Saves all results for the best model in the new directory structure."""
-    model_name = best_run['model_name']
-    
-    # Create necessary directories
-    model_dir = config.get_model_eval_dir(num_buses, model_name)
-    os.makedirs(model_dir, exist_ok=True)
-    
-    # Save model checkpoint
-    torch.save(best_model.state_dict(), config.get_model_checkpoint_path(num_buses, model_name))
-    
-    # Save MOOPF results (or MSE results for non-physics models)
-    results_filename = "moopf_results.csv" if is_physics_informed else "mse_results.csv"
-    results_path = os.path.join(model_dir, results_filename)
-    moopf_results.to_csv(results_path, index=False)
-    
-    # Save summary with filtered data based on model type
-    if is_physics_informed:
-        # Physics models: Save all metrics
-        summary_data = best_run.copy()
-    else:
-        # Non-physics models: Remove physics-related metrics
-        summary_data = best_run.copy()
-        # Remove physics metrics from top level
-        physics_metrics = ['power_violation', 'voltage_violation']
-        for metric in physics_metrics:
-            summary_data.pop(metric, None)
-        
-        # Clean validation metrics if they exist
-        if 'val_metrics' in summary_data and isinstance(summary_data['val_metrics'], dict):
-            val_metrics_clean = {k: v for k, v in summary_data['val_metrics'].items() 
-                               if k not in physics_metrics}
-            summary_data['val_metrics'] = val_metrics_clean
-        
-        # Clean training history if it exists
-        if 'training_history' in summary_data and isinstance(summary_data['training_history'], dict):
-            history_clean = summary_data['training_history'].copy()
-            for metric in ['train_power_violation', 'val_power_violation', 
-                          'train_voltage_violation', 'val_voltage_violation']:
-                history_clean.pop(metric, None)
-            summary_data['training_history'] = history_clean
-    
-    pd.DataFrame([summary_data]).to_csv(config.get_summary_path(num_buses, model_name), index=False)
-    
-    # Plot training history (available for all models)
-    plot_training_history(training_history, model_name, config, num_buses, is_physics_informed)
-    
-    # Plot convergence history if available (available for all models)
-    if 'convergence_history' in best_run:
-        plot_convergence(best_run['convergence_history'], model_name, config, num_buses)
-    
-    # Only plot renewable impacts for physics-informed models
-    if is_physics_informed and not renewable_impact_data.empty:
-        # Update metrics dictionary to match column names in renewable_impact_data
-        metrics = {
-            'normalized_carbon_emissions': 'Normalized Carbon Emissions',
-            'voltage_deviation': 'Voltage Deviation',          # Changed from normalized_voltage_deviation
-            'power_loss': 'Power Loss',                        # Changed from normalized_power_loss
-            'power_flow': 'Normalized Power Flow'              # NEW: Added power flow metric
-        }
-        
-        for metric, label in metrics.items():
-            try:
-                plot_renewable_impact(
-                    renewable_impact_data,
-                    metric_name=metric,
-                    y_label=label,
-                    title=f'Impact of Renewable Fraction on {label}',
-                    config=config,
-                    num_buses=num_buses,
-                    model_name=model_name
-                )
-            except KeyError as e:
-                print(f"Warning: Could not plot {metric} due to missing column: {e}")
-                continue
-    else:
-        print(f"ℹ️  Skipping renewable impact plots for non-physics-informed model: {model_name}")
-
-def evaluate_moopf_objectives(model, data_loader, config, device, normalizer, is_physics_informed=True):
-    """Evaluates multi-objective objectives and collects data for analysis."""
-    model.eval()
-    num_buses_val = getattr(config, 'NUM_BUSES', 33)
-    num_buses = int(num_buses_val[0]) if isinstance(num_buses_val, list) else int(num_buses_val)
-    physics_calculator = PowerSystemLoss(config=config, normalizer=normalizer).to(device)
-    w_loss, w_vdev, w_carbon = config.MOOPF_WEIGHT_LOSS, config.MOOPF_WEIGHT_VDEV, config.MOOPF_WEIGHT_CARBON
-    all_results, renewable_impact_data = [], []
-
-    with torch.no_grad():
-        for batch in tqdm(data_loader, desc="Evaluating MOOPF Objectives"):
-            features, ybus = batch['features'].to(device), batch['ybus_matrix'].to(device)
-            time_carbon, time_energy = batch['time_carbon_coeffs'].to(device), batch['time_energy_coeffs'].to(device)
-            adj = batch['adjacency'].to(device)
-
-            outputs_norm = model(features, adj)
-            
-            # Handle shape consistency for different model types
-            if outputs_norm.dim() == 2:
-                # If model outputs flattened format [batch_size, num_buses * features]
-                batch_size = outputs_norm.shape[0]
-                num_features = 6
-                outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
-            
-            outputs_phys = normalizer.denormalize(outputs_norm, num_buses)
-
-            if is_physics_informed:
-                # Calculate physics-based metrics for physics-informed models
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
-                norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                emissions = physics_calculator._compute_carbon_emissions(outputs_phys, time_carbon, time_energy)
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
-            else:
-                # For non-physics models, set physics metrics to zero/neutral values
-                batch_size = features.shape[0]
-                norm_loss = torch.zeros(batch_size, device=device)
-                norm_vdev = torch.zeros(batch_size, device=device)
-                emissions = {'raw': torch.zeros(batch_size, device=device), 'normalized': torch.zeros(batch_size, device=device)}
-                norm_power_flow = torch.zeros(batch_size, device=device)
-
-            # Capture data for analyzing the impact of renewables (only for physics-informed models)
-            if is_physics_informed:
-                try:
-                    # Use model outputs (outputs_phys) instead of input features to calculate renewable impacts
-                    inputs_phys = outputs_phys
-                    renewable_gen = inputs_phys[..., 4].sum(dim=-1)
-                    total_load = inputs_phys[..., 2].sum(dim=-1) + 1e-9 # Add epsilon to avoid division by zero
-                    renewable_fraction = (renewable_gen / total_load).cpu().numpy()
-
-                    for i in range(features.shape[0]):
-                        # --- START: MODIFICATION ---
-                        # Using normalized carbon emissions for the plot and data capture
-                        renewable_impact_data.append({
-                            'renewable_fraction': renewable_fraction[i],
-                            'normalized_carbon_emissions': emissions['normalized'][i].item(),
-                            'voltage_deviation': norm_vdev[i].item(),
-                            'power_loss': norm_loss[i].item(),
-                            'power_flow': norm_power_flow[i].item()
-                        })
-                        # --- END: MODIFICATION ---
-                except IndexError:
-                    logging.warning("Could not calculate renewable fraction due to unexpected data shape.")
-
-            if is_physics_informed:
-                moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
-                all_results.append({
-                    'moopf_score': moopf_score.mean().item(), 'normalized_power_loss': norm_loss.mean().item(),
-                    'normalized_voltage_deviation': norm_vdev.mean().item(), 'normalized_carbon_emissions': emissions['normalized'].mean().item(),
-                    'raw_carbon_emissions_tCO2': emissions['raw'].mean().item(),
-                    'normalized_power_flow': norm_power_flow.mean().item()  # Added but NOT in MOOPF score
-                })
-            else:
-                # For non-physics models, only report MSE-based results
-                # Calculate MSE between model outputs and ground truth targets
-                targets = batch['targets'].to(device)
-                targets_norm = normalizer.normalize(targets)
-                mse_only = F.mse_loss(outputs_norm, targets_norm)
-                all_results.append({
-                    'mse_score': mse_only.item(),  # Main metric for non-physics models
-                    'normalized_power_loss': 0.0,  # Not applicable
-                    'normalized_voltage_deviation': 0.0,  # Not applicable
-                    'normalized_carbon_emissions': 0.0,  # Not applicable
-                    'raw_carbon_emissions_tCO2': 0.0,  # Not applicable
-                    'normalized_power_flow': 0.0  # Not applicable
-                })
-
-    return pd.DataFrame(all_results), pd.DataFrame(renewable_impact_data)
-
-def _init_positions(num_agents, dim, upper_bound, lower_bound):
-    if isinstance(upper_bound, (int, float)): upper_bound = np.full(dim, upper_bound)
-    if isinstance(lower_bound, (int, float)): lower_bound = np.full(dim, lower_bound)
-    positions = np.zeros((num_agents, dim))
-    for i in range(dim):
-        positions[:, i] = np.random.uniform(lower_bound[i], upper_bound[i], num_agents)
-    return positions
-
-def soa(num_agents, max_iter, lower_bound, upper_bound, dim, objective_func):
-    print("\nStarting Enhanced Seagull Optimization Algorithm for Hyperparameter Tuning...")
-    best_position, best_score = np.zeros(dim), float('inf')
-    positions = _init_positions(num_agents, dim, upper_bound, lower_bound)
-    convergence_curve = []
-    lambda_uncertainty, lambda_beta, beta_max = 5.0, 5.0, 2.0
-    pbar = tqdm(range(max_iter), desc="MoSOA Progress")
-    for l in pbar:
-        fitness_all = [objective_func(np.clip(p, lower_bound, upper_bound)) for p in positions]
-        valid_fitness = [(f, i) for i, f in enumerate(fitness_all) if f is not None and f != float('inf')]
-        if valid_fitness:
-            current_best_score_iter, best_agent_idx = min(valid_fitness, key=lambda item: item[0])
-            if current_best_score_iter < best_score:
-                best_score = current_best_score_iter
-                best_position = positions[best_agent_idx].copy()
-        convergence_curve.append(best_score)
-        sigma = np.std([f for f, _ in valid_fitness]) if valid_fitness else 1e-9
-        if sigma == 0: sigma = 1e-9
-        fc, beta = 2 - l * (2 / max_iter), beta_max * np.exp(-lambda_beta * (l / max_iter))
-        for i in range(num_agents):
-            time_factor, uncertainty_factor = (1 - np.sin((np.pi / 2) * (l /    max_iter))), 1 / (1 + lambda_uncertainty * sigma)
-            A1, b = 1.0 * time_factor * uncertainty_factor, 1.0 * (1 - 2 / (1 + np.exp((2 * l) / max_iter))) + -1.0
-            rand_ll = (fc - 1) * np.random.rand() + 1
-
-            D_alphs = fc * positions[i, :] + A1 * (best_position - positions[i, :])
-            X1 = D_alphs * np.exp(b * rand_ll) * np.cos(rand_ll * 2 * np.pi) + best_position
-
-            P_rand = positions[np.random.randint(0, num_agents), :]
-            new_position = X1 + beta * (P_rand - positions[i, :])
-            
-            # CRITICAL FIX: Ensure positions stay within bounds
-            positions[i, :] = np.clip(new_position, lower_bound, upper_bound)
-
-        pbar.set_description(f"MoSOA Iteration {l+1}/{max_iter} | Best MSE: {best_score:.6f}")
-    return best_score, best_position, convergence_curve
-
-def print_comprehensive_summary(all_results):
-    """Print and save a comprehensive summary of all model performances across all bus systems."""
-    if not all_results:
-        print("\n❌ No results to summarize.")
-        return
-    
-    print(f"\n{'='*100}")
-    print(f"🎯 COMPREHENSIVE FINAL SUMMARY - ALL MODELS & BUS SYSTEMS")
-    print(f"{'='*100}")
-    
-    # Create summary table for display
-    summary_data = []
-    for result in all_results:
-        summary_data.append({
-            'Model': result['model_name'],
-            'Bus System': f"{result['num_buses']}-bus",
-            'Type': 'Physics' if result['is_physics_informed'] else 'Non-Physics',
-            'Hidden Dim': result['best_hidden_dim'],
-            'GC Layers': result['best_gc_layers'],
-            'Training MSE': f"{result['training_mse']:.6f}" if result['training_mse'] != float('inf') else 'Failed',
-            'Test Score': f"{result['final_test_score']:.6f}" if result['final_test_score'] != float('inf') else 'Failed',
-            'Metric Type': result['final_metric_name']
-        })
-    
-    # Create detailed DataFrame for CSV export
-    import pandas as pd
-    import os
-    from datetime import datetime
-    
-    csv_data = []
-    for result in all_results:
-        csv_data.append({
-            'model_name': result['model_name'],
-            'num_buses': result['num_buses'],
-            'bus_system': f"{result['num_buses']}-bus",
-            'model_type': 'Physics-Informed' if result['is_physics_informed'] else 'Non-Physics',
-            'is_physics_informed': result['is_physics_informed'],
-            'best_hidden_dim': result['best_hidden_dim'],
-            'best_gc_layers': result['best_gc_layers'],
-            'training_mse': result['training_mse'],
-            'final_test_score': result['final_test_score'],
-            'final_metric_name': result['final_metric_name'],
-            'power_violation': result['power_violation'],
-            'voltage_violation': result['voltage_violation'],
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        })
-    
-    # Save to CSV file in model_evaluation directory
-    model_eval_dir = "model_evaluation"
-    os.makedirs(model_eval_dir, exist_ok=True)
-    
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_filename = f"comprehensive_summary_{timestamp}.csv"
-    csv_path = os.path.join(model_eval_dir, csv_filename)
-    
-    # Also save a "latest" version for easy access
-    latest_csv_path = os.path.join(model_eval_dir, "comprehensive_summary_latest.csv")
-    
-    df = pd.DataFrame(csv_data)
-    df.to_csv(csv_path, index=False)
-    df.to_csv(latest_csv_path, index=False)
-    
-    print(f"📁 Comprehensive summary saved to:")
-    print(f"   Timestamped: {csv_path}")
-    print(f"   Latest: {latest_csv_path}")
-    print()
-    
-    # Print table header
-    print(f"{'Model':<15} {'Bus Sys':<8} {'Type':<11} {'H.Dim':<7} {'GC Ly':<5} {'Train MSE':<12} {'Test Score':<12} {'Metric':<12}")
-    print("-" * 100)
-    
-    # Print each result
-    for data in summary_data:
-        print(f"{data['Model']:<15} {data['Bus System']:<8} {data['Type']:<11} {data['Hidden Dim']:<7} {data['GC Layers']:<5} {data['Training MSE']:<12} {data['Test Score']:<12} {data['Metric Type']:<12}")
-    
-    print("-" * 100)
-    
-    # Find overall best performers
-    successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]
-    
-    if successful_results:
-        # Best overall (lowest test score)
-        best_overall = min(successful_results, key=lambda x: x['final_test_score'])
-        print(f"\n🏆 OVERALL BEST PERFORMER:")
-        print(f"   Model: {best_overall['model_name']} on {best_overall['num_buses']}-bus system")
-        print(f"   {best_overall['final_metric_name']}: {best_overall['final_test_score']:.6f}")
-        print(f"   Config: {best_overall['best_hidden_dim']} hidden_dim, {best_overall['best_gc_layers']} GC layers")
-        
-        # Best per bus system
-        print(f"\n📊 BEST PER BUS SYSTEM:")
-        bus_systems = list(set(r['num_buses'] for r in successful_results))
-        for num_buses in sorted(bus_systems):
-            bus_results = [r for r in successful_results if r['num_buses'] == num_buses]
-            if bus_results:
-                best_for_bus = min(bus_results, key=lambda x: x['final_test_score'])
-                print(f"   {num_buses}-bus: {best_for_bus['model_name']} ({best_for_bus['final_metric_name']}: {best_for_bus['final_test_score']:.6f})")
-        
-        # Performance comparison
-        print(f"\n📈 PERFORMANCE COMPARISON:")
-        print(f"   33-bus systems generally perform better (lower error)")
-        print(f"   Performance degrades with system size as expected")
-        
-        # Count successful vs failed models
-        total_runs = len(all_results)
-        successful_runs = len(successful_results)
-        print(f"\n✅ SUCCESS RATE: {successful_runs}/{total_runs} ({100*successful_runs/total_runs:.1f}%)")
-        
-    else:
-        print("\n❌ No successful model runs to analyze.")
-    
-    print(f"{'='*100}")
+    if log_dir: 
+        os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.FileHandler(log_path, mode='w'), logging.StreamHandler()]
+    )
 
 
 def main():
     class Args:
-        # Updated model hierarchy: GCN -> adaptiveGCN -> PIGCN -> PIGCLSTM -> PIGCGRU -> ResnetPIGCLSTM -> ResnetPIGCGRU
-        models_to_test = ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']
+        # Configuration for models to test - now centralized in config
+        test_config = 'core'  # Options: 'quick', 'comprehensive', 'physics_only', 'non_physics_only', 'all'
         seed = 42
-        # MoSOA parameters are now adaptive - set dynamically based on system size
+    
     args = Args()
     base_config = Config()
     
     # Track all results for comprehensive summary
     all_results = []
     
-    # STEP 1: Validate data before training
+    # STEP 1: Print run information
+    run_info = base_config.get_run_info()
+    print(f"\n🚀 STARTING NEW EXPERIMENTAL RUN")
+    print(f"📅 Run ID: {run_info['run_id']}")
+    print(f"⏰ Start Time: {run_info['start_time']}")
+    print(f"📁 Results Directory: {run_info['current_run_dir']}")
+    print(f"🔧 Test Configuration: {args.test_config}")
+    print("="*80)
+    
+    # STEP 2: Validate data before training
     if not validate_data_before_training(base_config):
         print("❌ Data validation failed. Exiting training.")
         return
     
-    torch.manual_seed(args.seed); np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     device = base_config.DEVICE
 
-    model_class_map = {
-        'adaptiveGCN': adaptiveGCN, 'GCN': GCN, 'PIGCN': AdaptivePIGCN, 'PIGCLSTM': PIGCLSTM,
-        'PIGCGRU': PIGCGRU, 'ResnetPIGCGRU': ResnetPIGCGRU, 'ResnetPIGCLSTM': ResnetPIGCLSTM
-    }
-    model_config_map = {
-        'GCN': base_config.GCNConfig, 'adaptiveGCN': base_config.adaptiveGCNConfig, 'PIGCN': base_config.PIGCNConfig,
-        'PIGCLSTM': base_config.PIGCLSTMConfig, 'PIGCGRU': base_config.PIGCGRUConfig,
-        'ResnetPIGCGRU': base_config.ResnetPIGCGRUConfig, 'ResnetPIGCLSTM': base_config.ResnetPIGCLSTMConfig
-    }
+    # Get model configurations from config
+    model_class_map = base_config.get_model_class_map()
+    model_config_map = base_config.model_config_map
+    models_to_test = base_config.get_models_to_test(args.test_config)
 
-    bus_systems_to_test = base_config.NUM_BUSES if isinstance(base_config.NUM_BUSES, list) else [base_config.NUM_BUSES]
+    bus_systems_to_test = (base_config.NUM_BUSES 
+                          if isinstance(base_config.NUM_BUSES, list) 
+                          else [base_config.NUM_BUSES])
 
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
@@ -595,101 +82,88 @@ def main():
         print(f"📊 MoSOA Parameters: {mosoa_params['num_seagulls']} seagulls, {mosoa_params['max_iterations']} iterations")
         print(f"💡 Description: {mosoa_params['description']}")
         
-        all_bus_system_results = []
+        # Initialize data collectors for comparative plots
+        bus_renewable_data = {}  # model_name -> renewable_impact_dataframe
+        bus_convergence_data = {}  # model_name -> convergence_history
+        all_tested_models = []  # Track all models tested (including non-physics)
+        
         case_name = f"case{num_buses}"
         try:
             data_tuple = load_power_system_data(base_config, case_name)
-            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _normalizer = data_tuple
+            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
         except FileNotFoundError as e:
-            print(f"[CRITICAL ERROR] {e}"); continue
+            print(f"[CRITICAL ERROR] {e}")
+            continue
 
-        for model_name in args.models_to_test:
+        for model_name in models_to_test:
             print(f"\n{'='*80}\nSTARTING HYPERPARAMETER SEARCH FOR: {model_name} on {num_buses}-bus\n{'='*80}")
-            model_specific_results, model_config = [], model_config_map[model_name]
+            
+            model_specific_results = []
+            model_config = model_config_map[model_name]
 
-            is_sequential = 'LSTM' in model_name.upper() or 'GRU' in model_name.upper()
-            is_physics_informed = 'PI' in model_name  # Only models with 'PI' prefix are physics-informed
-            uses_adaptive_graph = model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'PIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
+            # Get model characteristics from config
+            is_sequential = base_config.is_sequential_model(model_name)
+            is_physics_informed = base_config.is_physics_informed(model_name)
+            uses_adaptive_graph = base_config.uses_adaptive_graph(model_name)
 
-            # Use adaptive scaling for hidden dimensions based on system size
-            hidden_range = model_config.get_hidden_dim_range(num_buses) if hasattr(model_config, 'get_hidden_dim_range') else model_config.HIDDEN_DIM_RANGE
-            param_bounds = {'HIDDEN_DIM': hidden_range, 'NUM_GC_LAYERS': model_config.NUM_GC_LAYERS_RANGE}
-            if is_physics_informed: 
-                # By adding these lines, we tell MoSoa to tune these values.
-                param_bounds['LAMBDA_P'] = (1.0, 50.0)
-                param_bounds['LAMBDA_V'] = (1.0, 50.0)
-            if is_sequential: param_bounds.update({'SEQUENCE_LENGTH': model_config.SEQUENCE_LENGTH_RANGE, 'RNN_LAYERS': model_config.RNN_LAYERS_RANGE})
-            if uses_adaptive_graph: param_bounds.update({'EMBEDDING_DIM': model_config.EMBEDDING_DIM_RANGE, 'PHI': model_config.PHI_RANGE})
+            # Setup hyperparameter bounds
+            param_bounds = setup_hyperparameter_bounds(
+                model_name, model_config, num_buses, 
+                is_physics_informed, is_sequential, uses_adaptive_graph
+            )
 
-            param_keys, dim, lower_bounds, upper_bounds = list(param_bounds.keys()), len(param_bounds), [b[0] for b in param_bounds.values()], [b[1] for b in param_bounds.values()]
+            param_keys = list(param_bounds.keys())
+            dim = len(param_bounds)
+            lower_bounds = [b[0] for b in param_bounds.values()]
+            upper_bounds = [b[1] for b in param_bounds.values()]
 
             def objective_function(params_array):
-                params = {key: val for key, val in zip(param_keys, params_array)}
-                for k in ['HIDDEN_DIM', 'NUM_GC_LAYERS', 'SEQUENCE_LENGTH', 'RNN_LAYERS', 'EMBEDDING_DIM']:
-                    if k in params: params[k] = int(round(params[k]))
+                params = process_optimization_params(param_keys, params_array)
 
                 run_config = copy.deepcopy(base_config)
                 for key, value in params.items(): 
                     setattr(run_config, key.upper(), value)
                 run_config.NUM_BUSES = num_buses
 
-                run_name = f"run_{model_name}_B{num_buses}_H{params.get('HIDDEN_DIM', 'N/A')}_GC{params.get('NUM_GC_LAYERS', 'N/A')}"
-                if is_sequential: 
-                    run_name += f"_SL{params.get('SEQUENCE_LENGTH', 'N/A')}_R{params.get('RNN_LAYERS', 'N/A')}"
+                run_name = generate_run_name(model_name, params, num_buses, is_sequential)
                 print(f"\n--- Evaluating {run_name} ---")
 
                 try:
                     setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
+                    
                     loaders = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
-                        _energy_coeffs, _carbon_coeffs, run_config, 
+                        _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
                         is_static=(not is_sequential)
                     )
                     train_loader, val_loader, test_loader = loaders
 
-                    model_kwargs = {
-                        'feature_dim': model_config.FEATURE_DIM,
-                        'hidden_dim': params['HIDDEN_DIM'],
-                        'num_gc_layers': params['NUM_GC_LAYERS'],
-                        'num_buses': num_buses,
-                        'dropout': model_config.DROPOUT
-                    }
-                    if is_sequential: 
-                        model_kwargs['rnn_layers'] = params['RNN_LAYERS']
-                    if uses_adaptive_graph: 
-                        model_kwargs.update({
-                            'embedding_dim': params['EMBEDDING_DIM'],
-                            'phi': params['PHI']
-                        })
-
+                    # Create model with optimized parameters
+                    model_kwargs = create_model_kwargs(
+                        model_config, params, num_buses, is_sequential, uses_adaptive_graph
+                    )
                     model = model_class_map[model_name](**model_kwargs).to(device)
                     
                     # Use appropriate loss function based on whether model is physics-informed
-                    if is_physics_informed:
-                        criterion = PowerSystemLoss(config=run_config, normalizer=_normalizer).to(device)
-                    else:
-                        # For non-physics-informed models, use simple MSE loss
-                        criterion = PowerSystemLoss(config=run_config, normalizer=_normalizer, is_gcn=True).to(device)
+                    criterion = PowerSystemLoss(
+                        config=run_config, 
+                        normalizer=_normalizer, 
+                        is_gcn=(not is_physics_informed)
+                    ).to(device)
                     
                     optimizer = torch.optim.Adam(model.parameters(), lr=run_config.LEARNING_RATE)
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     trainer.train(train_loader, val_loader)
 
-                    # Get validation metrics for hyperparameter optimization (NOT test!)
+                    # Get validation metrics for hyperparameter optimization
                     val_metrics = evaluate_model(model, val_loader, device, run_config, _normalizer, is_sequential)
                     
                     # Get test metrics for final evaluation
                     test_metrics = evaluate_model(model, test_loader, device, run_config, _normalizer, is_sequential)
 
-                    # Calculate total loss for optimization using VALIDATION metrics
-                    if is_physics_informed:
-                        total_loss = (val_metrics['mse'] + 
-                                    run_config.LAMBDA_P * val_metrics['power_violation'] + 
-                                    run_config.LAMBDA_V * val_metrics['voltage_violation'])
-                    else:
-                        # For non-physics-informed models, only use MSE
-                        total_loss = val_metrics['mse']
+                    # Calculate total loss for optimization using validation metrics
+                    total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
 
                     # Store the training history with the results
                     run_results = {
@@ -706,25 +180,24 @@ def main():
                     model_specific_results.append(run_results)
 
                     return total_loss
+                    
                 except Exception as e:
                     logging.error(f"Run {run_name} failed: {e}", exc_info=True)
                     return float('inf')
                 finally:
                     gc.collect()
-                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
-            # After SOA returns results - use adaptive parameters
-            best_score, best_position, history = soa(
+            # Run MoSOA optimization
+            best_score, best_position, history, iteration_details = soa(
                 mosoa_params['num_seagulls'], 
                 mosoa_params['max_iterations'], 
                 lower_bounds, upper_bounds, dim, objective_function
             )
 
-            # Create dictionary of best parameters found by MoSOA
-            best_params = {key: val for key, val in zip(param_keys, best_position)}
-            for k in ['HIDDEN_DIM', 'NUM_GC_LAYERS', 'SEQUENCE_LENGTH', 'RNN_LAYERS', 'EMBEDDING_DIM']:
-                if k in best_params:
-                    best_params[k] = int(round(best_params[k]))
+            # Process best parameters
+            best_params = process_optimization_params(param_keys, best_position)
 
             print(f"\nBest hyperparameters found by MoSOA:")
             for key, value in best_params.items():
@@ -740,12 +213,13 @@ def main():
                 print(f"All runs for {model_name} failed.")
                 continue
 
-            # Get the best run based on total_loss and add MoSOA results
+            # Get the best run and add MoSOA results
             best_run = best_run_df.loc[best_run_df['total_loss'].idxmin()].to_dict()
             best_run.update({
                 'convergence_history': history,
                 'mosoa_best_score': best_score,
-                'mosoa_best_params': best_params
+                'mosoa_best_params': best_params,
+                'iteration_details': iteration_details
             })
 
             # Create best config from the best parameters
@@ -755,26 +229,14 @@ def main():
             best_config.NUM_BUSES = num_buses
 
             # Create model kwargs for best model
-            best_model_config = model_config_map[model_name]
-            model_kwargs_best = {
-                'feature_dim': best_model_config.FEATURE_DIM,
-                'hidden_dim': int(best_params['HIDDEN_DIM']),
-                'num_gc_layers': int(best_params['NUM_GC_LAYERS']),
-                'num_buses': num_buses,
-                'dropout': best_model_config.DROPOUT
-            }
-            if is_sequential:
-                model_kwargs_best['rnn_layers'] = int(best_params['RNN_LAYERS'])
-            if uses_adaptive_graph:
-                model_kwargs_best.update({
-                    'embedding_dim': int(best_params['EMBEDDING_DIM']),
-                    'phi': float(best_params['PHI'])
-                })
+            model_kwargs_best = create_model_kwargs(
+                model_config, best_params, num_buses, is_sequential, uses_adaptive_graph
+            )
 
             # Create data loaders for best model
             loaders_best = create_data_loaders(
                 _features, _adjacency, _ybus_matrices, _targets, 
-                _energy_coeffs, _carbon_coeffs, best_config, 
+                _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
                 is_static=(not is_sequential)
             )
             _, _, test_loader_best = loaders_best
@@ -790,7 +252,6 @@ def main():
             
             # Calculate final test performance metric for comparison
             if is_physics_informed:
-                # For physics models, use a composite score or MSE (but clearly labeled)
                 final_test_score = moopf_results['mse_score'].mean() if 'mse_score' in moopf_results.columns else best_run.get('mse', float('inf'))
                 final_metric_name = "MOOPF MSE"
             else:
@@ -812,31 +273,14 @@ def main():
             }
             all_results.append(result_entry)
             
-            print(f"\n{'='*60}")
-            print(f"🏆 BEST MODEL SUMMARY: {model_name} on {num_buses}-bus system")
-            print(f"{'='*60}")
-            print(f"📊 Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
-            print(f"📈 Training Performance: MSE = {best_run.get('mse', 'N/A'):.6f}")
+            # Track this model for comparative plots
+            all_tested_models.append(model_name)
             
-            if is_physics_informed:
-                print(f"⚡ Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6f}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6f}")
-                print("\n--- MOOPF Evaluation Results ---")
-                print(moopf_results.mean().to_dict())
-            else:
-                print(f"🎯 Final Test MSE: {final_test_score:.6f}")
-                print("\n--- MSE Evaluation Results ---")
-                # Only show relevant metrics for non-physics models
-                relevant_metrics = {
-                    'mse_score': final_test_score,
-                    'rmse_score': (final_test_score) ** 0.5,
-                    'samples_evaluated': len(moopf_results)
-                }
-                print(relevant_metrics)
-            print(f"{'='*60}")
-            
-            # Skip renewable impact plots for non-physics models
-            if not is_physics_informed:
-                print(f"ℹ️  Skipping renewable impact plots for non-physics-informed model: {model_name}")
+            # Print model summary
+            print_model_summary(
+                best_run, moopf_results, model_name, num_buses, 
+                is_physics_informed, final_test_score, final_metric_name
+            )
 
             # Save all results using the training history from the best run
             save_best_model_results(
@@ -847,11 +291,54 @@ def main():
                 training_history=best_run['training_history'],
                 config=best_config,
                 num_buses=num_buses,
-                is_physics_informed=is_physics_informed
+                is_physics_informed=is_physics_informed,
+                iteration_details=iteration_details,
+                param_keys=param_keys
             )
+            
+            # Collect data for comparative plots
+            if is_physics_informed and not renewable_impact_data.empty:
+                bus_renewable_data[model_name] = renewable_impact_data
+            
+            if history:  # Convergence history
+                bus_convergence_data[model_name] = history
+        
+        # After all models for this bus system are complete, create comparative plots
+        print(f"\n🎨 Creating comparative plots for {num_buses}-bus system...")
+        
+        # Import comparative visualization functions
+        from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
+        
+        # Create comparative renewable impact plots for all tested models
+        # Always create plots if any models were tested, regardless of physics type
+        if all_tested_models:
+            create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
+        
+        # Create comparative convergence plot
+        if bus_convergence_data:
+            create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results)
+    
+    # Finalize the run with summary
+    if all_results:
+        successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]
+        
+        run_summary = {
+            'models_tested': [r['model_name'] for r in all_results],
+            'total_models': len(all_results),
+            'successful_models': len(successful_results),
+            'test_config': args.test_config,
+            'best_model': successful_results[0]['model_name'] if successful_results else 'None',
+            'best_score': successful_results[0]['final_test_score'] if successful_results else float('inf'),
+            'bus_systems_tested': list(set(r['num_buses'] for r in all_results))
+        }
+        
+        base_config.finalize_run(run_summary)
+    else:
+        base_config.finalize_run({'status': 'no_results', 'test_config': args.test_config})
+
 
 if __name__ == '__main__':
     main()
