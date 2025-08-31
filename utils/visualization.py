@@ -173,10 +173,10 @@ def plot_all_renewable_impacts(renewable_impact_data: pd.DataFrame, config: Any,
         
     # Update metrics dictionary to match column names in renewable_impact_data
     metrics = {
-        'normalized_carbon_emissions': 'Normalized Carbon Emissions',
+        'normalized_carbon_emissions': 'Carbon Emissions',
         'voltage_deviation': 'Voltage Deviation',          # Changed from normalized_voltage_deviation
         'power_loss': 'Power Loss',                        # Changed from normalized_power_loss
-        'power_flow': 'Normalized Power Flow'              # NEW: Added power flow metric
+        'power_flow': 'Power Flow'                         # NEW: Added power flow metric
     }
     
     for metric, label in metrics.items():
@@ -257,7 +257,8 @@ def create_comparative_renewable_plots(all_renewable_data: Dict[str, pd.DataFram
     """
     Create comparative renewable impact plots for physics-informed models only.
     Non-physics models are excluded from renewable impact analysis as these 
-    metrics are not applicable to them.
+    metrics are not applicable to them. Subplot layout dynamically adjusts 
+    to the number of physics-informed models.
     
     Args:
         all_renewable_data: Dictionary mapping model_name -> renewable_impact_dataframe
@@ -285,28 +286,54 @@ def create_comparative_renewable_plots(all_renewable_data: Dict[str, pd.DataFram
     
     # Metrics to compare - each will be a separate plot
     metrics = {
-        'normalized_carbon_emissions': 'Normalized Carbon Emissions',
+        'normalized_carbon_emissions': 'Carbon Emissions',
         'voltage_deviation': 'Voltage Deviation',
         'power_loss': 'Power Loss', 
-        'power_flow': 'Normalized Power Flow'
+        'power_flow': 'Power Flow'
     }
     
     # Use only physics-informed models
     model_names = physics_models
+    num_models = len(model_names)
+    
+    # Calculate optimal subplot layout based on number of physics models
+    def calculate_subplot_layout(n_models):
+        """Calculate optimal rows and columns for n_models subplots"""
+        if n_models == 1:
+            return 1, 1
+        elif n_models == 2:
+            return 1, 2
+        elif n_models <= 4:
+            return 2, 2
+        elif n_models <= 6:
+            return 2, 3
+        elif n_models <= 9:
+            return 3, 3
+        else:
+            # For more than 9 models, use 3x4 grid and limit to 12
+            return 3, 4
+    
+    nrows, ncols = calculate_subplot_layout(num_models)
     
     # Create a separate plot for each metric
     for metric, metric_label in metrics.items():
-        fig, axes = plt.subplots(2, 4, figsize=(20, 10))  # 2x4 grid for up to 7 models
+        # Dynamic figure size based on layout
+        fig_width = ncols * 5  # 5 inches per column
+        fig_height = nrows * 4  # 4 inches per row
+        
+        fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height))
         fig.suptitle(f'{metric_label} vs Renewable Fraction - {num_buses}-bus System', fontsize=16)
         
-        # Flatten axes for easier indexing
-        axes_flat = axes.flatten()
+        # Handle different subplot layouts
+        if num_models == 1:
+            axes = [axes]  # Make it iterable
+        elif nrows == 1 or ncols == 1:
+            axes = axes.flatten() if num_models > 1 else [axes]
+        else:
+            axes = axes.flatten()
         
         for idx, model_name in enumerate(model_names):
-            if idx >= 7:  # Limit to 7 models
-                break
-                
-            ax = axes_flat[idx]
+            ax = axes[idx]
             data_df = all_renewable_data[model_name]
             
             if metric in data_df.columns:
@@ -339,14 +366,17 @@ def create_comparative_renewable_plots(all_renewable_data: Dict[str, pd.DataFram
                        fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
                 ax.set_title(f'{model_name}', fontsize=12, fontweight='bold')
         
-        # Hide unused subplots
-        for idx in range(len(model_names), len(axes_flat)):
-            axes_flat[idx].set_visible(False)
+        # Remove any unused subplots (only if we have more subplot spaces than models)
+        total_subplots = nrows * ncols
+        if total_subplots > num_models:
+            for idx in range(num_models, total_subplots):
+                axes[idx].remove()
         
         plt.tight_layout()
         
-        # Save the plot
-        save_path = os.path.join(bus_dir, f"renewable_impact_{metric}.png")
+        # Save the plot - clean metric name for filename
+        clean_metric_name = metric.replace('normalized_', '')
+        save_path = os.path.join(bus_dir, f"renewable_impact_{clean_metric_name}.png")
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
