@@ -30,9 +30,9 @@ class Config:
             if num_buses <= 33:
                 return "PIGCGRU"  # Best performance for small systems
             elif num_buses <= 57:
-                return "PIGCN"     # Most memory efficient for medium systems
+                return "AdaptivePIGCN"     # Most memory efficient for medium systems
             else:
-                return "PIGCN"     # Only PIGCN for large systems (118-bus)
+                return "AdaptivePIGCN"     # Only AdaptivePIGCN for large systems (118-bus)
         
         @staticmethod
         def get_adaptive_mosoa_params(num_buses):
@@ -40,24 +40,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 10,     # Temporarily set to 10 for quick testing
-                    'max_iterations': 25,   # Temporarily set to 25 for quick testing
+                    'num_seagulls': 2,     # Temporarily set to 10 for quick testing
+                    'max_iterations': 6,   # Temporarily set to 25 for quick testing
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 8,      # Temporarily set to 6 for quick testing
-                    'max_iterations': 25,   # Temporarily set to 15 for quick testing
+                    'num_seagulls': 2,      # Temporarily set to 6 for quick testing
+                    'max_iterations': 4,   # Temporarily set to 15 for quick testing
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 4,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 25,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 1,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 3,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -116,7 +116,7 @@ class Config:
     
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 200
+    NUM_EPOCHS = 2
     EARLY_STOPPING_PATIENCE = 25
     
     # Weights for the multi-objective score, normalized to sum to 1.0.
@@ -140,9 +140,9 @@ class Config:
     # =============================================================================
     GCNConfig = _ModelConfig()
     
-    PIGCNConfig = _ModelConfig()
-    PIGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)
-    PIGCNConfig.PHI_RANGE = (0.0, 1.0)
+    AdaptivePIGCNConfig = _ModelConfig()
+    AdaptivePIGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)
+    AdaptivePIGCNConfig.PHI_RANGE = (0.0, 1.0)
     
     adaptiveGCNConfig = _ModelConfig()
     adaptiveGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)
@@ -235,7 +235,7 @@ class Config:
         # Import here to avoid circular imports
         from models.adaptive_gcn import adaptiveGCN
         from models.gcn import GCN
-        from models.pigcn import AdaptivePIGCN
+        from models.adaptive_pigcn import AdaptivePIGCN
         from models.pigclstm import PIGCLSTM
         from models.pigcgru import PIGCGRU
         from models.ResnetPIGCGRU import ResnetPIGCGRU
@@ -244,7 +244,7 @@ class Config:
         return {
             'adaptiveGCN': adaptiveGCN, 
             'GCN': GCN, 
-            'PIGCN': AdaptivePIGCN, 
+            'AdaptivePIGCN': AdaptivePIGCN, 
             'PIGCLSTM': PIGCLSTM,
             'PIGCGRU': PIGCGRU, 
             'ResnetPIGCGRU': ResnetPIGCGRU, 
@@ -258,7 +258,7 @@ class Config:
         return {
             'GCN': self.GCNConfig, 
             'adaptiveGCN': self.adaptiveGCNConfig, 
-            'PIGCN': self.PIGCNConfig,
+            'AdaptivePIGCN': self.AdaptivePIGCNConfig,
             'PIGCLSTM': self.PIGCLSTMConfig, 
             'PIGCGRU': self.PIGCGRUConfig,
             'ResnetPIGCGRU': self.ResnetPIGCGRUConfig, 
@@ -266,16 +266,16 @@ class Config:
         }
     
     # Models to test - configurable list
-    MODELS_TO_TEST = ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Test all models
+    MODELS_TO_TEST = ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Test all models
     
     # Alternative model test configurations for different scenarios
     MODEL_TEST_CONFIGS = {
-        'quick': ['PIGCN'],  # Fast testing
-        'core': ['adaptiveGCN', 'PIGCN'],  # Core comparison: best non-physics vs physics
-        'comprehensive': ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU'],  # Full comparison
-        'physics_only': ['PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU'],  # Physics-informed only
+        'quick': ['AdaptivePIGCN'],  # Fast testing
+        'core': ['adaptiveGCN', 'AdaptivePIGCN'],  # Core comparison: best non-physics vs physics
+        'comprehensive': ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU'],  # Full comparison
+        'physics_only': ['AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU'],  # Physics-informed only
         'non_physics_only': ['GCN', 'adaptiveGCN'],  # Non-physics-informed only
-        'all': ['GCN', 'adaptiveGCN', 'PIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Everything
+        'all': ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Everything
     }
     
     @staticmethod
@@ -284,7 +284,7 @@ class Config:
         Get list of models to test based on configuration.
         
         Available configurations:
-        - 'quick': Fast testing with one model (PIGCN)
+        - 'quick': Fast testing with one model (AdaptivePIGCN)
         - 'comprehensive': Full comparison of key models
         - 'physics_only': Only physics-informed models
         - 'non_physics_only': Only non-physics-informed models  
@@ -305,7 +305,7 @@ class Config:
     @staticmethod
     def uses_adaptive_graph(model_name):
         """Check if model uses adaptive graph features."""
-        return model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'PIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
+        return model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'AdaptivePIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
     
     def _update_latest_run_link(self):
         """Update the latest_run directory to point to current run."""

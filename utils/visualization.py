@@ -134,7 +134,9 @@ def plot_renewable_impact(data_df: pd.DataFrame, metric_name: str, y_label: str,
     # Save in the new directory structure
     save_dir = config.get_renewable_impacts_dir(num_buses, model_name)
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"{metric_name}.png")
+    # Clean metric name for filename (remove 'normalized_' prefix)
+    clean_metric_name = metric_name.replace('normalized_', '')
+    save_path = os.path.join(save_dir, f"{clean_metric_name}.png")
     plt.savefig(save_path, dpi=300)
     plt.close()
 
