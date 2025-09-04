@@ -26,7 +26,7 @@ def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: to
         
         # Standard regression metrics
         mse = F.mse_loss(outputs, targets).item()
-        rmse = torch.sqrt(torch.tensor(mse)).item()
+        rmse = torch.sqrt(torch.tensor(mse, device=outputs.device)).item()
         
         # Create PowerSystemLoss instance for physics calculations
         physics_metrics = PowerSystemLoss(config=config, normalizer=None)
@@ -105,8 +105,8 @@ class PowerSystemLoss(nn.Module):
             return {
                 'total_loss': data_loss,
                 'mse': data_loss,
-                'power_violation': torch.tensor(0.0),
-                'voltage_violation': torch.tensor(0.0)
+                'power_violation': torch.tensor(0.0, device=data_loss.device),
+                'voltage_violation': torch.tensor(0.0, device=data_loss.device)
             }
 
         # 2. Physics-Informed Penalties

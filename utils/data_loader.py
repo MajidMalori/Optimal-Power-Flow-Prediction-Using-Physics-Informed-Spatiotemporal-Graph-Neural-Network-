@@ -16,7 +16,29 @@ class PowerSystemNormalizer:
         self.std[self.std == 0] = 1.0
 
     def normalize(self, data):
-        return (data - self.mean) / self.std
+        # Handle both numpy arrays and PyTorch tensors
+        if torch.is_tensor(data):
+            # If it's a CUDA tensor, move to CPU first
+            if data.is_cuda:
+                data_cpu = data.cpu()
+            else:
+                data_cpu = data
+            # Convert to numpy for computation
+            data_np = data_cpu.numpy()
+        else:
+            data_np = data
+        
+        result = (data_np - self.mean) / self.std
+        
+        # Convert back to tensor if input was a tensor
+        if torch.is_tensor(data):
+            result_tensor = torch.from_numpy(result).float()
+            # Move back to original device
+            if data.is_cuda:
+                result_tensor = result_tensor.to(data.device)
+            return result_tensor
+        else:
+            return result
 
     def denormalize(self, data: torch.Tensor, num_buses: int) -> torch.Tensor:
         original_shape = data.shape
