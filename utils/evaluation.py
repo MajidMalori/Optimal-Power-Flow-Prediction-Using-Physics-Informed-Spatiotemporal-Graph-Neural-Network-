@@ -147,12 +147,7 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 targets_norm = normalizer.normalize(targets)
                 mse_only = F.mse_loss(outputs_norm, targets_norm)
                 all_results.append({
-                    'mse_score': mse_only.item(),  # Main metric for non-physics models
-                    'normalized_power_loss': 0.0,  # Not applicable
-                    'normalized_voltage_deviation': 0.0,  # Not applicable
-                    'normalized_carbon_emissions': 0.0,  # Not applicable
-                    'raw_carbon_emissions_tCO2': 0.0,  # Not applicable
-                    'normalized_power_flow': 0.0  # Not applicable
+                    'mse_score': mse_only.item()  # Only relevant metric for non-physics models
                 })
 
     return pd.DataFrame(all_results), pd.DataFrame(renewable_impact_data)
@@ -254,15 +249,24 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
     pd.DataFrame([summary_data]).to_csv(config.get_summary_path(num_buses, model_name), index=False)
     
     # Plot training history (available for all models)
-    plot_training_history(training_history, model_name, config, num_buses, is_physics_informed)
+    try:
+        plot_training_history(training_history, model_name, config, num_buses, is_physics_informed)
+    except Exception as e:
+        print(f"⚠️  Warning: Could not create training history plot for {model_name}: {e}")
     
     # Plot convergence history if available (available for all models)
     if 'convergence_history' in best_run:
-        plot_convergence(best_run['convergence_history'], model_name, config, num_buses)
+        try:
+            plot_convergence(best_run['convergence_history'], model_name, config, num_buses)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not create convergence plot for {model_name}: {e}")
     
     # Only plot renewable impacts for physics-informed models
     if is_physics_informed:
-        plot_all_renewable_impacts(renewable_impact_data, config, num_buses, model_name)
+        try:
+            plot_all_renewable_impacts(renewable_impact_data, config, num_buses, model_name)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not create renewable impact plots for {model_name}: {e}")
     else:
         print(f"ℹ️  Skipping renewable impact plots for non-physics-informed model: {model_name}")
 

@@ -6,6 +6,13 @@ import pandas as pd
 from tqdm import tqdm
 import copy
 import gc
+import signal
+import time
+
+# Fix matplotlib threading issues by setting backend before any plotting imports
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent threading issues
+import matplotlib.pyplot as plt
 
 # --- Project-specific modules ---
 from utils.data_loader import load_power_system_data, create_data_loaders
@@ -33,6 +40,52 @@ def setup_logging(log_path: str):
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[logging.FileHandler(log_path, mode='w'), logging.StreamHandler()]
     )
+
+
+class TimeoutError(Exception):
+    """Custom timeout exception."""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Signal handler for timeout."""
+    raise TimeoutError("Training timeout exceeded")
+
+
+def run_with_timeout(func, timeout_seconds=600):  # 10 minutes default timeout
+    """Run a function with a timeout."""
+    if hasattr(signal, 'SIGALRM'):  # Unix systems
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout_seconds)
+        try:
+            result = func()
+            return result
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:  # Windows systems - use threading timeout
+        import threading
+        result = [None]
+        exception = [None]
+        
+        def target():
+            try:
+                result[0] = func()
+            except Exception as e:
+                exception[0] = e
+        
+        thread = threading.Thread(target=target)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout_seconds)
+        
+        if thread.is_alive():
+            raise TimeoutError(f"Training timeout exceeded ({timeout_seconds} seconds)")
+        
+        if exception[0]:
+            raise exception[0]
+        
+        return result[0]
 
 
 def main():
@@ -131,6 +184,11 @@ def main():
                 try:
                     setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
                     
+                    # CRITICAL FIX: Clear GPU memory before each run
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                    
                     loaders = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
                         _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
@@ -142,7 +200,20 @@ def main():
                     model_kwargs = create_model_kwargs(
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph
                     )
+                    
+                    # CRITICAL FIX: Add memory check before model creation
+                    if torch.cuda.is_available():
+                        available_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+                        print(f"Available GPU memory: {available_memory / 1024**3:.2f} GB")
+                        if available_memory < 1024**3:  # Less than 1GB
+                            print("WARNING: Low GPU memory, clearing cache...")
+                            torch.cuda.empty_cache()
+                    
                     model = model_class_map[model_name](**model_kwargs).to(device)
+                    
+                    # CRITICAL FIX: Check memory after model creation
+                    if torch.cuda.is_available():
+                        print(f"GPU memory after model creation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                     
                     # Use appropriate loss function based on whether model is physics-informed
                     criterion = PowerSystemLoss(
@@ -154,7 +225,20 @@ def main():
                     optimizer = torch.optim.Adam(model.parameters(), lr=run_config.LEARNING_RATE)
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
-                    trainer.train(train_loader, val_loader)
+                    
+                    # CRITICAL FIX: Add timeout protection for training
+                    def train_model():
+                        trainer.train(train_loader, val_loader)
+                        return True
+                    
+                    try:
+                        # Set timeout based on system size (larger systems need more time)
+                        timeout_seconds = 300 if num_buses <= 33 else 600 if num_buses <= 57 else 900
+                        run_with_timeout(train_model, timeout_seconds)
+                        print(f"Training completed successfully for {run_name}")
+                    except TimeoutError as e:
+                        logging.error(f"Training timeout for {run_name}: {e}")
+                        return float('inf')
 
                     # Get validation metrics for hyperparameter optimization
                     val_metrics = evaluate_model(model, val_loader, device, run_config, _normalizer, is_sequential)
@@ -312,11 +396,17 @@ def main():
         # Create comparative renewable impact plots for all tested models
         # Always create plots if any models were tested, regardless of physics type
         if all_tested_models:
-            create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
+            try:
+                create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
+            except Exception as e:
+                print(f"⚠️  Warning: Could not create renewable impact plots: {e}")
         
         # Create comparative convergence plot
         if bus_convergence_data:
-            create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
+            try:
+                create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
+            except Exception as e:
+                print(f"⚠️  Warning: Could not create convergence plots: {e}")
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results)

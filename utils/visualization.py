@@ -6,13 +6,48 @@ Contains all plotting and visualization functions used in training and evaluatio
 import os
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to prevent threading issues
 import matplotlib.pyplot as plt
 from typing import Dict, Any
+import warnings
+
+# Suppress matplotlib warnings that can cause threading issues
+warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='matplotlib')
+
+def safe_plot_operation(plot_func, *args, **kwargs):
+    """
+    Safely execute plotting operations to prevent threading issues.
+    Ensures all figures are properly closed and matplotlib state is clean.
+    """
+    try:
+        # Clear any existing figures to prevent memory leaks
+        plt.clf()
+        plt.close('all')
+        
+        # Execute the plotting function
+        result = plot_func(*args, **kwargs)
+        
+        # Ensure all figures are closed
+        plt.close('all')
+        
+        return result
+    except Exception as e:
+        # Clean up on error
+        plt.close('all')
+        print(f"Warning: Plotting operation failed: {e}")
+        return None
 
 
 def plot_training_history(history: Dict[str, list], model_name: str, config: Any, 
                          num_buses: int, is_physics_informed: bool = True):
     """Plots and saves the training history for the best model."""
+    return safe_plot_operation(_plot_training_history_impl, history, model_name, config, num_buses, is_physics_informed)
+
+def _plot_training_history_impl(history: Dict[str, list], model_name: str, config: Any, 
+                               num_buses: int, is_physics_informed: bool = True):
+    """Internal implementation of plot_training_history."""
     
     if is_physics_informed:
         # Physics-informed models: Show 4 plots with physics violations
@@ -143,6 +178,10 @@ def plot_renewable_impact(data_df: pd.DataFrame, metric_name: str, y_label: str,
 
 def plot_convergence(history: list, model_name: str, config: Any, num_buses: int):
     """Plots the convergence curve of the MoSOA algorithm."""
+    return safe_plot_operation(_plot_convergence_impl, history, model_name, config, num_buses)
+
+def _plot_convergence_impl(history: list, model_name: str, config: Any, num_buses: int):
+    """Internal implementation of plot_convergence."""
     plt.figure(figsize=(10, 6))
     # Create explicit iteration numbers for x-axis (1-based indexing for readability)
     iterations = list(range(1, len(history) + 1))
@@ -168,6 +207,10 @@ def plot_convergence(history: list, model_name: str, config: Any, num_buses: int
 
 def plot_all_renewable_impacts(renewable_impact_data: pd.DataFrame, config: Any, 
                                num_buses: int, model_name: str):
+    return safe_plot_operation(_plot_all_renewable_impacts_impl, renewable_impact_data, config, num_buses, model_name)
+
+def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config: Any, 
+                                    num_buses: int, model_name: str):
     """Plot all renewable impact metrics for a physics-informed model."""
     if renewable_impact_data.empty:
         print(f"ℹ️  No renewable impact data to plot for {model_name}")
@@ -256,6 +299,10 @@ def create_model_comparison_plot(all_results: list, save_path: str = None):
 
 def create_comparative_renewable_plots(all_renewable_data: Dict[str, pd.DataFrame], 
                                      config: Any, num_buses: int, all_tested_models: list = None):
+    return safe_plot_operation(_create_comparative_renewable_plots_impl, all_renewable_data, config, num_buses, all_tested_models)
+
+def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.DataFrame], 
+                                           config: Any, num_buses: int, all_tested_models: list = None):
     """
     Create comparative renewable impact plots for physics-informed models only.
     Non-physics models are excluded from renewable impact analysis as these 
@@ -387,6 +434,10 @@ def create_comparative_renewable_plots(all_renewable_data: Dict[str, pd.DataFram
 
 def create_comparative_convergence_plot(all_convergence_data: Dict[str, list], 
                                       config: Any, num_buses: int):
+    return safe_plot_operation(_create_comparative_convergence_plot_impl, all_convergence_data, config, num_buses)
+
+def _create_comparative_convergence_plot_impl(all_convergence_data: Dict[str, list], 
+                                            config: Any, num_buses: int):
     """
     Create comparative convergence plot for all models in a bus system.
     Single plot with multiple convergence curves and legend.

@@ -36,6 +36,7 @@ class AdaptivePIGCN(BaseModel):
                         num_buses=num_buses, physics_informed=True)
 
         self.phi = phi
+        self.num_buses = num_buses
 
         # --- Adaptive Graph Learning Components ---
         self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
@@ -125,5 +126,8 @@ class AdaptivePIGCN(BaseModel):
         # --- 3. Reshape and pass through MLP for final output ---
         x = x.reshape(batch_size, -1)
         x = self.mlp(x)
+        
+        # --- 4. Reshape back to 3D format [batch_size, num_buses, feature_dim] ---
+        x = x.reshape(batch_size, self.num_buses, 6)
         
         return x

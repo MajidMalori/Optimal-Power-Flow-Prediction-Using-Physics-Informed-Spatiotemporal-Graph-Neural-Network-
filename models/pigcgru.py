@@ -50,14 +50,31 @@ class PIGCGRU(BaseModel):
         # --- End: Components from adaptiveGCN ---
         
         # The size of the vector fed into the GRU is the flattened representation of all node embeddings.
+        # CRITICAL FIX: Limit GRU size to prevent CUDA memory issues
         gru_io_size = hidden_dim * num_buses
+        # For larger systems, use a more memory-efficient GRU size
+        if num_buses >= 57:
+            # Use a reduced GRU hidden size for larger systems to prevent memory explosion
+            gru_hidden_size = min(gru_io_size, max(512, gru_io_size // 4))
+        else:
+            gru_hidden_size = gru_io_size
+            
         self.gru = nn.GRU(
             input_size=gru_io_size, 
-            hidden_size=gru_io_size, 
+            hidden_size=gru_hidden_size, 
             num_layers=rnn_layers, 
             batch_first=True, 
             dropout=dropout if rnn_layers > 1 else 0.0
         )
+        
+        # Store the hidden size for later use
+        self.gru_hidden_size = gru_hidden_size
+        
+        # Add projection layer for reduced GRU output (for memory efficiency)
+        if gru_hidden_size != gru_io_size:
+            self.gru_projection = nn.Linear(gru_hidden_size, gru_io_size)
+        else:
+            self.gru_projection = None
         
         # Final layer to transform the GRU's output back to the desired feature dimension per node.
         self.output_transform = nn.Linear(hidden_dim, feature_dim)
@@ -106,7 +123,14 @@ class PIGCGRU(BaseModel):
         last_step_output = gru_out[:, -1, :]
         
         # 6. Reshape the final time step's output to per-node features.
-        last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
+        # CRITICAL FIX: Handle reduced GRU output size for memory efficiency
+        if self.gru_projection is not None:
+            # For larger systems with reduced GRU size, project back to the original size
+            projected_output = self.gru_projection(last_step_output)
+            last_step_per_node = projected_output.view(batch_size, num_nodes, self.hidden_dim)
+        else:
+            # Original behavior for smaller systems
+            last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
         
         # 7. Apply the final transformation to get the desired output shape.
         final_output_per_node = self.output_transform(last_step_per_node)

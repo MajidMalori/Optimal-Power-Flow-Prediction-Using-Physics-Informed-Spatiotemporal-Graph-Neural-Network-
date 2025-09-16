@@ -50,14 +50,31 @@ class PIGCLSTM(BaseModel):
         # --- End: Components from adaptiveGCN ---
         
         # The size of the vector fed into the LSTM is the flattened representation of all node embeddings.
+        # CRITICAL FIX: Limit LSTM size to prevent CUDA memory issues
         lstm_io_size = hidden_dim * num_buses
+        # For larger systems, use a more memory-efficient LSTM size
+        if num_buses >= 57:
+            # Use a reduced LSTM hidden size for larger systems to prevent memory explosion
+            lstm_hidden_size = min(lstm_io_size, max(512, lstm_io_size // 4))
+        else:
+            lstm_hidden_size = lstm_io_size
+            
         self.lstm = nn.LSTM(
             input_size=lstm_io_size, 
-            hidden_size=lstm_io_size, 
+            hidden_size=lstm_hidden_size, 
             num_layers=rnn_layers, 
             batch_first=True, 
             dropout=dropout if rnn_layers > 1 else 0.0
         )
+        
+        # Store the hidden size for later use
+        self.lstm_hidden_size = lstm_hidden_size
+        
+        # Add projection layer for reduced LSTM output (for memory efficiency)
+        if lstm_hidden_size != lstm_io_size:
+            self.lstm_projection = nn.Linear(lstm_hidden_size, lstm_io_size)
+        else:
+            self.lstm_projection = None
         
         # Final layer to transform the LSTM's output back to the desired feature dimension per node.
         self.output_transform = nn.Linear(hidden_dim, feature_dim)
@@ -106,7 +123,14 @@ class PIGCLSTM(BaseModel):
         last_step_output = lstm_out[:, -1, :]
         
         # 6. Reshape the final time step's output to per-node features.
-        last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
+        # CRITICAL FIX: Handle reduced LSTM output size for memory efficiency
+        if self.lstm_projection is not None:
+            # For larger systems with reduced LSTM size, project back to the original size
+            projected_output = self.lstm_projection(last_step_output)
+            last_step_per_node = projected_output.view(batch_size, num_nodes, self.hidden_dim)
+        else:
+            # Original behavior for smaller systems
+            last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
         
         # 7. Apply the final transformation to get the desired output shape.
         final_output_per_node = self.output_transform(last_step_per_node)
