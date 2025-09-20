@@ -163,7 +163,6 @@ class Config:
     PIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 32)
     PIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
 
-    # --- START CORRECTION: Add explicit configurations for the new residual models ---
     # Although they share parameters with their base versions, defining them explicitly
     # makes the configuration complete, clear, and easier to manage independently.
 
@@ -178,7 +177,6 @@ class Config:
     ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 15)
     ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 32)
     ResnetPIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
-    # --- END CORRECTION ---
 
     def __init__(self):
         """Initializes directories and sets up experimental run structure."""

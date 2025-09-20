@@ -65,11 +65,34 @@ def main():
     class Args:
         # Configuration for models to test - now centralized in config
         test_config = 'all'  # Options: 'quick', 'comprehensive', 'physics_only', 'non_physics_only', 'all'
+        bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         seed = 42
     
     args = Args()
     base_config = Config()
     _config_instance = base_config  # Store for signal handler
+    
+    # Parse bus systems to test
+    def parse_bus_systems(bus_systems_arg):
+        """Parse bus systems argument and return list of bus numbers to test."""
+        if bus_systems_arg.lower() == 'all':
+            return base_config.NUM_BUSES
+        else:
+            # Parse comma-separated values
+            bus_list = []
+            for bus_str in bus_systems_arg.split(','):
+                bus_str = bus_str.strip()
+                try:
+                    bus_num = int(bus_str)
+                    if bus_num in base_config.NUM_BUSES:
+                        bus_list.append(bus_num)
+                    else:
+                        print(f"⚠️  Warning: {bus_num}-bus system not available. Available: {base_config.NUM_BUSES}")
+                except ValueError:
+                    print(f"⚠️  Warning: Invalid bus system '{bus_str}'. Skipping.")
+            return bus_list if bus_list else base_config.NUM_BUSES
+    
+    bus_systems_to_test = parse_bus_systems(args.bus_systems)
     
     # Track all results for comprehensive summary
     all_results = []
@@ -81,6 +104,7 @@ def main():
     print(f"⏰ Start Time: {run_info['start_time']}")
     print(f"📁 Results Directory: {run_info['current_run_dir']}")
     print(f"🔧 Test Configuration: {args.test_config}")
+    print(f"🏭 Bus Systems to Test: {bus_systems_to_test}")
     print("="*80)
     
     # STEP 2: Validate data before training
@@ -97,9 +121,6 @@ def main():
     model_config_map = base_config.model_config_map
     models_to_test = base_config.get_models_to_test(args.test_config)
 
-    bus_systems_to_test = (base_config.NUM_BUSES 
-                          if isinstance(base_config.NUM_BUSES, list) 
-                          else [base_config.NUM_BUSES])
 
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
@@ -158,7 +179,6 @@ def main():
                 try:
                     setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
                     
-                    # CRITICAL FIX: Clear GPU memory before each run
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                         print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
@@ -175,7 +195,6 @@ def main():
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph
                     )
                     
-                    # CRITICAL FIX: Add memory check before model creation
                     if torch.cuda.is_available():
                         available_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
                         print(f"Available GPU memory: {available_memory / 1024**3:.2f} GB")
@@ -185,7 +204,6 @@ def main():
                     
                     model = model_class_map[model_name](**model_kwargs).to(device)
                     
-                    # CRITICAL FIX: Check memory after model creation
                     if torch.cuda.is_available():
                         print(f"GPU memory after model creation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                     
