@@ -64,7 +64,7 @@ def main():
     
     class Args:
         # Configuration for models to test - now centralized in config
-        test_config = 'physics_only'  # Options: 'quick', 'comprehensive', 'physics_only', 'non_physics_only', 'all'
+        test_config = 'all'  # Options: 'quick', 'comprehensive', 'physics_only', 'non_physics_only', 'all'
         seed = 42
     
     args = Args()
