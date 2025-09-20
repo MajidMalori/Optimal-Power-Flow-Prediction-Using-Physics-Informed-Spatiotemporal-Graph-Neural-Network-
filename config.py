@@ -40,24 +40,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 10,     # Temporarily set to 10 for quick testing
-                    'max_iterations': 25,   # Temporarily set to 25 for quick testing
+                    'num_seagulls': 1,     # Temporarily set to 10 for quick testing
+                    'max_iterations': 2,   # Temporarily set to 25 for quick testing
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 8,      # Temporarily set to 6 for quick testing
-                    'max_iterations': 25,   # Temporarily set to 15 for quick testing
+                    'num_seagulls': 1,      # Temporarily set to 6 for quick testing
+                    'max_iterations': 2,   # Temporarily set to 15 for quick testing
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 4,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 25,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 1,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 2,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -74,8 +74,8 @@ class Config:
     # New timestamped experimental results structure
     EXPERIMENTAL_RESULTS_DIR = os.path.join(ROOT_DIR, 'experimental_results')
     
-    # Current run timestamp (set at import time)
-    _CURRENT_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # Current run timestamp (will be set when needed)
+    _CURRENT_RUN_TIMESTAMP = None
     
     @property
     def CURRENT_RUN_DIR(self):
@@ -85,7 +85,10 @@ class Config:
     @property
     def LATEST_RUN_DIR(self):
         """Get the latest run directory (symlink/copy target)."""
-        return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run')
+        if self._CURRENT_RUN_TIMESTAMP:
+            return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, f'latest_run_{self._CURRENT_RUN_TIMESTAMP}')
+        else:
+            return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run')
     
     # Backward compatibility - use current run dir as evaluation dir
     @property
@@ -116,7 +119,7 @@ class Config:
     
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 200
+    NUM_EPOCHS = 10
     EARLY_STOPPING_PATIENCE = 25
     
     # Weights for the multi-objective score, normalized to sum to 1.0.
@@ -179,6 +182,9 @@ class Config:
 
     def __init__(self):
         """Initializes directories and sets up experimental run structure."""
+        # Initialize timestamp only when actually starting a run
+        self._initialize_run_timestamp()
+        
         # Create base directories
         for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
             os.makedirs(dir_path, exist_ok=True)
@@ -307,20 +313,47 @@ class Config:
         """Check if model uses adaptive graph features."""
         return model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'AdaptivePIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
     
+    def _initialize_run_timestamp(self):
+        """Initialize the run timestamp - always create new timestamp for each run."""
+        # Always create new timestamp for new run
+        self._CURRENT_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+        print(f"Starting new run: run_{self._CURRENT_RUN_TIMESTAMP}")
+
     def _update_latest_run_link(self):
         """Update the latest_run directory to point to current run."""
         import shutil
         
-        # Remove existing latest_run if it exists
-        if os.path.exists(self.LATEST_RUN_DIR):
-            shutil.rmtree(self.LATEST_RUN_DIR)
+        # Only clean up if the experimental_results directory exists
+        if os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
+            # Clean up old latest_run_* directories (only directories, not files)
+            try:
+                for item in os.listdir(self.EXPERIMENTAL_RESULTS_DIR):
+                    if item.startswith('latest_run_') and os.path.isdir(os.path.join(self.EXPERIMENTAL_RESULTS_DIR, item)):
+                        old_dir = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, item)
+                        shutil.rmtree(old_dir)
+            except (OSError, FileNotFoundError, PermissionError):
+                # Directory might not exist or be accessible, that's okay
+                pass
+            
+            # Remove generic latest_run if it exists (backward compatibility)
+            generic_latest = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run')
+            if os.path.exists(generic_latest) and os.path.isdir(generic_latest):
+                try:
+                    shutil.rmtree(generic_latest)
+                except (OSError, PermissionError):
+                    # Might be in use, that's okay
+                    pass
         
-        # Create latest_run as a copy of current run structure
-        # Note: We'll copy the structure after the run completes in train.py
+        # Create latest_run_info.txt with current run info
         latest_info_file = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run_info.txt')
-        with open(latest_info_file, 'w') as f:
-            f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\n")
-            f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        try:
+            with open(latest_info_file, 'w') as f:
+                f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\n")
+                f.write(f"Latest run directory: latest_run_{self._CURRENT_RUN_TIMESTAMP}\n")
+                f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        except (OSError, PermissionError):
+            # If we can't write the info file, that's okay - not critical
+            pass
     
     def _create_run_metadata(self):
         """Create metadata for the current run."""

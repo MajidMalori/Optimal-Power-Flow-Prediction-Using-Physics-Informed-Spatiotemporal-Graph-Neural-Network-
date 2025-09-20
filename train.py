@@ -6,8 +6,9 @@ import pandas as pd
 from tqdm import tqdm
 import copy
 import gc
-import signal
 import time
+import signal
+import sys
 
 # Fix matplotlib threading issues by setting backend before any plotting imports
 import matplotlib
@@ -42,60 +43,33 @@ def setup_logging(log_path: str):
     )
 
 
-class TimeoutError(Exception):
-    """Custom timeout exception."""
-    pass
 
 
-def timeout_handler(signum, frame):
-    """Signal handler for timeout."""
-    raise TimeoutError("Training timeout exceeded")
+# Global variable to store config for signal handler
+_config_instance = None
 
-
-def run_with_timeout(func, timeout_seconds=600):  # 10 minutes default timeout
-    """Run a function with a timeout."""
-    if hasattr(signal, 'SIGALRM'):  # Unix systems
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout_seconds)
-        try:
-            result = func()
-            return result
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-    else:  # Windows systems - use threading timeout
-        import threading
-        result = [None]
-        exception = [None]
-        
-        def target():
-            try:
-                result[0] = func()
-            except Exception as e:
-                exception[0] = e
-        
-        thread = threading.Thread(target=target)
-        thread.daemon = True
-        thread.start()
-        thread.join(timeout_seconds)
-        
-        if thread.is_alive():
-            raise TimeoutError(f"Training timeout exceeded ({timeout_seconds} seconds)")
-        
-        if exception[0]:
-            raise exception[0]
-        
-        return result[0]
-
+def signal_handler(signum, frame):
+    """Handle interrupt signals to ensure proper cleanup."""
+    print(f"\nReceived signal {signum}. Cleaning up...")
+    if _config_instance:
+        _config_instance.finalize_run({'status': 'interrupted', 'reason': f'signal_{signum}'})
+    sys.exit(0)
 
 def main():
+    global _config_instance
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+    
     class Args:
         # Configuration for models to test - now centralized in config
-        test_config = 'all'  # Options: 'quick', 'comprehensive', 'physics_only', 'non_physics_only', 'all'
+        test_config = 'physics_only'  # Options: 'quick', 'comprehensive', 'physics_only', 'non_physics_only', 'all'
         seed = 42
     
     args = Args()
     base_config = Config()
+    _config_instance = base_config  # Store for signal handler
     
     # Track all results for comprehensive summary
     all_results = []
@@ -226,19 +200,9 @@ def main():
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     
-                    # CRITICAL FIX: Add timeout protection for training
-                    def train_model():
-                        trainer.train(train_loader, val_loader)
-                        return True
-                    
-                    try:
-                        # Set timeout based on system size (larger systems need more time)
-                        timeout_seconds = 300 if num_buses <= 33 else 600 if num_buses <= 57 else 900
-                        run_with_timeout(train_model, timeout_seconds)
-                        print(f"Training completed successfully for {run_name}")
-                    except TimeoutError as e:
-                        logging.error(f"Training timeout for {run_name}: {e}")
-                        return float('inf')
+                    # Train the model
+                    trainer.train(train_loader, val_loader)
+                    print(f"Training completed successfully for {run_name}")
 
                     # Get validation metrics for hyperparameter optimization
                     val_metrics = evaluate_model(model, val_loader, device, run_config, _normalizer, is_sequential)
