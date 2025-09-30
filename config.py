@@ -279,6 +279,7 @@ class Config:
         'comprehensive': ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU'],  # Full comparison
         'physics_only': ['AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU'],  # Physics-informed only
         'non_physics_only': ['GCN', 'adaptiveGCN'],  # Non-physics-informed only
+        'sequential_only': ['PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU'],  # Sequential models only (LSTM/GRU)
         'all': ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Everything
     }
     
@@ -289,9 +290,11 @@ class Config:
         
         Available configurations:
         - 'quick': Fast testing with one model (AdaptivePIGCN)
+        - 'core': Core comparison - best non-physics vs physics
         - 'comprehensive': Full comparison of key models
         - 'physics_only': Only physics-informed models
-        - 'non_physics_only': Only non-physics-informed models  
+        - 'non_physics_only': Only non-physics-informed models
+        - 'sequential_only': Only sequential models (LSTM/GRU-based)
         - 'all': Every available model
         """
         return Config.MODEL_TEST_CONFIGS.get(test_config, Config.MODEL_TEST_CONFIGS['quick'])
