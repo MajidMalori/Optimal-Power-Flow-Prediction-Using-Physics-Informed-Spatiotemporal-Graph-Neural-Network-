@@ -73,7 +73,7 @@ def main():
         # Device configuration
         force_cpu = False  # Set to True to force CPU training even if GPU is available
         
-        # Parallel training modes
+        # Parallel training mode
         parallel_data_loading = True   # Use multiple workers for data loading (recommended)
         
         # Worker configuration (auto-configured based on device if set to 'auto')
