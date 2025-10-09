@@ -370,9 +370,20 @@ python train.py
 
 ```python
 class Args:
+    # Model and system configuration
     test_config = 'quick'        # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
     bus_systems = '33'           # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
     seed = 42
+    
+    # === PARALLEL DATA LOADING CONFIGURATION ===
+    # Device configuration
+    force_cpu = False            # Set to True to force CPU training even if GPU is available
+    
+    # Parallel data loading
+    parallel_data_loading = True   # Use multiple workers for data loading (recommended)
+    
+    # Worker configuration (auto-configured based on device if set to 'auto')
+    data_workers = 'auto'         # Number of data loading workers
 ```
 
 **Test Configuration Options:**
@@ -393,6 +404,10 @@ class Args:
     test_config = 'comprehensive'  # Test all models
     bus_systems = '33,57'         # Train only 33 and 57 bus systems
     seed = 42
+    
+    # Enable parallel data loading for faster training
+    parallel_data_loading = True
+    data_workers = 'auto'         # Auto-configure based on hardware
 ```
 
 **Training specific model types:**
@@ -404,12 +419,20 @@ class Args:
     test_config = 'physics_only'   # Only physics-informed models
     bus_systems = '118'            # Only 118-bus system
     seed = 42
+    
+    # Enable parallel data loading for large systems
+    parallel_data_loading = True
+    data_workers = 'auto'
 
-# Sequential models only (LSTM/GRU)
+# Sequential models only (LSTM/GRU) - benefit most from parallel data loading
 class Args:
     test_config = 'sequential_only'  # Only LSTM/GRU-based models
     bus_systems = 'all'              # All bus systems
     seed = 42
+    
+    # Sequential models benefit from parallel data loading
+    parallel_data_loading = True
+    data_workers = 8              # Increase for high-memory systems
 ```
 
 **Quick testing:**
@@ -419,6 +442,29 @@ class Args:
     test_config = 'quick'         # Fast testing with one model
     bus_systems = '33'           # Only 33-bus system
     seed = 42
+    
+    # Enable parallel data loading for better performance
+    parallel_data_loading = True
+    data_workers = 'auto'
+```
+
+**CPU vs GPU Training:**
+```python
+# For CPU training (local development)
+class Args:
+    test_config = 'quick'
+    bus_systems = '33'
+    force_cpu = True              # Force CPU even if GPU available
+    parallel_data_loading = True
+    data_workers = 4              # Conservative for CPU
+
+# For GPU training (Vast.ai, cloud platforms)
+class Args:
+    test_config = 'sequential_only'
+    bus_systems = 'all'
+    force_cpu = False             # Use GPU if available
+    parallel_data_loading = True
+    data_workers = 'auto'         # Auto-configure based on GPU memory
 ```
 
 ```
@@ -470,7 +516,8 @@ Physics_Informed_Machine_Learning/
 The framework demonstrates excellent scalability:
 - **Linear complexity**: O(n) with respect to number of buses
 - **Memory efficient**: Adaptive sizing prevents OOM errors
-- **Parallelizable**: Supports multi-GPU training
+- **Parallel data loading**: Multi-worker data loading for improved I/O performance
+- **Hardware adaptive**: Auto-configures data workers based on CPU/GPU resources
 
 ### Real-time Performance
 
