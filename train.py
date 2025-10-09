@@ -75,11 +75,9 @@ def main():
         
         # Parallel training modes
         parallel_data_loading = True   # Use multiple workers for data loading (recommended)
-        parallel_hyperopt = True     # Use parallel hyperparameter optimization (experimental)
         
         # Worker configuration (auto-configured based on device if set to 'auto')
         data_workers = 'auto'         # Number of data loading workers
-        hyperopt_workers = 'auto'     # Number of parallel hyperparameter workers
     
     args = Args()
     base_config = Config()
@@ -144,11 +142,11 @@ def main():
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             print(f"🎮 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory:.1f} GB)")
             if gpu_memory >= 12:  # High-end GPU
-                return {'data': 8, 'bus': 2, 'hyperopt': 4}
+                return {'data': 8}
             elif gpu_memory >= 8:  # Mid-range GPU  
-                return {'data': 6, 'bus': 2, 'hyperopt': 3}
+                return {'data': 6}
             else:  # Entry-level GPU
-                return {'data': 4, 'bus': 1, 'hyperopt': 2}
+                return {'data': 4}
         else:
             # CPU configuration
             try:
@@ -157,17 +155,16 @@ def main():
                 memory_gb = psutil.virtual_memory().total / (1024**3)
                 print(f"🖥️  CPU: {cpu_count} cores, {memory_gb:.1f} GB RAM")
                 if cpu_count >= 8 and memory_gb >= 16:
-                    return {'data': 4, 'bus': 2, 'hyperopt': 3}
+                    return {'data': 4}
                 else:
-                    return {'data': 4, 'bus': 1, 'hyperopt': 2}
+                    return {'data': 4}
             except ImportError:
-                return {'data': 4, 'bus': 1, 'hyperopt': 2}
+                return {'data': 4}
     
     optimal = get_optimal_workers()
     
     # Apply worker settings
     data_workers = optimal['data'] if args.data_workers == 'auto' else args.data_workers
-    hyperopt_workers = optimal['hyperopt'] if args.hyperopt_workers == 'auto' else args.hyperopt_workers
     
     # Configure data loading
     if args.parallel_data_loading:
@@ -177,10 +174,6 @@ def main():
         base_config.NUM_WORKERS = 0
         print(f"📦 Parallel data loading: Disabled")
     
-    # Print parallel configuration
-    print(f"⚡ Parallel hyperopt: {'Enabled' if args.parallel_hyperopt else 'Disabled'}")
-    if args.parallel_hyperopt:
-        print(f"🔄 Hyperopt workers: {hyperopt_workers}")
     print("="*80)
 
     # Get model configurations from config
@@ -485,20 +478,18 @@ def main():
 
 
 if __name__ == '__main__':
-    # === PARALLEL TRAINING QUICK START ===
-    # To enable parallel features, modify the Args class above:
+    # === PARALLEL DATA LOADING QUICK START ===
+    # To enable parallel data loading, modify the Args class above:
     #
     # For CPU training:
     #   force_cpu = True
     #   parallel_data_loading = True  (recommended)
-    #   parallel_hyperopt = False    (optional, uses more memory)
     #
     # For GPU training on Vast.ai:
     #   force_cpu = False
     #   parallel_data_loading = True  (recommended)
-    #   parallel_hyperopt = True     (recommended for high-memory systems)
     #
-    # All worker counts are auto-configured based on your hardware.
-    # Set specific numbers instead of 'auto' for manual control.
+    # Worker count is auto-configured based on your hardware.
+    # Set specific number instead of 'auto' for manual control.
     
     main()
