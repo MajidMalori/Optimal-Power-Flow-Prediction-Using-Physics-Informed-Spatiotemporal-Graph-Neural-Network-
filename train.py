@@ -9,6 +9,7 @@ import gc
 import time
 import signal
 import sys
+# Removed ThreadPoolExecutor imports - parallel bus systems disabled
 
 # Fix matplotlib threading issues by setting backend before any plotting imports
 import matplotlib
@@ -67,6 +68,18 @@ def main():
         test_config = 'sequential_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
         bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         seed = 42
+        
+        # === PARALLEL TRAINING CONFIGURATION ===
+        # Device configuration
+        force_cpu = False  # Set to True to force CPU training even if GPU is available
+        
+        # Parallel training modes
+        parallel_data_loading = True   # Use multiple workers for data loading (recommended)
+        parallel_hyperopt = True     # Use parallel hyperparameter optimization (experimental)
+        
+        # Worker configuration (auto-configured based on device if set to 'auto')
+        data_workers = 'auto'         # Number of data loading workers
+        hyperopt_workers = 'auto'     # Number of parallel hyperparameter workers
     
     args = Args()
     base_config = Config()
@@ -114,7 +127,61 @@ def main():
     
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    device = base_config.DEVICE
+    
+    # === DEVICE AND PARALLEL CONFIGURATION ===
+    if args.force_cpu:
+        device = torch.device('cpu')
+        print("🖥️  Forced CPU mode enabled")
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    is_gpu = device.type == 'cuda'
+    print(f"🔧 Using device: {device}")
+    
+    # Auto-configure parallel settings based on device
+    def get_optimal_workers():
+        if is_gpu and torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"🎮 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory:.1f} GB)")
+            if gpu_memory >= 12:  # High-end GPU
+                return {'data': 8, 'bus': 2, 'hyperopt': 4}
+            elif gpu_memory >= 8:  # Mid-range GPU  
+                return {'data': 6, 'bus': 2, 'hyperopt': 3}
+            else:  # Entry-level GPU
+                return {'data': 4, 'bus': 1, 'hyperopt': 2}
+        else:
+            # CPU configuration
+            try:
+                import psutil
+                cpu_count = psutil.cpu_count(logical=True)
+                memory_gb = psutil.virtual_memory().total / (1024**3)
+                print(f"🖥️  CPU: {cpu_count} cores, {memory_gb:.1f} GB RAM")
+                if cpu_count >= 8 and memory_gb >= 16:
+                    return {'data': 4, 'bus': 2, 'hyperopt': 3}
+                else:
+                    return {'data': 4, 'bus': 1, 'hyperopt': 2}
+            except ImportError:
+                return {'data': 4, 'bus': 1, 'hyperopt': 2}
+    
+    optimal = get_optimal_workers()
+    
+    # Apply worker settings
+    data_workers = optimal['data'] if args.data_workers == 'auto' else args.data_workers
+    hyperopt_workers = optimal['hyperopt'] if args.hyperopt_workers == 'auto' else args.hyperopt_workers
+    
+    # Configure data loading
+    if args.parallel_data_loading:
+        base_config.NUM_WORKERS = data_workers
+        print(f"📦 Parallel data loading: Enabled ({data_workers} workers)")
+    else:
+        base_config.NUM_WORKERS = 0
+        print(f"📦 Parallel data loading: Disabled")
+    
+    # Print parallel configuration
+    print(f"⚡ Parallel hyperopt: {'Enabled' if args.parallel_hyperopt else 'Disabled'}")
+    if args.parallel_hyperopt:
+        print(f"🔄 Hyperopt workers: {hyperopt_workers}")
+    print("="*80)
 
     # Get model configurations from config
     model_class_map = base_config.get_model_class_map()
@@ -122,6 +189,11 @@ def main():
     models_to_test = base_config.get_models_to_test(args.test_config)
 
 
+    # === MAIN TRAINING EXECUTION ===
+    # Sequential bus system training (parallel bus systems disabled)
+    print(f"\n🚀 SEQUENTIAL BUS SYSTEM TRAINING")
+    print(f"🏭 Training {len(bus_systems_to_test)} bus systems: {bus_systems_to_test}")
+    
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
@@ -413,4 +485,20 @@ def main():
 
 
 if __name__ == '__main__':
+    # === PARALLEL TRAINING QUICK START ===
+    # To enable parallel features, modify the Args class above:
+    #
+    # For CPU training:
+    #   force_cpu = True
+    #   parallel_data_loading = True  (recommended)
+    #   parallel_hyperopt = False    (optional, uses more memory)
+    #
+    # For GPU training on Vast.ai:
+    #   force_cpu = False
+    #   parallel_data_loading = True  (recommended)
+    #   parallel_hyperopt = True     (recommended for high-memory systems)
+    #
+    # All worker counts are auto-configured based on your hardware.
+    # Set specific numbers instead of 'auto' for manual control.
+    
     main()

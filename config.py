@@ -104,7 +104,7 @@ class Config:
     SEED = 42
     TRAIN_SPLIT = 0.7
     VAL_SPLIT = 0.15
-    NUM_WORKERS = 0
+    NUM_WORKERS = 8  # Optimized for Vast.ai - use 8 workers for parallel data loading
     
     # Adaptive batch sizes based on system size
     @staticmethod
