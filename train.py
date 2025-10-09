@@ -433,6 +433,12 @@ def main():
             
             if history:  # Convergence history
                 bus_convergence_data[model_name] = history
+            
+            # Clear GPU cache after each model to prevent memory buildup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Ensure all operations are complete
+                print(f"🧹 GPU cache cleared after {model_name} training")
         
         # After all models for this bus system are complete, create comparative plots
         print(f"\n🎨 Creating comparative plots for {num_buses}-bus system...")
@@ -454,6 +460,12 @@ def main():
                 create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
             except Exception as e:
                 print(f"⚠️  Warning: Could not create convergence plots: {e}")
+        
+        # Final GPU cache clear after completing all models for this bus system
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            print(f"🧹 GPU cache cleared after completing {num_buses}-bus system")
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results)
