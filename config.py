@@ -16,13 +16,13 @@ class Config:
         # Adaptive scaling based on system size
         @staticmethod
         def get_hidden_dim_range(num_buses):
-            """Scale hidden dimensions based on system size"""
+            """Scale hidden dimensions based on system size - more conservative to prevent OOM"""
             if num_buses <= 33:
-                return (32, 96)      # Smaller systems
+                return (32, 64)      # Smaller systems - reduced max
             elif num_buses <= 57:
-                return (48, 96)      # Medium systems - more conservative
+                return (32, 64)      # Medium systems - more conservative
             else:
-                return (64, 128)     # Large systems - conservative to prevent OOM
+                return (32, 64)      # Large systems - very conservative to prevent OOM
         
         @staticmethod
         def get_recommended_model(num_buses):
@@ -106,16 +106,16 @@ class Config:
     VAL_SPLIT = 0.15
     NUM_WORKERS = 8  # Optimized for Vast.ai - use 8 workers for parallel data loading
     
-    # Adaptive batch sizes based on system size
+    # Adaptive batch sizes based on system size - more conservative to prevent OOM
     @staticmethod
     def get_adaptive_batch_size(num_buses):
         """Return appropriate batch size based on system size to prevent OOM"""
         if num_buses <= 33:
-            return 64
+            return 32  # Reduced from 64
         elif num_buses <= 57:
-            return 32
+            return 16  # Reduced from 32
         else:
-            return 16
+            return 8   # Reduced from 16
     
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
@@ -152,30 +152,30 @@ class Config:
     adaptiveGCNConfig.PHI_RANGE = (0.0, 1.0)
 
     PIGCLSTMConfig = _ModelConfig()
-    PIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 5)
-    PIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 15)
-    PIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 32)
+    PIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
+    PIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
+    PIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
     PIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
     
     PIGCGRUConfig = _ModelConfig()
-    PIGCGRUConfig.RNN_LAYERS_RANGE = (1, 5)
-    PIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 15)
-    PIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 32)
+    PIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
+    PIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
+    PIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
     PIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
 
     # Although they share parameters with their base versions, defining them explicitly
     # makes the configuration complete, clear, and easier to manage independently.
 
     ResnetPIGCGRUConfig = _ModelConfig()
-    ResnetPIGCGRUConfig.RNN_LAYERS_RANGE = (1, 5)
-    ResnetPIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 15)
-    ResnetPIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 32)
+    ResnetPIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
+    ResnetPIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
+    ResnetPIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
     ResnetPIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
     
     ResnetPIGCLSTMConfig = _ModelConfig()
-    ResnetPIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 5)
-    ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 15)
-    ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 32)
+    ResnetPIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
+    ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
+    ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
     ResnetPIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
 
     def __init__(self):

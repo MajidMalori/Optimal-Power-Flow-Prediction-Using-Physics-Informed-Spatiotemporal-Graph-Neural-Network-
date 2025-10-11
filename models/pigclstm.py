@@ -52,12 +52,20 @@ class PIGCLSTM(BaseModel):
         # The size of the vector fed into the LSTM is the flattened representation of all node embeddings.
         # CRITICAL FIX: Limit LSTM size to prevent CUDA memory issues
         lstm_io_size = hidden_dim * num_buses
-        # For larger systems, use a more memory-efficient LSTM size
-        if num_buses >= 57:
-            # Use a reduced LSTM hidden size for larger systems to prevent memory explosion
-            lstm_hidden_size = min(lstm_io_size, max(512, lstm_io_size // 4))
+        
+        # More aggressive memory optimization for all system sizes
+        if num_buses >= 118:
+            # Very large systems: use minimal LSTM size
+            lstm_hidden_size = min(256, lstm_io_size // 8)
+        elif num_buses >= 57:
+            # Large systems: use reduced LSTM size
+            lstm_hidden_size = min(512, lstm_io_size // 4)
+        elif num_buses >= 33:
+            # Medium systems: use moderate reduction
+            lstm_hidden_size = min(1024, lstm_io_size // 2)
         else:
-            lstm_hidden_size = lstm_io_size
+            # Small systems: use full size but with cap
+            lstm_hidden_size = min(2048, lstm_io_size)
             
         self.lstm = nn.LSTM(
             input_size=lstm_io_size, 
@@ -73,8 +81,10 @@ class PIGCLSTM(BaseModel):
         # Add projection layer for reduced LSTM output (for memory efficiency)
         if lstm_hidden_size != lstm_io_size:
             self.lstm_projection = nn.Linear(lstm_hidden_size, lstm_io_size)
+            print(f"PIGCLSTM: Using reduced LSTM size {lstm_hidden_size} -> {lstm_io_size} for {num_buses}-bus system")
         else:
             self.lstm_projection = None
+            print(f"PIGCLSTM: Using full LSTM size {lstm_hidden_size} for {num_buses}-bus system")
         
         # Final layer to transform the LSTM's output back to the desired feature dimension per node.
         self.output_transform = nn.Linear(hidden_dim, feature_dim)

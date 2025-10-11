@@ -11,6 +11,56 @@ import signal
 import sys
 # Removed ThreadPoolExecutor imports - parallel bus systems disabled
 
+def check_gpu_memory():
+    """Check available GPU memory and return status"""
+    if not torch.cuda.is_available():
+        return {'available': False, 'total': 0, 'free': 0, 'used': 0}
+    
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    allocated_memory = torch.cuda.memory_allocated()
+    cached_memory = torch.cuda.memory_reserved()
+    free_memory = total_memory - allocated_memory
+    
+    return {
+        'available': True,
+        'total': total_memory,
+        'allocated': allocated_memory,
+        'cached': cached_memory,
+        'free': free_memory
+    }
+
+def clear_gpu_memory():
+    """Clear GPU memory cache"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        gc.collect()
+
+def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
+    """Get a safe device for training, with automatic fallback to CPU if GPU memory is insufficient"""
+    if force_cpu:
+        return torch.device('cpu'), 'forced_cpu'
+    
+    if not torch.cuda.is_available():
+        return torch.device('cpu'), 'no_cuda'
+    
+    # Check available GPU memory
+    memory_info = check_gpu_memory()
+    if not memory_info['available']:
+        return torch.device('cpu'), 'no_cuda'
+    
+    free_memory_gb = memory_info['free'] / (1024**3)
+    total_memory_gb = memory_info['total'] / (1024**3)
+    
+    print(f"🎮 GPU Memory: {free_memory_gb:.2f} GB free / {total_memory_gb:.2f} GB total")
+    
+    # If free memory is less than minimum required, fallback to CPU
+    if free_memory_gb < min_free_memory_gb:
+        print(f"⚠️  GPU memory insufficient ({free_memory_gb:.2f} GB < {min_free_memory_gb} GB), falling back to CPU")
+        return torch.device('cpu'), 'insufficient_gpu_memory'
+    
+    return torch.device('cuda'), 'gpu_available'
+
 # Fix matplotlib threading issues by setting backend before any plotting imports
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend to prevent threading issues
@@ -62,6 +112,11 @@ def main():
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
     signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+    
+    # Set PyTorch CUDA memory allocation configuration to prevent fragmentation
+    if torch.cuda.is_available():
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+        print("🔧 Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
     class Args:
         # Configuration for models to test - now centralized in config
@@ -127,14 +182,13 @@ def main():
     np.random.seed(args.seed)
     
     # === DEVICE AND PARALLEL CONFIGURATION ===
-    if args.force_cpu:
-        device = torch.device('cpu')
-        print("🖥️  Forced CPU mode enabled")
-    else:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+    device, device_reason = get_safe_device(args.force_cpu, min_free_memory_gb=2.0)
     is_gpu = device.type == 'cuda'
-    print(f"🔧 Using device: {device}")
+    
+    print(f"🔧 Using device: {device} (reason: {device_reason})")
+    
+    # Clear any existing GPU memory before starting
+    clear_gpu_memory()
     
     # Auto-configure parallel settings based on device
     def get_optimal_workers():
@@ -244,9 +298,17 @@ def main():
                 try:
                     setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
                     
+                    # Clear GPU memory before starting
+                    clear_gpu_memory()
+                    
+                    # Check memory before model creation
                     if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        print(f"GPU memory before model creation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                        memory_info = check_gpu_memory()
+                        print(f"GPU memory before model creation: {memory_info['allocated'] / 1024**3:.2f} GB allocated, {memory_info['free'] / 1024**3:.2f} GB free")
+                    
+                    # Use adaptive batch size based on system size
+                    run_config.BATCH_SIZE = run_config.get_adaptive_batch_size(num_buses)
+                    print(f"Using adaptive batch size: {run_config.BATCH_SIZE} for {num_buses}-bus system")
                     
                     loaders = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
@@ -260,17 +322,37 @@ def main():
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph
                     )
                     
+                    # Check memory before model creation
                     if torch.cuda.is_available():
-                        available_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
-                        print(f"Available GPU memory: {available_memory / 1024**3:.2f} GB")
-                        if available_memory < 1024**3:  # Less than 1GB
+                        memory_info = check_gpu_memory()
+                        if memory_info['free'] < 1024**3:  # Less than 1GB free
                             print("WARNING: Low GPU memory, clearing cache...")
-                            torch.cuda.empty_cache()
+                            clear_gpu_memory()
                     
-                    model = model_class_map[model_name](**model_kwargs).to(device)
+                    # Create model with error handling for OOM
+                    try:
+                        model = model_class_map[model_name](**model_kwargs).to(device)
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            print(f"CUDA OOM during model creation: {e}")
+                            clear_gpu_memory()
+                            # Try with smaller batch size
+                            run_config.BATCH_SIZE = max(1, run_config.BATCH_SIZE // 2)
+                            print(f"Retrying with reduced batch size: {run_config.BATCH_SIZE}")
+                            # Recreate loaders with smaller batch size
+                            loaders = create_data_loaders(
+                                _features, _adjacency, _ybus_matrices, _targets, 
+                                _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
+                                is_static=(not is_sequential)
+                            )
+                            train_loader, val_loader, test_loader = loaders
+                            model = model_class_map[model_name](**model_kwargs).to(device)
+                        else:
+                            raise e
                     
                     if torch.cuda.is_available():
-                        print(f"GPU memory after model creation: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                        memory_info = check_gpu_memory()
+                        print(f"GPU memory after model creation: {memory_info['allocated'] / 1024**3:.2f} GB allocated, {memory_info['free'] / 1024**3:.2f} GB free")
                     
                     # Use appropriate loss function based on whether model is physics-informed
                     criterion = PowerSystemLoss(
@@ -297,6 +379,19 @@ def main():
                     total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
 
                     # Store the training history with the results
+                    # Only store model state if it's not too large (to prevent memory issues)
+                    model_state = None
+                    try:
+                        model_state = model.state_dict()
+                        # Check if model state is too large (> 100MB)
+                        state_size = sum(p.numel() * p.element_size() for p in model_state.values())
+                        if state_size > 100 * 1024 * 1024:  # 100MB
+                            print(f"⚠️  Model state too large ({state_size / 1024**2:.1f} MB), not storing for memory efficiency")
+                            model_state = None
+                    except Exception as e:
+                        print(f"⚠️  Could not save model state: {e}")
+                        model_state = None
+                    
                     run_results = {
                         'run_name': run_name, 
                         'model_name': model_name, 
@@ -305,7 +400,7 @@ def main():
                         'val_metrics': val_metrics,  # Validation metrics used for optimization
                         'total_loss': total_loss,  # Based on validation metrics
                         'training_history': trainer.get_training_history(),
-                        'model_state': model.state_dict(),
+                        'model_state': model_state,  # May be None for large models
                         'model_config': run_config  
                     }
                     model_specific_results.append(run_results)
@@ -316,9 +411,16 @@ def main():
                     logging.error(f"Run {run_name} failed: {e}", exc_info=True)
                     return float('inf')
                 finally:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    # Clean up model and memory
+                    if 'model' in locals():
+                        del model
+                    if 'criterion' in locals():
+                        del criterion
+                    if 'optimizer' in locals():
+                        del optimizer
+                    if 'trainer' in locals():
+                        del trainer
+                    clear_gpu_memory()
 
             # Run MoSOA optimization
             best_score, best_position, history, iteration_details = soa(
@@ -372,9 +474,31 @@ def main():
             )
             _, _, test_loader_best = loaders_best
 
-            # Use the stored model state from the best run
-            model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
-            model_to_eval.load_state_dict(best_run['model_state'])
+            # Use the stored model state from the best run (if available)
+            try:
+                model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
+                if best_run.get('model_state') is not None:
+                    model_to_eval.load_state_dict(best_run['model_state'])
+                else:
+                    print(f"⚠️  No model state available for {model_name}, using untrained model for evaluation")
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print(f"CUDA OOM during final model creation: {e}")
+                    clear_gpu_memory()
+                    # Try with even smaller batch size for evaluation
+                    best_config.BATCH_SIZE = max(1, best_config.BATCH_SIZE // 2)
+                    print(f"Retrying final evaluation with batch size: {best_config.BATCH_SIZE}")
+                    # Recreate loaders with smaller batch size
+                    loaders_best = create_data_loaders(
+                        _features, _adjacency, _ybus_matrices, _targets, 
+                        _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
+                        is_static=(not is_sequential)
+                    )
+                    _, _, test_loader_best = loaders_best
+                    model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
+                    model_to_eval.load_state_dict(best_run['model_state'])
+                else:
+                    raise e
 
             # Evaluate MOOPF objectives for the best model
             moopf_results, renewable_impact_data = evaluate_moopf_objectives(
@@ -435,10 +559,8 @@ def main():
                 bus_convergence_data[model_name] = history
             
             # Clear GPU cache after each model to prevent memory buildup
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()  # Ensure all operations are complete
-                print(f"🧹 GPU cache cleared after {model_name} training")
+            clear_gpu_memory()
+            print(f"🧹 GPU cache cleared after {model_name} training")
         
         # After all models for this bus system are complete, create comparative plots
         print(f"\n🎨 Creating comparative plots for {num_buses}-bus system...")
@@ -462,10 +584,8 @@ def main():
                 print(f"⚠️  Warning: Could not create convergence plots: {e}")
         
         # Final GPU cache clear after completing all models for this bus system
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            print(f"🧹 GPU cache cleared after completing {num_buses}-bus system")
+        clear_gpu_memory()
+        print(f"🧹 GPU cache cleared after completing {num_buses}-bus system")
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results)
