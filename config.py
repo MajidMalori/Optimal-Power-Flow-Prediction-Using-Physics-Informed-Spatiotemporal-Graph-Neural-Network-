@@ -30,9 +30,9 @@ class Config:
             if num_buses <= 33:
                 return "PIGCGRU"  # Best performance for small systems
             elif num_buses <= 57:
-                return "AdaptivePIGCN"     # Most memory efficient for medium systems
+                return "AdaptivePIGCN"     
             else:
-                return "AdaptivePIGCN"     # Only AdaptivePIGCN for large systems (118-bus)
+                return "AdaptivePIGCN"     
         
         @staticmethod
         def get_adaptive_mosoa_params(num_buses):
@@ -40,24 +40,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 10,     # Temporarily set to 10 for quick testing
-                    'max_iterations': 25,   # Temporarily set to 25 for quick testing
+                    'num_seagulls': 1,     
+                    'max_iterations': 2,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 8,      # Temporarily set to 6 for quick testing
-                    'max_iterations': 25,   # Temporarily set to 15 for quick testing
+                    'num_seagulls': 1,      
+                    'max_iterations': 2,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 4,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 25,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 1,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 2,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -104,7 +104,7 @@ class Config:
     SEED = 42
     TRAIN_SPLIT = 0.7
     VAL_SPLIT = 0.15
-    NUM_WORKERS = 8  # Optimized for Vast.ai - use 8 workers for parallel data loading
+    NUM_WORKERS = 2  # Conservative default - will be auto-configured based on system capabilities
     
     # Adaptive batch sizes based on system size - more conservative to prevent OOM
     @staticmethod
@@ -119,7 +119,7 @@ class Config:
     
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 200
+    NUM_EPOCHS = 2
     EARLY_STOPPING_PATIENCE = 25
     
     # Weights for the multi-objective score, normalized to sum to 1.0.

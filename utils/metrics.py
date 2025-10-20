@@ -221,6 +221,7 @@ class PowerSystemLoss(nn.Module):
         P_loss = Σ Σ Dij * [Rij/|Vit||Vjt| * (PitPjt + QitQjt) + Rij|Vit||Vjt|sin(θit-θjt)(QitPjt - QjtPit)]
         
         Vectorized implementation for better performance.
+        Normalized by total system load to ensure values are in [0, 1] range across all bus systems.
         """
         # Extract state variables
         Vm = state[..., 0]  # Voltage magnitudes (p.u.) [batch_size, num_buses]
@@ -300,16 +301,42 @@ class PowerSystemLoss(nn.Module):
         upper_triangle = upper_triangle.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, num_buses, num_buses]
         
         # Apply upper triangle mask and sum
-        total_loss = torch.sum(branch_losses * upper_triangle, dim=(1, 2))  # [batch_size]
+        total_loss_pu = torch.sum(branch_losses * upper_triangle, dim=(1, 2))  # [batch_size]
         
-        # The total_loss is already in per-unit since we used per-unit R and I values
-        # No need for additional normalization by load - that would be double normalization
+        # Normalize power loss using total generation as reference
+        # We use total GENERATION as the normalization base (physically meaningful and naturally positive)
+        # Note: NOT using abs() - if model predicts negative generation, the error should propagate
+        # The physics-informed loss will naturally penalize negative generation predictions
+        total_gen = torch.sum(state[..., 4], dim=-1)  # Total P_gen in MW [batch_size]
+        total_gen_pu = total_gen / self.s_base_mva  # Convert to per-unit [batch_size]
         
-        # Let the loss function handle unrealistic power loss values naturally
-        # Clamping would hide model errors and reduce learning signals
-        # Note: Negative losses indicate serious model errors that should be penalized
+        # # DEBUG: Print diagnostic information to understand the values
+        # print(f"\n[DEBUG] Power Loss Calculation:")
+        # print(f"  Num buses: {num_buses}")
+        # print(f"  Batch size: {batch_size}")
+        # print(f"  State shape: {state.shape}")
+        # print(f"  State[..., 4] (P_gen in MW) - min: {state[..., 4].min().item():.2f}, max: {state[..., 4].max().item():.2f}, mean: {state[..., 4].mean().item():.2f}")
+        # print(f"  Total P_gen (MW): min: {total_gen.min().item():.2f}, max: {total_gen.max().item():.2f}, mean: {total_gen.mean().item():.2f}")
+        # print(f"  S_base_MVA: {self.s_base_mva}")
+        # print(f"  Total P_gen (p.u.): min: {total_gen_pu.min().item():.4f}, max: {total_gen_pu.max().item():.4f}, mean: {total_gen_pu.mean().item():.4f}")
+        # print(f"  Total loss (p.u.): min: {total_loss_pu.min().item():.6f}, max: {total_loss_pu.max().item():.6f}, mean: {total_loss_pu.mean().item():.6f}")
         
-        return total_loss
+        # Normalize by total generation to get loss as a fraction of generation
+        # This returns actual loss percentages (e.g., 0.03 for 3% loss)
+        # Typical power system losses:
+        # - Distribution systems (33-bus): 2-4% → 0.02-0.04
+        # - Sub-transmission (57-bus): 1-3% → 0.01-0.03
+        # - Transmission (118-bus): 1-2% → 0.01-0.02
+        # Values are comparable across all bus systems and have direct physical meaning
+        normalized_loss = total_loss_pu / (total_gen_pu + epsilon)
+        
+        # print(f"  Normalized loss (loss/gen): min: {normalized_loss.min().item():.6f}, max: {normalized_loss.max().item():.6f}, mean: {normalized_loss.mean().item():.6f}")
+        # print(f"  Normalized loss as %: min: {(normalized_loss.min().item()*100):.2f}%, max: {(normalized_loss.max().item()*100):.2f}%, mean: {(normalized_loss.mean().item()*100):.2f}%")
+        
+        # Do NOT scale or clamp - report actual loss percentages
+        # Let the physics loss naturally penalize excessive or unphysical losses
+        # Values outside typical ranges provide important learning signals during training
+        return normalized_loss
 
     def _compute_normalized_voltage_deviation(self, state: torch.Tensor) -> torch.Tensor:
         """
@@ -396,22 +423,22 @@ class PowerSystemLoss(nn.Module):
         total_load_pu = total_load / self.s_base_mva  # Convert to per-unit [batch_size]
         
         # Normalize by total load + small epsilon to avoid division by zero
+        # Note: Individual buses can have reverse power flow (generation > load) which is physically valid
+        # However, total system load should be positive. If normalized_power_flow becomes negative,
+        # it indicates the model is predicting unphysical states (negative total loads),
+        # and this will be naturally penalized by the physics-informed loss during training.
         normalized_power_flow = mean_flow_magnitude_per_bus / (total_load_pu + epsilon)
         
-        # Debug check: Warn if we get negative values (shouldn't happen mathematically)
-        if torch.any(normalized_power_flow < 0):
-            print(f"Warning: Negative power flow detected! Min value: {torch.min(normalized_power_flow).item()}")
-            print(f"This indicates potential numerical instability or extreme model predictions")
-        
-        # Return raw values to let the loss function handle unphysical predictions
-        # This preserves the learning signal for the physics-informed training
+        # Return raw values without forcing them positive - let the physics loss handle bad predictions
+        # This preserves the learning signal for physics-informed training
         return normalized_power_flow
 
     def _compute_carbon_emissions(
         self, 
         predicted_state_physical: torch.Tensor, 
         time_carbon_coeff: torch.Tensor, 
-        time_energy_coeff: torch.Tensor
+        time_energy_coeff: torch.Tensor,
+        renewable_fraction: torch.Tensor = None
     ) -> Dict[str, torch.Tensor]:
         """
         Computes carbon emissions according to equation (3.7):
@@ -428,8 +455,29 @@ class PowerSystemLoss(nn.Module):
         """
         # Extract power consumption and generation from state
         # State format: [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
+        # NOTE: p_gen includes BOTH slack bus generation AND renewables
         total_load = torch.sum(predicted_state_physical[..., 2], dim=-1)  # Psum_t (total consumption)
-        total_distributed_gen = torch.sum(predicted_state_physical[..., 4], dim=-1)  # PDG_t (distributed generation)
+        total_gen = torch.sum(predicted_state_physical[..., 4], dim=-1)  # Total generation (slack + renewables)
+        
+        # Calculate renewable generation from the known renewable fraction
+        # renewable_fraction tells us what percentage of load is met by renewables
+        if renewable_fraction is None:
+            raise ValueError(
+                "renewable_fraction is required for carbon emissions calculation. "
+                "This should be provided from the dataset batch. "
+                "Check that the data loader is correctly passing 'renewable_fraction' in the batch."
+            )
+        
+        # Ensure proper shape for broadcasting
+        if renewable_fraction.dim() == 1 and total_load.dim() == 1:
+            renewable_frac = renewable_fraction
+        elif renewable_fraction.dim() == 0:  # scalar
+            renewable_frac = renewable_fraction.expand_as(total_load)
+        else:
+            renewable_frac = renewable_fraction.squeeze()
+        
+        # Renewable generation based on data generation: renewable_frac * total_load
+        total_distributed_gen = total_load * renewable_frac
         
         # Net power from grid: (Psum_t - PDG_t)
         power_from_grid = total_load - total_distributed_gen

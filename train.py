@@ -120,13 +120,13 @@ def main():
     
     class Args:
         # Configuration for models to test - now centralized in config
-        test_config = 'sequential_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+        test_config = 'quick'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
         bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         seed = 42
         
         # === PARALLEL TRAINING CONFIGURATION ===
         # Device configuration
-        force_cpu = False  # Set to True to force CPU training even if GPU is available
+        force_cpu = True  # Set to True to force CPU training even if GPU is available
         
         # Parallel training mode
         parallel_data_loading = True   # Use multiple workers for data loading (recommended)
@@ -210,10 +210,12 @@ def main():
                 print(f"🖥️  CPU: {cpu_count} cores, {memory_gb:.1f} GB RAM")
                 if cpu_count >= 8 and memory_gb >= 16:
                     return {'data': 4}
+                elif cpu_count >= 4:
+                    return {'data': 2}  # Conservative for 4+ cores
                 else:
-                    return {'data': 4}
+                    return {'data': 1}  # Very conservative for <4 cores
             except ImportError:
-                return {'data': 4}
+                return {'data': 2}  # Conservative fallback
     
     optimal = get_optimal_workers()
     

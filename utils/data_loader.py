@@ -14,6 +14,13 @@ class PowerSystemNormalizer:
         self.mean = np.mean(features, axis=(0, 1))
         self.std = np.std(features, axis=(0, 1))
         self.std[self.std == 0] = 1.0
+        
+        # # DEBUG: Print normalization statistics
+        # feature_names = ['Vm (p.u.)', 'Va (rad)', 'P_load (MW)', 'Q_load (MVAr)', 'P_gen (MW)', 'Q_gen (MVAr)']
+        # print(f"\n[DEBUG] Normalization Statistics:")
+        # for i, name in enumerate(feature_names):
+        #     if i < len(self.mean):
+        #         print(f"  {name}: mean={self.mean[i]:.4f}, std={self.std[i]:.4f}")
 
     def normalize(self, data):
         # Handle both numpy arrays and PyTorch tensors
@@ -186,7 +193,12 @@ def load_power_system_data(config, case_name):
         try:
             features_data = np.load(f_path)
             all_features.append(features_data)
+            num_timesteps = features_data.shape[0]
+            
+            # Load Ybus matrix
+            ybus_path = f_path.replace('features', 'ybus_matrices')
             all_ybus.append(np.load(ybus_path))
+            
             all_targets.append(np.load(targets_path))
             all_energy_coeffs.append(np.loadtxt(energy_path))
             all_carbon_coeffs.append(np.loadtxt(carbon_path))

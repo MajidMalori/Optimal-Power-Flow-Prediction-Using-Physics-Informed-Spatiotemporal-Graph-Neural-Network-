@@ -87,6 +87,7 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
         for batch in tqdm(data_loader, desc="Evaluating MOOPF Objectives"):
             features, ybus = batch['features'].to(device), batch['ybus_matrix'].to(device)
             time_carbon, time_energy = batch['time_carbon_coeffs'].to(device), batch['time_energy_coeffs'].to(device)
+            renewable_frac = batch['renewable_fraction'].to(device)  # Get renewable fraction from batch
             adj = batch['adjacency'].to(device)
 
             outputs_norm = model(features, adj)
@@ -104,7 +105,7 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 # Calculate physics-based metrics for physics-informed models
                 norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                emissions = physics_calculator._compute_carbon_emissions(outputs_phys, time_carbon, time_energy)
+                emissions = physics_calculator._compute_carbon_emissions(outputs_phys, time_carbon, time_energy, renewable_frac)
                 norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values

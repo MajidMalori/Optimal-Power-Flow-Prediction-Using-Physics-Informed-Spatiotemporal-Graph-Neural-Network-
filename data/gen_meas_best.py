@@ -17,7 +17,7 @@ from datetime import datetime
 # =============================================================================
 CONFIG = {
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
-    "time_steps": 10000,
+    "time_steps": 5,
     "output_dir": "./data", # Save to the data subdirectory
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
@@ -197,6 +197,8 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     print(f"Max total renewable capacity: {max_total_renewable_mw:.2f} MW")
         
     dropped_line_idx = None
+    has_contingency = False  # Track if current timestep has contingency
+    
     with tqdm(total=time_steps, desc=f"Simulating {net.name}", unit="step") as pbar:
         for t in range(time_steps):
             # Restore any previous contingency
@@ -253,19 +255,23 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
             p_load = load_p_by_bus.values
             q_load = load_q_by_bus.values
 
-            # 3. Aggregate conventional generators
+            # 3. Aggregate slack bus (external grid) generation - THE MAIN POWER SOURCE!
+            ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+            ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+            
+            # 4. Aggregate conventional generators
             gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
             gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
 
-            # 4. Aggregate static (renewable) generators
+            # 5. Aggregate static (renewable) generators
             sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
             sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
 
-            # 5. Combine generator types to get total injection per bus
-            p_gen = (gen_p_by_bus + sgen_p_by_bus).values
-            q_gen = (gen_q_by_bus + sgen_q_by_bus).values
+            # 6. Combine ALL generator types to get total injection per bus
+            p_gen = (ext_grid_p_by_bus + gen_p_by_bus + sgen_p_by_bus).values
+            q_gen = (ext_grid_q_by_bus + gen_q_by_bus + sgen_q_by_bus).values
             
-            # 6. Calculate the Ybus matrix using our custom function to ensure correct ordering
+            # 7. Calculate the Ybus matrix using our custom function to ensure correct ordering
             ybus_array[t] = calculate_ybus_from_net(net)
             
             # --- END DATA AGGREGATION ---
