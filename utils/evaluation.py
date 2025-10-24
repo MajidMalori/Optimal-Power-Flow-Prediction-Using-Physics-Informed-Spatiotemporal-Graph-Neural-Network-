@@ -105,7 +105,15 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 # Calculate physics-based metrics for physics-informed models
                 norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                emissions = physics_calculator._compute_carbon_emissions(outputs_phys, time_carbon, time_energy, renewable_frac)
+                # Extract generation components from batch
+                ext_grid_gen = batch.get('ext_grid_gen', None)
+                conventional_gen = batch.get('conventional_gen', None)
+                renewable_gen = batch.get('renewable_gen', None)
+                
+                emissions = physics_calculator._compute_carbon_emissions(
+                    outputs_phys, time_carbon, time_energy, renewable_frac,
+                    ext_grid_gen, conventional_gen, renewable_gen
+                )
                 norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
@@ -118,17 +126,15 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             # Capture data for analyzing the impact of renewables (only for physics-informed models)
             if is_physics_informed:
                 try:
-                    # Use the actual renewable fraction from the data (not calculated from outputs)
-                    renewable_fractions = batch['renewable_fraction'].cpu().numpy()
-
-                    for i in range(features.shape[0]):
-                        renewable_impact_data.append({
-                            'renewable_fraction': renewable_fractions[i],
-                            'normalized_carbon_emissions': emissions['normalized'][i].item(),
-                            'voltage_deviation': norm_vdev[i].item(),
-                            'power_loss': norm_loss[i].item(),
-                            'power_flow': norm_power_flow[i].item()
-                        })
+                    # Vectorized batch conversion - much faster than looping
+                    batch_data = pd.DataFrame({
+                        'renewable_fraction': renewable_frac.cpu().numpy(),
+                        'normalized_carbon_emissions': emissions['normalized'].cpu().numpy(),
+                        'voltage_deviation': norm_vdev.cpu().numpy(),
+                        'power_loss': norm_loss.cpu().numpy(),
+                        'power_flow': norm_power_flow.cpu().numpy()
+                    })
+                    renewable_impact_data.extend(batch_data.to_dict('records'))
                 except (IndexError, KeyError) as e:
                     logging.warning(f"Could not extract renewable fraction from batch data: {e}")
 
@@ -219,7 +225,6 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
         iteration_results_df = create_iteration_wise_results(iteration_details, param_keys, config, model_name)
         iteration_path = os.path.join(model_dir, "iteration_wise_results.csv")
         iteration_results_df.to_csv(iteration_path, index=False)
-        print(f"📊 Iteration-wise results saved to: {iteration_path}")
     
     # Save summary with filtered data based on model type
     if is_physics_informed:
@@ -329,9 +334,7 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
     df.to_csv(csv_path, index=False)
     df.to_csv(latest_csv_path, index=False)
     
-    print(f"📁 Comprehensive summary saved to:")
-    print(f"   Timestamped: {csv_path}")
-    print(f"   Latest: {latest_csv_path}")
+    print(f"📁 Results saved: {os.path.basename(csv_path)}")
     print()
     
     # Print table header
@@ -377,7 +380,6 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
         # Create comparison plot
         comparison_plot_path = os.path.join(model_eval_dir, "model_comparison_latest.png")
         create_model_comparison_plot(all_results, comparison_plot_path)
-        print(f"📊 Comparison plot saved to: {comparison_plot_path}")
         
     else:
         print("\n❌ No successful model runs to analyze.")

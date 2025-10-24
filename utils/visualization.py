@@ -429,7 +429,6 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"📊 Renewable impact comparison ({metric_label}) saved to: {save_path}")
 
 
 def create_comparative_convergence_plot(all_convergence_data: Dict[str, list], 
@@ -478,4 +477,3 @@ def _create_comparative_convergence_plot_impl(all_convergence_data: Dict[str, li
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"📊 Convergence comparison saved to: {save_path}")

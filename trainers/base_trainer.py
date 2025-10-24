@@ -92,7 +92,6 @@ class BaseTrainer(ABC):
             path = self.config.get_checkpoint_path(filename)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             torch.save(self.model.state_dict(), path)
-            print(f"Checkpoint saved to {path}")
 
     def get_training_history(self):
         """Return the training history dictionary."""

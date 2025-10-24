@@ -7,7 +7,6 @@ import pandapower.networks as pn
 import pandapower.topology as top
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import networkx as nx
 import copy
 from datetime import datetime
@@ -17,7 +16,7 @@ from datetime import datetime
 # =============================================================================
 CONFIG = {
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
-    "time_steps": 5,
+    "time_steps": 10000,
     "output_dir": "./data", # Save to the data subdirectory
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
@@ -163,21 +162,60 @@ def calculate_ybus_from_net(net: pp.pandapowerNet) -> np.ndarray:
             
     return ybus
 
+def calculate_adjacency_matrix(net: pp.pandapowerNet) -> np.ndarray:
+    """Calculate adjacency matrix from network topology."""
+    num_buses = len(net.bus)
+    adj_matrix = np.zeros((num_buses, num_buses), dtype=np.float32)
+    
+    # Add edges from lines
+    for _, line in net.line.iterrows():
+        from_bus = int(line['from_bus'])
+        to_bus = int(line['to_bus'])
+        adj_matrix[from_bus, to_bus] = 1.0
+        adj_matrix[to_bus, from_bus] = 1.0
+    
+    return adj_matrix
+
 # =============================================================================
 # SECTION 3: SIMULATION AND SAVING
 # =============================================================================
 
 def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
-    """Runs the main time-series power flow simulation."""
+    """
+    Runs the main time-series power flow simulation with convergence tracking.
+    
+    Returns:
+        Dictionary containing simulation data and convergence statistics
+    """
     num_buses = len(net.bus)
     time_steps = config['time_steps']
     
     feature_matrix = np.zeros((time_steps, num_buses, 6))
     target_matrix = np.zeros((time_steps, num_buses, 6))
     adjacency_array = np.empty((time_steps,), dtype=object)
-    ybus_array = np.zeros((time_steps, num_buses, num_buses), dtype=np.complex128)
     time_energy_coeffs = np.zeros(time_steps)
     time_carbon_coeffs = np.zeros(time_steps)
+    
+    # Separate generation components for carbon emissions calculation
+    ext_grid_matrix = np.zeros((time_steps, num_buses))
+    gen_matrix = np.zeros((time_steps, num_buses))
+    sgen_matrix = np.zeros((time_steps, num_buses))
+    
+    # Sparse Ybus storage: base + contingencies only
+    ybus_base = None  # Base topology Ybus (set on first successful power flow)
+    contingency_timesteps = []  # Timesteps where contingencies occurred
+    contingency_ybus_list = []  # Ybus matrices for contingency timesteps
+    
+    # Convergence tracking for detailed reporting
+    convergence_stats = {
+        'total_timesteps': time_steps,
+        'successful': 0,
+        'failed': 0,
+        'failed_no_contingency': [],  # Failed with normal topology
+        'failed_with_contingency': [],  # Failed with contingency topology
+        'contingency_line_details': {},  # Details about which lines caused failures
+        'successful_timesteps': []  # Track which timesteps were successful
+    }
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
     
@@ -199,117 +237,180 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     dropped_line_idx = None
     has_contingency = False  # Track if current timestep has contingency
     
-    with tqdm(total=time_steps, desc=f"Simulating {net.name}", unit="step") as pbar:
-        for t in range(time_steps):
-            # Restore any previous contingency
-            restore_contingency(net, dropped_line_idx)
-            dropped_line_idx = None
-            
-            # Apply a new N-1 contingency based on the configured rate
-            if np.random.random() < config['contingency_rate']:
-                dropped_line_idx = apply_n1_contingency(net)
+    # Simulate all timesteps (progress tracked externally by data_validation.py)
+    for t in range(time_steps):
+        # Restore any previous contingency
+        restore_contingency(net, dropped_line_idx)
+        dropped_line_idx = None
+        has_contingency = False
+        
+        # Apply a new N-1 contingency based on the configured rate
+        if np.random.random() < config['contingency_rate']:
+            dropped_line_idx = apply_n1_contingency(net)
+            has_contingency = (dropped_line_idx is not None)
 
-            # Create the graph adjacency matrix for the current topology
-            graph = top.create_nxgraph(net, include_lines=True, include_trafos=True)
-            adj_coo = nx.to_scipy_sparse_array(graph, format='coo')
-            adjacency_array[t] = np.vstack([adj_coo.row, adj_coo.col])
+        # Create the graph adjacency matrix for the current topology
+        graph = top.create_nxgraph(net, include_lines=True, include_trafos=True)
+        adj_coo = nx.to_scipy_sparse_array(graph, format='coo')
+        adjacency_array[t] = np.vstack([adj_coo.row, adj_coo.col])
 
-            # Apply random variations to loads
-            net.load.p_mw = base_load_p * np.random.uniform(0.8, 1.2, len(base_load_p))
-            net.load.q_mvar = base_load_q * np.random.uniform(0.8, 1.2, len(base_load_q))
+        # Apply random variations to loads
+        net.load.p_mw = base_load_p * np.random.uniform(0.8, 1.2, len(base_load_p))
+        net.load.q_mvar = base_load_q * np.random.uniform(0.8, 1.2, len(base_load_q))
 
-            # Apply random variations to renewable generation based on time of day
-            current_total_renewable_p_mw = 0
-            if 'type' in net.sgen.columns and not net.sgen.empty:
-                for i, sgen in net.sgen.iterrows():
-                    p_gen = 0
-                    if sgen.type == 'solar':
-                        p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
-                    elif sgen.type == 'wind':
-                        p_gen = np.random.uniform(0, max_individual_wind_mw)
-                    net.sgen.at[i, 'p_mw'] = p_gen
-                    current_total_renewable_p_mw += p_gen
+        # Apply random variations to renewable generation based on time of day
+        current_total_renewable_p_mw = 0
+        if 'type' in net.sgen.columns and not net.sgen.empty:
+            for i, sgen in net.sgen.iterrows():
+                p_gen = 0
+                if sgen.type == 'solar':
+                    p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
+                elif sgen.type == 'wind':
+                    p_gen = np.random.uniform(0, max_individual_wind_mw)
+                net.sgen.at[i, 'p_mw'] = p_gen
+                current_total_renewable_p_mw += p_gen
+        
+        try:
+            # Run the power flow calculation
+            pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+            convergence_stats['successful'] += 1
+            convergence_stats['successful_timesteps'].append(t)
+        except pp.LoadflowNotConverged:
+            # Track convergence failure
+            convergence_stats['failed'] += 1
             
-            try:
-                # Run the power flow calculation
-                pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
-            except pp.LoadflowNotConverged:
-                # If it fails, copy the state from the previous timestep
-                if t > 0:
-                    feature_matrix[t], target_matrix[t] = feature_matrix[t-1], target_matrix[t-1]
-                    time_energy_coeffs[t], time_carbon_coeffs[t] = time_energy_coeffs[t-1], time_carbon_coeffs[t-1]
-                    adjacency_array[t] = adjacency_array[t-1]
-                    ybus_array[t] = ybus_array[t-1]
-                pbar.update(1)
-                continue
+            if has_contingency:
+                # Failed with contingency - record details
+                convergence_stats['failed_with_contingency'].append(t)
+                if dropped_line_idx is not None:
+                    line_info = {
+                        'timestep': t,
+                        'line_id': int(dropped_line_idx),
+                        'from_bus': int(net.line.loc[dropped_line_idx, 'from_bus']),
+                        'to_bus': int(net.line.loc[dropped_line_idx, 'to_bus'])
+                    }
+                    convergence_stats['contingency_line_details'][str(t)] = line_info
+            else:
+                # Failed without contingency - normal topology issue
+                convergence_stats['failed_no_contingency'].append(t)
             
-            # --- START DATA AGGREGATION (CONSISTENT 0 to N-1 ORDERING) ---
-            
-            # 1. Get bus voltages and angles. These are already ordered correctly by net.bus.index.
-            vm_pu = net.res_bus.vm_pu.values
-            va_rad = np.deg2rad(net.res_bus.va_degree.values)
-            
-            # 2. Aggregate loads. `reindex` ensures we have a value for every bus, in order.
-            load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-            load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
-            p_load = load_p_by_bus.values
-            q_load = load_q_by_bus.values
+            # Skip failed timesteps entirely - don't store any data for them
+            continue
+        
+        # --- START DATA AGGREGATION (CONSISTENT 0 to N-1 ORDERING) ---
+        
+        # 1. Get bus voltages and angles. These are already ordered correctly by net.bus.index.
+        vm_pu = net.res_bus.vm_pu.values
+        va_rad = np.deg2rad(net.res_bus.va_degree.values)
+        
+        # 2. Aggregate loads. `reindex` ensures we have a value for every bus, in order.
+        load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+        load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        p_load = load_p_by_bus.values
+        q_load = load_q_by_bus.values
 
-            # 3. Aggregate slack bus (external grid) generation - THE MAIN POWER SOURCE!
-            ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-            ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
-            
-            # 4. Aggregate conventional generators
-            gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-            gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        # 3. Aggregate slack bus (external grid) generation - THE MAIN POWER SOURCE!
+        ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+        ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        
+        # 4. Aggregate conventional generators
+        gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+        gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
 
-            # 5. Aggregate static (renewable) generators
-            sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-            sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        # 5. Aggregate static (renewable) generators
+        sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+        sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
 
-            # 6. Combine ALL generator types to get total injection per bus
-            p_gen = (ext_grid_p_by_bus + gen_p_by_bus + sgen_p_by_bus).values
-            q_gen = (ext_grid_q_by_bus + gen_q_by_bus + sgen_q_by_bus).values
-            
-            # 7. Calculate the Ybus matrix using our custom function to ensure correct ordering
-            ybus_array[t] = calculate_ybus_from_net(net)
-            
-            # --- END DATA AGGREGATION ---
-            
-            # Calculate time-varying coefficients for multi-objective evaluation
-            renewable_util_frac = current_total_renewable_p_mw / max_total_renewable_mw
-            time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
-            time_energy_coeffs[t] = config['max_energy_utilization_coeff'] - (net.res_line.pl_mw.sum() * config['loss_sensitivity'])
-            
-            # Assemble the ground truth state vector (targets)
-            true_state = np.stack([vm_pu, va_rad, p_load, q_load, p_gen, q_gen], axis=1)
-            target_matrix[t] = true_state
+        # 6. Store separate generation components for carbon emissions calculation
+        ext_grid_matrix[t] = ext_grid_p_by_bus.values
+        gen_matrix[t] = gen_p_by_bus.values
+        sgen_matrix[t] = sgen_p_by_bus.values
+        
+        # 7. Combine ALL generator types to get total injection per bus
+        p_gen = (ext_grid_p_by_bus + gen_p_by_bus + sgen_p_by_bus).values
+        q_gen = (ext_grid_q_by_bus + gen_q_by_bus + sgen_q_by_bus).values
+        
+        # 7. Calculate Ybus matrix (sparse storage: only base + contingencies)
+        current_ybus = calculate_ybus_from_net(net)
+        
+        if ybus_base is None:
+            # First successful power flow - store as base Ybus
+            ybus_base = current_ybus.copy()
+        elif has_contingency:
+            # Topology changed due to contingency - store this variant
+            contingency_timesteps.append(t)
+            contingency_ybus_list.append(current_ybus.copy())
+        # else: Normal topology, same as base - no need to store
+        
+        # --- END DATA AGGREGATION ---
+        
+        # Calculate time-varying coefficients for multi-objective evaluation
+        renewable_util_frac = current_total_renewable_p_mw / max_total_renewable_mw
+        time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
+        time_energy_coeffs[t] = config['max_energy_utilization_coeff'] - (net.res_line.pl_mw.sum() * config['loss_sensitivity'])
+        
+        # Assemble the ground truth state vector (targets)
+        true_state = np.stack([vm_pu, va_rad, p_load, q_load, p_gen, q_gen], axis=1)
+        target_matrix[t] = true_state
 
-            # Create noisy measurements for the model features
-            meas_vm = true_state[:,0] * (1 + np.random.normal(0, config['voltage_error_std'], num_buses))
-            meas_va = true_state[:,1] + np.random.normal(0, config['angle_error_std'], num_buses)
-            meas_pl = true_state[:,2] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-            meas_ql = true_state[:,3] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-            meas_pg = true_state[:,4] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-            meas_qg = true_state[:,5] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-            
-            feature_matrix[t] = np.stack([meas_vm, meas_va, meas_pl, meas_ql, meas_pg, meas_qg], axis=1)
-            pbar.update(1)
-            
+        # Create noisy measurements for the model features
+        meas_vm = true_state[:,0] * (1 + np.random.normal(0, config['voltage_error_std'], num_buses))
+        meas_va = true_state[:,1] + np.random.normal(0, config['angle_error_std'], num_buses)
+        meas_pl = true_state[:,2] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_ql = true_state[:,3] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_pg = true_state[:,4] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_qg = true_state[:,5] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        
+        feature_matrix[t] = np.stack([meas_vm, meas_va, meas_pl, meas_ql, meas_pg, meas_qg], axis=1)
+        
+        # Store separate generation components for carbon emissions calculation
+        ext_grid_matrix[t] = ext_grid_p_by_bus.values
+        gen_matrix[t] = gen_p_by_bus.values
+        sgen_matrix[t] = sgen_p_by_bus.values
+        
+        # Store adjacency matrix for this timestep (same for all timesteps in static case)
+        if t == 0:  # Only calculate once for static networks
+            adjacency_matrix = calculate_adjacency_matrix(net)
+        adjacency_array[t] = adjacency_matrix
+    
+    # Finalize convergence statistics
+    convergence_stats['success_rate'] = (convergence_stats['successful'] / time_steps * 100) if time_steps > 0 else 0
+    
+    # Handle edge case: no successful power flow (very rare)
+    if ybus_base is None:
+        ybus_base = np.zeros((num_buses, num_buses), dtype=np.complex128)
+        convergence_stats['ybus_fallback_used'] = True
+    else:
+        convergence_stats['ybus_fallback_used'] = False
+    
+    # Prepare sparse Ybus data structure
+    ybus_data = {
+        "base": ybus_base,
+        "contingency_timesteps": np.array(contingency_timesteps, dtype=np.int32),
+        "contingency_matrices": np.array(contingency_ybus_list) if contingency_ybus_list else np.array([]).reshape(0, num_buses, num_buses).astype(np.complex128)
+    }
+    
+    # Apply truncation to ensure consistent shapes across all renewable fractions
+    # This will be handled in the main execution block after all scenarios are generated
+    
     return {
         "features": feature_matrix, 
         "targets": target_matrix, 
         "adjacency": adjacency_array, 
-        "ybus_matrices": ybus_array, 
+        "ybus_data": ybus_data,  # Sparse format
         "time_energy_coeffs": time_energy_coeffs, 
-        "time_carbon_coeffs": time_carbon_coeffs
+        "time_carbon_coeffs": time_carbon_coeffs,
+        "convergence_stats": convergence_stats,  # Detailed convergence report
+        "ext_grid_generation": ext_grid_matrix,  # External grid generation
+        "conventional_generation": gen_matrix,   # Conventional generator generation
+        "renewable_generation": sgen_matrix       # Renewable generator generation (PDG)
     }
 
     
+
 def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output_dir: str, timestamp: str = None):
     """
-    Saves generated data arrays. Multi-dimensional arrays are saved as binary .npy files,
-    while 1D coefficient arrays are saved as human-readable .txt files.
+    Saves generated data arrays with support for sparse Ybus format and convergence reports.
     
     Args:
         data_dict: Dictionary containing data arrays
@@ -318,6 +419,8 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
         output_dir: Directory to save files
         timestamp: Optional timestamp string to ensure data consistency
     """
+    import json
+    
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate timestamp if not provided
@@ -325,6 +428,25 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     for key, data in data_dict.items():
+        # Handle sparse Ybus data specially
+        if key == "ybus_data":
+            # Save each component of the sparse Ybus separately
+            for sub_key, sub_data in data.items():
+                sub_filename = f"{case_name}_ybus_{sub_key}_frac{renewable_fraction:.1f}_{timestamp}.npy"
+                filepath = os.path.join(output_dir, sub_filename)
+                print(f"Saving Ybus component '{sub_key}' to '{filepath}'...")
+                np.save(filepath, sub_data, allow_pickle=False)
+            continue
+        
+        # Handle convergence statistics specially
+        if key == "convergence_stats":
+            stats_filename = f"{case_name}_convergence_report_frac{renewable_fraction:.1f}_{timestamp}.json"
+            filepath = os.path.join(output_dir, stats_filename)
+            print(f"Saving convergence report to '{filepath}'...")
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
+            continue
+        
         # Create a base filename that includes the case, renewable fraction, and timestamp
         base_filename = f"{case_name}_{key}_frac{renewable_fraction:.1f}_{timestamp}"
         

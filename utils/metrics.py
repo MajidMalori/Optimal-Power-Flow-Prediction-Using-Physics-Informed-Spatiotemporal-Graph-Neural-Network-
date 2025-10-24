@@ -438,7 +438,10 @@ class PowerSystemLoss(nn.Module):
         predicted_state_physical: torch.Tensor, 
         time_carbon_coeff: torch.Tensor, 
         time_energy_coeff: torch.Tensor,
-        renewable_fraction: torch.Tensor = None
+        renewable_fraction: torch.Tensor = None,
+        ext_grid_generation: torch.Tensor = None,
+        conventional_generation: torch.Tensor = None,
+        renewable_generation: torch.Tensor = None
     ) -> Dict[str, torch.Tensor]:
         """
         Computes carbon emissions according to equation (3.7):
@@ -455,53 +458,46 @@ class PowerSystemLoss(nn.Module):
         """
         # Extract power consumption and generation from state
         # State format: [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
-        # NOTE: p_gen includes BOTH slack bus generation AND renewables
-        total_load = torch.sum(predicted_state_physical[..., 2], dim=-1)  # Psum_t (total consumption)
-        total_gen = torch.sum(predicted_state_physical[..., 4], dim=-1)  # Total generation (slack + renewables)
         
-        # Calculate renewable generation from the known renewable fraction
-        # renewable_fraction tells us what percentage of load is met by renewables
-        if renewable_fraction is None:
+        # Get total predicted load (Psum_t from equation 3.7)
+        total_load_predicted = torch.sum(predicted_state_physical[..., 2], dim=-1)  # MW
+        
+        # Require actual generation components - no fallbacks allowed
+        if ext_grid_generation is None or conventional_generation is None or renewable_generation is None:
             raise ValueError(
-                "renewable_fraction is required for carbon emissions calculation. "
-                "This should be provided from the dataset batch. "
-                "Check that the data loader is correctly passing 'renewable_fraction' in the batch."
+                "Generation components are required for carbon emissions calculation. "
+                "ext_grid_generation, conventional_generation, and renewable_generation must be provided."
             )
         
-        # Ensure proper shape for broadcasting
-        if renewable_fraction.dim() == 1 and total_load.dim() == 1:
-            renewable_frac = renewable_fraction
-        elif renewable_fraction.dim() == 0:  # scalar
-            renewable_frac = renewable_fraction.expand_as(total_load)
-        else:
-            renewable_frac = renewable_fraction.squeeze()
+        # Use actual separated generation components for accurate carbon emissions calculation
+        total_renewable_gen = torch.sum(renewable_generation, dim=-1)  # PDG_t from actual renewable generation
+        power_from_grid_actual = total_load_predicted - total_renewable_gen
         
-        # Renewable generation based on data generation: renewable_frac * total_load
-        total_distributed_gen = total_load * renewable_frac
-        
-        # Net power from grid: (Psum_t - PDG_t)
-        power_from_grid = total_load - total_distributed_gen
+        # Calculate actual renewable fraction from the data
+        renewable_frac = total_renewable_gen / (total_load_predicted + 1e-9)
         
         # Ensure coefficients are correctly shaped for broadcasting
         carbon_intensity = time_carbon_coeff.squeeze(-1) if time_carbon_coeff.dim() > 1 else time_carbon_coeff  # Cm
         energy_coefficient = time_energy_coeff.squeeze(-1) if time_energy_coeff.dim() > 1 else time_energy_coeff  # Ef
         
         # Apply equation (3.7): f3 = (Psum - PDG) * Cm / Ef
-        raw_emissions = (power_from_grid * carbon_intensity) / (energy_coefficient + 1e-9)
+        # This gives raw carbon emissions in units that depend on Cm and Ef
+        raw_emissions = (power_from_grid_actual * carbon_intensity) / (energy_coefficient + 1e-9)
         
-        # Calculate actual renewable penetration fraction (matches data generation logic)
-        # This reflects the actual renewable_fractions_to_run: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-        renewable_penetration = total_distributed_gen / (total_load + 1e-9)
-        
-        # Normalized emissions: 1 - renewable_penetration
-        # Physical interpretation aligned with data generation:
-        # 1.0: renewable_penetration = 0.0 (all grid power, maximum emissions)
-        # 0.8: renewable_penetration = 0.2 (20% renewable, 80% emissions)
-        # 0.6: renewable_penetration = 0.4 (40% renewable, 60% emissions)
-        # 0.4: renewable_penetration = 0.6 (60% renewable, 40% emissions)
-        # 0.2: renewable_penetration = 0.8 (80% renewable, 20% emissions)
-        # 0.0: renewable_penetration = 1.0 (100% renewable, zero emissions)
-        normalized_emissions = 1.0 - renewable_penetration
+        # Normalize emissions using the scenario's renewable fraction
+        # This provides a consistent normalization across different renewable penetration levels:
+        # 
+        # Physical interpretation (aligned with equation 3.7):
+        # - renewable_frac = 0.0 → normalized = 1.0 (all grid power, maximum emissions)
+        # - renewable_frac = 0.2 → normalized = 0.8 (20% renewable, 80% grid emissions)
+        # - renewable_frac = 0.4 → normalized = 0.6 (40% renewable, 60% grid emissions)
+        # - renewable_frac = 0.6 → normalized = 0.4 (60% renewable, 40% grid emissions)
+        # - renewable_frac = 0.8 → normalized = 0.2 (80% renewable, 20% grid emissions)
+        # - renewable_frac = 1.0 → normalized = 0.0 (100% renewable, zero grid emissions)
+        #
+        # This normalization reflects the fraction of power from the grid (which causes emissions)
+        # rather than from renewables (which are carbon-free)
+        normalized_emissions = 1.0 - renewable_frac
         
         # Values outside [0, 1] indicate model predictions beyond training data distribution
         # Let the loss function handle these cases to preserve learning signals

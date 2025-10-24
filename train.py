@@ -120,16 +120,16 @@ def main():
     
     class Args:
         # Configuration for models to test - now centralized in config
-        test_config = 'quick'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+        test_config = 'sequential_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
         bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         seed = 42
         
         # === PARALLEL TRAINING CONFIGURATION ===
         # Device configuration
-        force_cpu = True  # Set to True to force CPU training even if GPU is available
+        force_cpu = False  # Set to True to force CPU training even if GPU is available
         
         # Parallel training mode
-        parallel_data_loading = True   # Use multiple workers for data loading (recommended)
+        parallel_data_loading = True   # DISABLED for low-RAM systems (< 2GB available)
         
         # Worker configuration (auto-configured based on device if set to 'auto')
         data_workers = 'auto'         # Number of data loading workers
@@ -165,12 +165,7 @@ def main():
     
     # STEP 1: Print run information
     run_info = base_config.get_run_info()
-    print(f"\n🚀 STARTING NEW EXPERIMENTAL RUN")
-    print(f"📅 Run ID: {run_info['run_id']}")
-    print(f"⏰ Start Time: {run_info['start_time']}")
-    print(f"📁 Results Directory: {run_info['current_run_dir']}")
-    print(f"🔧 Test Configuration: {args.test_config}")
-    print(f"🏭 Bus Systems to Test: {bus_systems_to_test}")
+    print(f"\n🚀 RUN: {run_info['run_id']} | Config: {args.test_config} | Bus Systems: {bus_systems_to_test}")
     print("="*80)
     
     # STEP 2: Validate data before training
@@ -185,51 +180,33 @@ def main():
     device, device_reason = get_safe_device(args.force_cpu, min_free_memory_gb=2.0)
     is_gpu = device.type == 'cuda'
     
-    print(f"🔧 Using device: {device} (reason: {device_reason})")
-    
-    # Clear any existing GPU memory before starting
+    # Configure hardware
     clear_gpu_memory()
     
-    # Auto-configure parallel settings based on device
     def get_optimal_workers():
         if is_gpu and torch.cuda.is_available():
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            print(f"🎮 GPU: {torch.cuda.get_device_name(0)} ({gpu_memory:.1f} GB)")
-            if gpu_memory >= 12:  # High-end GPU
-                return {'data': 8}
-            elif gpu_memory >= 8:  # Mid-range GPU  
-                return {'data': 6}
-            else:  # Entry-level GPU
-                return {'data': 4}
+            return gpu_memory, torch.cuda.get_device_name(0), 8 if gpu_memory >= 12 else (6 if gpu_memory >= 8 else 4)
         else:
-            # CPU configuration
-            try:
-                import psutil
-                cpu_count = psutil.cpu_count(logical=True)
-                memory_gb = psutil.virtual_memory().total / (1024**3)
-                print(f"🖥️  CPU: {cpu_count} cores, {memory_gb:.1f} GB RAM")
-                if cpu_count >= 8 and memory_gb >= 16:
-                    return {'data': 4}
-                elif cpu_count >= 4:
-                    return {'data': 2}  # Conservative for 4+ cores
-                else:
-                    return {'data': 1}  # Very conservative for <4 cores
-            except ImportError:
-                return {'data': 2}  # Conservative fallback
+            import psutil
+            cpu_count = psutil.cpu_count(logical=True)
+            memory_gb = psutil.virtual_memory().total / (1024**3)
+            # For small systems (2-3 cores), use all cores. For larger, leave one for system.
+            if cpu_count >= 8:
+                workers = 4  # Cap at 4 for very large systems
+            elif cpu_count >= 4:
+                workers = cpu_count - 1  # Leave one for system
+            elif cpu_count >= 2:
+                workers = cpu_count  # Use all cores for 2-3 core systems
+            else:
+                workers = 1  # Single core fallback
+            return memory_gb, f"CPU {cpu_count}c", workers
     
-    optimal = get_optimal_workers()
+    hw_size, hw_name, data_workers = get_optimal_workers()
+    data_workers = data_workers if args.data_workers == 'auto' else args.data_workers
+    base_config.NUM_WORKERS = data_workers if args.parallel_data_loading else 0
     
-    # Apply worker settings
-    data_workers = optimal['data'] if args.data_workers == 'auto' else args.data_workers
-    
-    # Configure data loading
-    if args.parallel_data_loading:
-        base_config.NUM_WORKERS = data_workers
-        print(f"📦 Parallel data loading: Enabled ({data_workers} workers)")
-    else:
-        base_config.NUM_WORKERS = 0
-        print(f"📦 Parallel data loading: Disabled")
-    
+    print(f"🔧 {hw_name} ({hw_size:.1f} GB) | {base_config.NUM_WORKERS} workers")
     print("="*80)
 
     # Get model configurations from config
@@ -239,17 +216,12 @@ def main():
 
 
     # === MAIN TRAINING EXECUTION ===
-    # Sequential bus system training (parallel bus systems disabled)
-    print(f"\n🚀 SEQUENTIAL BUS SYSTEM TRAINING")
-    print(f"🏭 Training {len(bus_systems_to_test)} bus systems: {bus_systems_to_test}")
+    print(f"\n🚀 TRAINING: {len(bus_systems_to_test)} bus systems {bus_systems_to_test}\n")
     
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
-        print(f"\n{'#'*80}\n# STARTING SEARCH FOR {num_buses}-BUS SYSTEM\n{'#'*80}")
-        print(f"🎯 Optimization Strategy: {mosoa_params['strategy'].upper()}")
-        print(f"📊 MoSOA Parameters: {mosoa_params['num_seagulls']} seagulls, {mosoa_params['max_iterations']} iterations")
-        print(f"💡 Description: {mosoa_params['description']}")
+        print(f"{'='*80}\n🏭 {num_buses}-BUS | MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iters ({mosoa_params['strategy']})\n{'='*80}")
         
         # Initialize data collectors for comparative plots
         bus_renewable_data = {}  # model_name -> renewable_impact_dataframe
@@ -259,13 +231,13 @@ def main():
         case_name = f"case{num_buses}"
         try:
             data_tuple = load_power_system_data(base_config, case_name)
-            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
+            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer, _ext_grid_gen, _conventional_gen, _renewable_gen = data_tuple
         except FileNotFoundError as e:
             print(f"[CRITICAL ERROR] {e}")
             continue
 
         for model_name in models_to_test:
-            print(f"\n{'='*80}\nSTARTING HYPERPARAMETER SEARCH FOR: {model_name} on {num_buses}-bus\n{'='*80}")
+            print(f"\n🔍 {model_name} on {num_buses}-bus")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
@@ -295,7 +267,6 @@ def main():
                 run_config.NUM_BUSES = num_buses
 
                 run_name = generate_run_name(model_name, params, num_buses, is_sequential)
-                print(f"\n--- Evaluating {run_name} ---")
 
                 try:
                     setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
@@ -310,12 +281,12 @@ def main():
                     
                     # Use adaptive batch size based on system size
                     run_config.BATCH_SIZE = run_config.get_adaptive_batch_size(num_buses)
-                    print(f"Using adaptive batch size: {run_config.BATCH_SIZE} for {num_buses}-bus system")
                     
                     loaders = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
                         _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                        is_static=(not is_sequential)
+                        is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
+                        conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
                     )
                     train_loader, val_loader, test_loader = loaders
 
@@ -345,7 +316,8 @@ def main():
                             loaders = create_data_loaders(
                                 _features, _adjacency, _ybus_matrices, _targets, 
                                 _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                                is_static=(not is_sequential)
+                                is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
+                                conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
                             )
                             train_loader, val_loader, test_loader = loaders
                             model = model_class_map[model_name](**model_kwargs).to(device)
@@ -369,7 +341,6 @@ def main():
                     
                     # Train the model
                     trainer.train(train_loader, val_loader)
-                    print(f"Training completed successfully for {run_name}")
 
                     # Get validation metrics for hyperparameter optimization
                     val_metrics = evaluate_model(model, val_loader, device, run_config, _normalizer, is_sequential)
@@ -434,10 +405,7 @@ def main():
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
 
-            print(f"\nBest hyperparameters found by MoSOA:")
-            for key, value in best_params.items():
-                print(f"{key}: {value}")
-            print(f"Best score (total loss) achieved: {best_score:.6f}")
+            print(f"\n✓ Best: {best_params} | Score: {best_score:.6f}")
 
             if not model_specific_results: 
                 print(f"No successful runs for {model_name}.")
@@ -472,7 +440,8 @@ def main():
             loaders_best = create_data_loaders(
                 _features, _adjacency, _ybus_matrices, _targets, 
                 _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                is_static=(not is_sequential)
+                is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
+                conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
             )
             _, _, test_loader_best = loaders_best
 
@@ -494,7 +463,8 @@ def main():
                     loaders_best = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
                         _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                        is_static=(not is_sequential)
+                        is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
+                        conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
                     )
                     _, _, test_loader_best = loaders_best
                     model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
@@ -560,12 +530,9 @@ def main():
             if history:  # Convergence history
                 bus_convergence_data[model_name] = history
             
-            # Clear GPU cache after each model to prevent memory buildup
             clear_gpu_memory()
-            print(f"🧹 GPU cache cleared after {model_name} training")
         
-        # After all models for this bus system are complete, create comparative plots
-        print(f"\n🎨 Creating comparative plots for {num_buses}-bus system...")
+        print(f"\n🎨 Generating plots for {num_buses}-bus...")
         
         # Import comparative visualization functions
         from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
@@ -587,7 +554,6 @@ def main():
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()
-        print(f"🧹 GPU cache cleared after completing {num_buses}-bus system")
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results)
