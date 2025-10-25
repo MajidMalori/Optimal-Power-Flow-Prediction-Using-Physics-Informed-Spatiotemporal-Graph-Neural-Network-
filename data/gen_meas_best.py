@@ -192,7 +192,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     
     feature_matrix = np.zeros((time_steps, num_buses, 10))
     target_matrix = np.zeros((time_steps, num_buses, 10))
-    adjacency_array = np.empty((time_steps,), dtype=object)
+    adjacency_array = np.zeros((time_steps, num_buses, num_buses))
     time_energy_coeffs = np.zeros(time_steps)
     time_carbon_coeffs = np.zeros(time_steps)
     
@@ -212,7 +212,10 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         'failed_no_contingency': [],  # Failed with normal topology
         'failed_with_contingency': [],  # Failed with contingency topology
         'contingency_line_details': {},  # Details about which lines caused failures
-        'successful_timesteps': []  # Track which timesteps were successful
+        'successful_timesteps': [],  # Track which timesteps were successful
+        'fallback_used': 0,  # Track how many timesteps used fallback data
+        'fallback_timesteps': [],  # Track which timesteps used fallback
+        'fallback_contingency_timesteps': []  # Track which fallback timesteps had contingencies
     }
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
@@ -247,10 +250,15 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
             dropped_line_idx = apply_n1_contingency(net)
             has_contingency = (dropped_line_idx is not None)
 
+        # ALWAYS calculate adjacency matrix for current topology (even if power flow fails)
+        # This ensures data integrity - adjacency reflects actual network state
+        current_adjacency_matrix = calculate_adjacency_matrix(net)
+        
         # Create the graph adjacency matrix for the current topology
         graph = top.create_nxgraph(net, include_lines=True, include_trafos=True)
         adj_coo = nx.to_scipy_sparse_array(graph, format='coo')
-        adjacency_array[t] = np.vstack([adj_coo.row, adj_coo.col])
+        # Store as dense matrix to avoid object dtype issues
+        adjacency_array[t] = current_adjacency_matrix
 
         # Apply random variations to loads
         net.load.p_mw = base_load_p * np.random.uniform(0.8, 1.2, len(base_load_p))
@@ -292,8 +300,44 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                 # Failed without contingency - normal topology issue
                 convergence_stats['failed_no_contingency'].append(t)
             
-            # Skip failed timesteps entirely - don't store any data for them
-            continue
+            # FALLBACK: Use previous successful timestep data if available
+            if t > 0 and len(convergence_stats['successful_timesteps']) > 0:
+                # Find the most recent successful timestep
+                last_successful = max([s for s in convergence_stats['successful_timesteps'] if s < t])
+                print(f"  WARNING: Timestep {t} failed, using data from timestep {last_successful}")
+                
+                # Copy data from last successful timestep
+                feature_matrix[t] = feature_matrix[last_successful].copy()
+                target_matrix[t] = target_matrix[last_successful].copy()
+                time_energy_coeffs[t] = time_energy_coeffs[last_successful]
+                time_carbon_coeffs[t] = time_carbon_coeffs[last_successful]
+                adjacency_array[t] = adjacency_array[last_successful]
+                
+                # CRITICAL: Handle Ybus matrix for fallback timestep
+                # If the failed timestep had a contingency, we need to handle the Ybus properly
+                if has_contingency:
+                    # The failed timestep was supposed to have a contingency Ybus
+                    # We need to add this to the contingency tracking
+                    print(f"    NOTE: Failed timestep {t} had contingency, adding to contingency tracking")
+                    # Note: We can't calculate the actual Ybus since the power flow failed
+                    # But we need to track this for consistency
+                    convergence_stats['fallback_contingency_timesteps'] = convergence_stats.get('fallback_contingency_timesteps', [])
+                    convergence_stats['fallback_contingency_timesteps'].append(t)
+                
+                # Mark as fallback used
+                convergence_stats['fallback_used'] += 1
+                convergence_stats['fallback_timesteps'].append(t)
+            else:
+                # No previous successful timestep available - use current adjacency matrix and fill with zeros
+                print(f"  ERROR: Timestep {t} failed and no previous successful timestep available")
+                # Use current adjacency matrix for failed timestep (reflects actual topology)
+                adjacency_array[t] = current_adjacency_matrix
+                # Fill with zeros for failed timestep (will be handled by truncation later)
+                feature_matrix[t] = np.zeros((num_buses, 10))
+                target_matrix[t] = np.zeros((num_buses, 10))
+                time_energy_coeffs[t] = 0.0
+                time_carbon_coeffs[t] = 0.0
+                # Don't continue - we need to process this timestep to avoid NaN
         
         # --- START DATA AGGREGATION (CONSISTENT 0 to N-1 ORDERING) ---
         
@@ -368,10 +412,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                                      meas_p_conv, meas_q_conv,         # Conventional generation
                                      meas_p_ren, meas_q_ren], axis=1)   # Renewable generation
         
-        # Store adjacency matrix for this timestep (same for all timesteps in static case)
-        if t == 0:  # Only calculate once for static networks
-            adjacency_matrix = calculate_adjacency_matrix(net)
-        adjacency_array[t] = adjacency_matrix
+        # Adjacency matrix already stored above
     
     # Finalize convergence statistics
     convergence_stats['success_rate'] = (convergence_stats['successful'] / time_steps * 100) if time_steps > 0 else 0

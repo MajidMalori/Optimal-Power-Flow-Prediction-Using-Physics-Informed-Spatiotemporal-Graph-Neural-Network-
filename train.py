@@ -318,8 +318,7 @@ def main():
                             loaders = create_data_loaders(
                                 _features, _adjacency, _ybus_matrices, _targets, 
                                 _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                                is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
-                                conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
+                                is_static=(not is_sequential)
                             )
                             train_loader, val_loader, test_loader = loaders
                             model = model_class_map[model_name](**model_kwargs).to(device)
@@ -442,8 +441,7 @@ def main():
             loaders_best = create_data_loaders(
                 _features, _adjacency, _ybus_matrices, _targets, 
                 _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
-                conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
+                is_static=(not is_sequential)
             )
             _, _, test_loader_best = loaders_best
 
@@ -465,8 +463,7 @@ def main():
                     loaders_best = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
                         _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                        is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
-                        conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
+                        is_static=(not is_sequential)
                     )
                     _, _, test_loader_best = loaders_best
                     model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
