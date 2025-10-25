@@ -258,33 +258,33 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
     try:
         plot_training_history(training_history, model_name, config, num_buses, is_physics_informed)
     except Exception as e:
-        print(f"⚠️  Warning: Could not create training history plot for {model_name}: {e}")
+        print(f"  Warning: Could not create training history plot for {model_name}: {e}")
     
     # Plot convergence history if available (available for all models)
     if 'convergence_history' in best_run:
         try:
             plot_convergence(best_run['convergence_history'], model_name, config, num_buses)
         except Exception as e:
-            print(f"⚠️  Warning: Could not create convergence plot for {model_name}: {e}")
+            print(f"  Warning: Could not create convergence plot for {model_name}: {e}")
     
     # Only plot renewable impacts for physics-informed models
     if is_physics_informed:
         try:
             plot_all_renewable_impacts(renewable_impact_data, config, num_buses, model_name)
         except Exception as e:
-            print(f"⚠️  Warning: Could not create renewable impact plots for {model_name}: {e}")
+            print(f"  Warning: Could not create renewable impact plots for {model_name}: {e}")
     else:
-        print(f"ℹ️  Skipping renewable impact plots for non-physics-informed model: {model_name}")
+        print(f"ℹ  Skipping renewable impact plots for non-physics-informed model: {model_name}")
 
 
 def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
     """Print and save a comprehensive summary of all model performances across all bus systems."""
     if not all_results:
-        print("\n❌ No results to summarize.")
+        print("\n No results to summarize.")
         return
     
     print(f"\n{'='*100}")
-    print(f"🎯 COMPREHENSIVE FINAL SUMMARY - ALL MODELS & BUS SYSTEMS")
+    print(f" COMPREHENSIVE FINAL SUMMARY - ALL MODELS & BUS SYSTEMS")
     print(f"{'='*100}")
     
     # Create summary table for display
@@ -334,7 +334,7 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
     df.to_csv(csv_path, index=False)
     df.to_csv(latest_csv_path, index=False)
     
-    print(f"📁 Results saved: {os.path.basename(csv_path)}")
+    print(f" Results saved: {os.path.basename(csv_path)}")
     print()
     
     # Print table header
@@ -353,13 +353,13 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
     if successful_results:
         # Best overall (lowest test score)
         best_overall = min(successful_results, key=lambda x: x['final_test_score'])
-        print(f"\n🏆 OVERALL BEST PERFORMER:")
+        print(f"\n OVERALL BEST PERFORMER:")
         print(f"   Model: {best_overall['model_name']} on {best_overall['num_buses']}-bus system")
         print(f"   {best_overall['final_metric_name']}: {best_overall['final_test_score']:.6f}")
         print(f"   Config: {best_overall['best_hidden_dim']} hidden_dim, {best_overall['best_gc_layers']} GC layers")
         
         # Best per bus system
-        print(f"\n📊 BEST PER BUS SYSTEM:")
+        print(f"\n BEST PER BUS SYSTEM:")
         bus_systems = list(set(r['num_buses'] for r in successful_results))
         for num_buses in sorted(bus_systems):
             bus_results = [r for r in successful_results if r['num_buses'] == num_buses]
@@ -368,21 +368,21 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
                 print(f"   {num_buses}-bus: {best_for_bus['model_name']} ({best_for_bus['final_metric_name']}: {best_for_bus['final_test_score']:.6f})")
         
         # Performance comparison
-        print(f"\n📈 PERFORMANCE COMPARISON:")
+        print(f"\n PERFORMANCE COMPARISON:")
         print(f"   33-bus systems generally perform better (lower error)")
         print(f"   Performance degrades with system size as expected")
         
         # Count successful vs failed models
         total_runs = len(all_results)
         successful_runs = len(successful_results)
-        print(f"\n✅ SUCCESS RATE: {successful_runs}/{total_runs} ({100*successful_runs/total_runs:.1f}%)")
+        print(f"\n SUCCESS RATE: {successful_runs}/{total_runs} ({100*successful_runs/total_runs:.1f}%)")
         
         # Create comparison plot
         comparison_plot_path = os.path.join(model_eval_dir, "model_comparison_latest.png")
         create_model_comparison_plot(all_results, comparison_plot_path)
         
     else:
-        print("\n❌ No successful model runs to analyze.")
+        print("\n No successful model runs to analyze.")
     
     print(f"{'='*100}")
 
@@ -392,17 +392,17 @@ def print_model_summary(best_run: Dict[str, Any], moopf_results: pd.DataFrame,
                        final_test_score: float, final_metric_name: str):
     """Print a formatted summary of the best model results."""
     print(f"\n{'='*60}")
-    print(f"🏆 BEST MODEL SUMMARY: {model_name} on {num_buses}-bus system")
+    print(f" BEST MODEL SUMMARY: {model_name} on {num_buses}-bus system")
     print(f"{'='*60}")
-    print(f"📊 Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
-    print(f"📈 Training Performance: MSE = {best_run.get('mse', 'N/A'):.6f}")
+    print(f" Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
+    print(f" Training Performance: MSE = {best_run.get('mse', 'N/A'):.6f}")
     
     if is_physics_informed:
-        print(f"⚡ Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6f}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6f}")
+        print(f" Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6f}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6f}")
         print("\n--- MOOPF Evaluation Results ---")
         print(moopf_results.mean().to_dict())
     else:
-        print(f"🎯 Final Test MSE: {final_test_score:.6f}")
+        print(f" Final Test MSE: {final_test_score:.6f}")
         print("\n--- MSE Evaluation Results ---")
         # Only show relevant metrics for non-physics models
         relevant_metrics = {

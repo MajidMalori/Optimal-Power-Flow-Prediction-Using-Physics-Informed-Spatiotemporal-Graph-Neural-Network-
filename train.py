@@ -52,11 +52,11 @@ def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
     free_memory_gb = memory_info['free'] / (1024**3)
     total_memory_gb = memory_info['total'] / (1024**3)
     
-    print(f"🎮 GPU Memory: {free_memory_gb:.2f} GB free / {total_memory_gb:.2f} GB total")
+    print(f"GPU Memory: {free_memory_gb:.2f} GB free / {total_memory_gb:.2f} GB total")
     
     # If free memory is less than minimum required, fallback to CPU
     if free_memory_gb < min_free_memory_gb:
-        print(f"⚠️  GPU memory insufficient ({free_memory_gb:.2f} GB < {min_free_memory_gb} GB), falling back to CPU")
+        print(f"WARNING: GPU memory insufficient ({free_memory_gb:.2f} GB < {min_free_memory_gb} GB), falling back to CPU")
         return torch.device('cpu'), 'insufficient_gpu_memory'
     
     return torch.device('cuda'), 'gpu_available'
@@ -116,7 +116,7 @@ def main():
     # Set PyTorch CUDA memory allocation configuration to prevent fragmentation
     if torch.cuda.is_available():
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-        print("🔧 Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
+        print("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
     class Args:
         # Configuration for models to test - now centralized in config
@@ -153,9 +153,9 @@ def main():
                     if bus_num in base_config.NUM_BUSES:
                         bus_list.append(bus_num)
                     else:
-                        print(f"⚠️  Warning: {bus_num}-bus system not available. Available: {base_config.NUM_BUSES}")
+                        print(f"Warning: {bus_num}-bus system not available. Available: {base_config.NUM_BUSES}")
                 except ValueError:
-                    print(f"⚠️  Warning: Invalid bus system '{bus_str}'. Skipping.")
+                    print(f"Warning: Invalid bus system '{bus_str}'. Skipping.")
             return bus_list if bus_list else base_config.NUM_BUSES
     
     bus_systems_to_test = parse_bus_systems(args.bus_systems)
@@ -165,12 +165,12 @@ def main():
     
     # STEP 1: Print run information
     run_info = base_config.get_run_info()
-    print(f"\n🚀 RUN: {run_info['run_id']} | Config: {args.test_config} | Bus Systems: {bus_systems_to_test}")
+    print(f"\nRUN: {run_info['run_id']} | Config: {args.test_config} | Bus Systems: {bus_systems_to_test}")
     print("="*80)
     
     # STEP 2: Validate data before training
     if not validate_data_before_training(base_config):
-        print("❌ Data validation failed. Exiting training.")
+        print("Data validation failed. Exiting training.")
         return
     
     torch.manual_seed(args.seed)
@@ -206,7 +206,7 @@ def main():
     data_workers = data_workers if args.data_workers == 'auto' else args.data_workers
     base_config.NUM_WORKERS = data_workers if args.parallel_data_loading else 0
     
-    print(f"🔧 {hw_name} ({hw_size:.1f} GB) | {base_config.NUM_WORKERS} workers")
+    print(f"{hw_name} ({hw_size:.1f} GB) | {base_config.NUM_WORKERS} workers")
     print("="*80)
 
     # Get model configurations from config
@@ -216,12 +216,12 @@ def main():
 
 
     # === MAIN TRAINING EXECUTION ===
-    print(f"\n🚀 TRAINING: {len(bus_systems_to_test)} bus systems {bus_systems_to_test}\n")
+    print(f"\n TRAINING: {len(bus_systems_to_test)} bus systems {bus_systems_to_test}\n")
     
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
-        print(f"{'='*80}\n🏭 {num_buses}-BUS | MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iters ({mosoa_params['strategy']})\n{'='*80}")
+        print(f"{'='*80}\n{num_buses}-BUS | MoSOA: {mosoa_params['num_seagulls']} seagulls x {mosoa_params['max_iterations']} iters ({mosoa_params['strategy']})\n{'='*80}")
         
         # Initialize data collectors for comparative plots
         bus_renewable_data = {}  # model_name -> renewable_impact_dataframe
@@ -229,6 +229,9 @@ def main():
         all_tested_models = []  # Track all models tested (including non-physics)
         
         case_name = f"case{num_buses}"
+        # Set case name in config to enable system-specific base power determination
+        # This ensures correct per-unit calculations: Case33=10MVA, Case57/118=100MVA
+        base_config.CASE_NAME = case_name
         try:
             data_tuple = load_power_system_data(base_config, case_name)
             _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer, _ext_grid_gen, _conventional_gen, _renewable_gen = data_tuple
@@ -237,7 +240,7 @@ def main():
             continue
 
         for model_name in models_to_test:
-            print(f"\n🔍 {model_name} on {num_buses}-bus")
+            print(f"\n{model_name} on {num_buses}-bus")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
@@ -359,10 +362,10 @@ def main():
                         # Check if model state is too large (> 100MB)
                         state_size = sum(p.numel() * p.element_size() for p in model_state.values())
                         if state_size > 100 * 1024 * 1024:  # 100MB
-                            print(f"⚠️  Model state too large ({state_size / 1024**2:.1f} MB), not storing for memory efficiency")
+                            print(f"  Model state too large ({state_size / 1024**2:.1f} MB), not storing for memory efficiency")
                             model_state = None
                     except Exception as e:
-                        print(f"⚠️  Could not save model state: {e}")
+                        print(f"  Could not save model state: {e}")
                         model_state = None
                     
                     run_results = {
@@ -405,7 +408,7 @@ def main():
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
 
-            print(f"\n✓ Best: {best_params} | Score: {best_score:.6f}")
+            print(f"\nBest: {best_params} | Score: {best_score:.6f}")
 
             if not model_specific_results: 
                 print(f"No successful runs for {model_name}.")
@@ -451,7 +454,7 @@ def main():
                 if best_run.get('model_state') is not None:
                     model_to_eval.load_state_dict(best_run['model_state'])
                 else:
-                    print(f"⚠️  No model state available for {model_name}, using untrained model for evaluation")
+                    print(f"  No model state available for {model_name}, using untrained model for evaluation")
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print(f"CUDA OOM during final model creation: {e}")
@@ -532,7 +535,7 @@ def main():
             
             clear_gpu_memory()
         
-        print(f"\n🎨 Generating plots for {num_buses}-bus...")
+        print(f"\n Generating plots for {num_buses}-bus...")
         
         # Import comparative visualization functions
         from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
@@ -543,14 +546,14 @@ def main():
             try:
                 create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
             except Exception as e:
-                print(f"⚠️  Warning: Could not create renewable impact plots: {e}")
+                print(f"  Warning: Could not create renewable impact plots: {e}")
         
         # Create comparative convergence plot
         if bus_convergence_data:
             try:
                 create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
             except Exception as e:
-                print(f"⚠️  Warning: Could not create convergence plots: {e}")
+                print(f"  Warning: Could not create convergence plots: {e}")
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()
@@ -577,7 +580,20 @@ def main():
         base_config.finalize_run({'status': 'no_results', 'test_config': args.test_config})
 
 
+def signal_handler(signum, frame):
+    """Handle interrupt signals gracefully"""
+    print(f"\n Received signal {signum}, cleaning up...")
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    sys.exit(0)
+
 if __name__ == '__main__':
+    # Set up signal handlers for clean exit
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # === PARALLEL DATA LOADING QUICK START ===
     # To enable parallel data loading, modify the Args class above:
     #
@@ -592,4 +608,19 @@ if __name__ == '__main__':
     # Worker count is auto-configured based on your hardware.
     # Set specific number instead of 'auto' for manual control.
     
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user")
+    except Exception as e:
+        print(f"\nTraining failed with error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Ensure clean exit
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("\nTraining script completed")
+        sys.exit(0)

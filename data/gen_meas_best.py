@@ -16,7 +16,7 @@ from datetime import datetime
 # =============================================================================
 CONFIG = {
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
-    "time_steps": 10000,
+    "time_steps": 20,
     "output_dir": "./data", # Save to the data subdirectory
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator

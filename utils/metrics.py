@@ -80,9 +80,35 @@ class PowerSystemLoss(nn.Module):
         self.register_buffer('v_max', torch.tensor(config.V_MAX, dtype=torch.float32))
 
         # The system base power is crucial for converting MW/MVAr to per unit (pu)
-        self.s_base_mva = getattr(config, 'S_BASE_MVA', 100.0)
+        # Get system-specific base power based on the case name
+        self.s_base_mva = self._get_system_base_power(config)
 
         # self.loss_scale_factor = getattr(config, "LOSS_SCALE_FACTOR", 1.0) if self.is_physics_informed else 0.0
+
+    def _get_system_base_power(self, config) -> float:
+        """
+        Get the correct base power for each system type.
+        
+        System-specific base power values (from pandapower test cases):
+        - Case33 (distribution): 10 MVA
+        - Case57 (sub-transmission): 100 MVA  
+        - Case118 (transmission): 100 MVA
+        
+        This ensures proper per-unit calculations and normalized power loss.
+        """
+        case_name = getattr(config, 'CASE_NAME', None)
+        if not case_name:
+            raise ValueError("CASE_NAME must be set in config to determine system base power")
+        
+        case_name_lower = case_name.lower()
+        if 'case33' in case_name_lower:
+            return 10.0  # Distribution system base power
+        elif 'case57' in case_name_lower:
+            return 100.0  # Sub-transmission system base power
+        elif 'case118' in case_name_lower:
+            return 100.0  # Transmission system base power
+        else:
+            raise ValueError(f"Unknown system type: {case_name}. Expected case33, case57, or case118")
 
     # --- START CORRECTION: The forward pass now accepts a BATCH of Ybus matrices and coefficients ---
     def forward(self, 
@@ -310,28 +336,12 @@ class PowerSystemLoss(nn.Module):
         total_gen = torch.sum(state[..., 4], dim=-1)  # Total P_gen in MW [batch_size]
         total_gen_pu = total_gen / self.s_base_mva  # Convert to per-unit [batch_size]
         
-        # # DEBUG: Print diagnostic information to understand the values
-        # print(f"\n[DEBUG] Power Loss Calculation:")
-        # print(f"  Num buses: {num_buses}")
-        # print(f"  Batch size: {batch_size}")
-        # print(f"  State shape: {state.shape}")
-        # print(f"  State[..., 4] (P_gen in MW) - min: {state[..., 4].min().item():.2f}, max: {state[..., 4].max().item():.2f}, mean: {state[..., 4].mean().item():.2f}")
-        # print(f"  Total P_gen (MW): min: {total_gen.min().item():.2f}, max: {total_gen.max().item():.2f}, mean: {total_gen.mean().item():.2f}")
-        # print(f"  S_base_MVA: {self.s_base_mva}")
-        # print(f"  Total P_gen (p.u.): min: {total_gen_pu.min().item():.4f}, max: {total_gen_pu.max().item():.4f}, mean: {total_gen_pu.mean().item():.4f}")
-        # print(f"  Total loss (p.u.): min: {total_loss_pu.min().item():.6f}, max: {total_loss_pu.max().item():.6f}, mean: {total_loss_pu.mean().item():.6f}")
         
-        # Normalize by total generation to get loss as a fraction of generation
-        # This returns actual loss percentages (e.g., 0.03 for 3% loss)
-        # Typical power system losses:
-        # - Distribution systems (33-bus): 2-4% → 0.02-0.04
-        # - Sub-transmission (57-bus): 1-3% → 0.01-0.03
-        # - Transmission (118-bus): 1-2% → 0.01-0.02
-        # Values are comparable across all bus systems and have direct physical meaning
-        normalized_loss = total_loss_pu / (total_gen_pu + epsilon)
+        # FIXED: Normalize by per-unit base (1.0) since total_loss_pu is already in per-unit
+        # This gives loss as a fraction of system base power (always positive, comparable across systems)
+        # Typical values: 0.01-0.05 (1-5% of system base power)
+        normalized_loss = total_loss_pu
         
-        # print(f"  Normalized loss (loss/gen): min: {normalized_loss.min().item():.6f}, max: {normalized_loss.max().item():.6f}, mean: {normalized_loss.mean().item():.6f}")
-        # print(f"  Normalized loss as %: min: {(normalized_loss.min().item()*100):.2f}%, max: {(normalized_loss.max().item()*100):.2f}%, mean: {(normalized_loss.mean().item()*100):.2f}%")
         
         # Do NOT scale or clamp - report actual loss percentages
         # Let the physics loss naturally penalize excessive or unphysical losses
@@ -480,6 +490,13 @@ class PowerSystemLoss(nn.Module):
         carbon_intensity = time_carbon_coeff.squeeze(-1) if time_carbon_coeff.dim() > 1 else time_carbon_coeff  # Cm
         energy_coefficient = time_energy_coeff.squeeze(-1) if time_energy_coeff.dim() > 1 else time_energy_coeff  # Ef
         
+        
+        # Check for problematic values
+        negative_grid_power_mask = power_from_grid_actual < 0
+        extreme_renewable_mask = renewable_frac > 1.0
+        negative_renewable_mask = renewable_frac < 0
+        
+        
         # Apply equation (3.7): f3 = (Psum - PDG) * Cm / Ef
         # This gives raw carbon emissions in units that depend on Cm and Ef
         raw_emissions = (power_from_grid_actual * carbon_intensity) / (energy_coefficient + 1e-9)
@@ -498,6 +515,17 @@ class PowerSystemLoss(nn.Module):
         # This normalization reflects the fraction of power from the grid (which causes emissions)
         # rather than from renewables (which are carbon-free)
         normalized_emissions = 1.0 - renewable_frac
+        
+        # DEBUG: Print final carbon emissions values
+        print(f"  Raw emissions: min: {raw_emissions.min().item():.2f}, max: {raw_emissions.max().item():.2f}, mean: {raw_emissions.mean().item():.2f}")
+        print(f"  Normalized emissions: min: {normalized_emissions.min().item():.4f}, max: {normalized_emissions.max().item():.4f}, mean: {normalized_emissions.mean().item():.4f}")
+        
+        # Check for problematic final values
+        negative_raw_mask = raw_emissions < 0
+        extreme_raw_mask = torch.abs(raw_emissions) > 10000  # Very large raw emissions
+        negative_norm_mask = normalized_emissions < 0
+        extreme_norm_mask = normalized_emissions > 1.0
+        
         
         # Values outside [0, 1] indicate model predictions beyond training data distribution
         # Let the loss function handle these cases to preserve learning signals

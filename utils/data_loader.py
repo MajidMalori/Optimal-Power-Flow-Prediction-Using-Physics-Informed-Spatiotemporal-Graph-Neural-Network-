@@ -319,7 +319,7 @@ def load_power_system_data(config, case_name):
 
     normalizer = PowerSystemNormalizer(concatenated_features)
     features_norm = normalizer.normalize(concatenated_features)
-    print(f"[Data] Loaded {len(feature_files)} scenarios → {concatenated_features.shape[0]} samples")
+    print(f"[Data] Loaded {len(feature_files)} scenarios -> {concatenated_features.shape[0]} samples")
     
     # --- START CORRECTION: Return concatenated arrays including renewable fractions and generation components ---
     return (features_norm, static_adjacency_matrix, concatenated_ybus, concatenated_targets, 

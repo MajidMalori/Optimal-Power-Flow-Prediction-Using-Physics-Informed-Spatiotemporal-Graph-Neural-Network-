@@ -21,7 +21,7 @@ class Config:
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 200
+    NUM_EPOCHS = 2
     EARLY_STOPPING_PATIENCE = 25
     TRAIN_SPLIT = 0.7
     VAL_SPLIT = 0.15
@@ -35,7 +35,8 @@ class Config:
     V_MIN = 0.90  # Minimum voltage limit
     V_MAX = 1.10  # Maximum voltage limit
     S_MAX = 1.2   # Maximum apparent power
-    S_BASE_MVA = 100.0  # System base power for per-unit calculations (matches pandapower test cases)
+    # S_BASE_MVA is determined dynamically based on system type in metrics.py
+    # Case33: 10 MVA, Case57/118: 100 MVA
     
     # --- Loss Function Weights ---
     LAMBDA_P = 10.0  # Weight for power balance violation
@@ -89,7 +90,7 @@ class Config:
             elif num_buses <= 57:
                 return "AdaptivePIGCN"     
             else:
-                return "AdaptivePIGCN"
+                return "AdaptivePIGCN"     
         
         @staticmethod
         def get_adaptive_mosoa_params(num_buses):
@@ -97,28 +98,28 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 10,     
-                    'max_iterations': 25,   
+                    'num_seagulls': 1,     
+                    'max_iterations': 2,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 8,      
-                    'max_iterations': 25,   
+                    'num_seagulls': 1,      
+                    'max_iterations': 2,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 4,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 25,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 1,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 2,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
-    
+
     # =============================================================================
     # MODEL-SPECIFIC CONFIGURATIONS
     # =============================================================================
@@ -195,7 +196,7 @@ class Config:
     # =============================================================================
     # INITIALIZATION
     # =============================================================================
-    
+
     def __init__(self):
         """Initializes directories and sets up experimental run structure."""
         # Initialize timestamp only when actually starting a run
@@ -248,7 +249,7 @@ class Config:
             'PIGCGRU': PIGCGRU, 
             'ResnetPIGCGRU': ResnetPIGCGRU, 
             'ResnetPIGCLSTM': ResnetPIGCLSTM
-        }
+    }
     
     @staticmethod
     def get_models_to_test(test_config='quick'):
@@ -377,7 +378,7 @@ class Config:
                 'learning_rate': self.LEARNING_RATE,
                 'num_epochs': self.NUM_EPOCHS,
                 'batch_size': self.BATCH_SIZE,
-                's_base_mva': self.S_BASE_MVA,
+                's_base_mva': 'system_specific',  # Determined dynamically based on case type
                 'lambda_p': self.LAMBDA_P,
                 'lambda_v': self.LAMBDA_V
             },
@@ -447,9 +448,9 @@ class Config:
                 writer.writeheader()
             writer.writerow(log_entry)
         
-        print(f"🏁 Run finalized: {self.CURRENT_RUN_DIR}")
-        print(f"📁 Latest run updated: {self.LATEST_RUN_DIR}")
-        print(f"📊 Experiment logged to: {experiment_log}")
+        print(f"Run finalized: {self.CURRENT_RUN_DIR}")
+        print(f"Latest run updated: {self.LATEST_RUN_DIR}")
+        print(f"Experiment logged to: {experiment_log}")
     
     def get_run_info(self):
         """Get information about the current run."""

@@ -213,7 +213,7 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
                                     num_buses: int, model_name: str):
     """Plot all renewable impact metrics for a physics-informed model."""
     if renewable_impact_data.empty:
-        print(f"ℹ️  No renewable impact data to plot for {model_name}")
+        print(f"ℹ  No renewable impact data to plot for {model_name}")
         return
         
     # Update metrics dictionary to match column names in renewable_impact_data

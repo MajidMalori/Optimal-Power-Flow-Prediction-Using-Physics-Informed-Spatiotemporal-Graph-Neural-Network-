@@ -248,7 +248,7 @@ def monitor_data_generation_progress_per_system(config, stop_event):
     pbar = tqdm(
         initial=0,
         total=total_expected_files,
-        desc="📊 Generating data",
+        desc="Generating data",
         bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} files",
         leave=True
     )
@@ -299,7 +299,7 @@ def clean_existing_data(config):
     data_dir = "./data"
     files_removed = 0
     
-    print("🧹 Cleaning existing data files to ensure data integrity...")
+    print("Cleaning existing data files to ensure data integrity...")
     
     # Remove all data files (both timestamped and legacy formats)
     patterns = [
@@ -322,13 +322,13 @@ def clean_existing_data(config):
                 os.remove(filepath)
                 files_removed += 1
             except OSError as e:
-                print(f"⚠️ Warning: Could not remove {filepath}: {e}")
+                print(f"WARNING: Could not remove {filepath}: {e}")
     
     if files_removed > 0:
-        print(f"✅ Removed {files_removed} existing data files.")
+        print(f"Removed {files_removed} existing data files.")
         print("   Cleanup complete. Ready for fresh data generation.\n")
     else:
-        print("✅ No existing data files to clean.\n")
+        print("No existing data files to clean.\n")
 
 def generate_data_if_missing(config) -> bool:
     """
@@ -347,15 +347,15 @@ def generate_data_if_missing(config) -> bool:
         is_consistent, reason = check_data_consistency(config)
         
         if is_consistent:
-            print(f"✅ Data validation passed: {reason}")
+            print(f"Data validation passed: {reason}")
             print("   Skipping data generation.")
             return True
         else:
-            print(f"⚠️  Data inconsistency detected: {reason}")
-            print("🔄 Will regenerate all data to ensure consistency.")
+            print(f"WARNING: Data inconsistency detected: {reason}")
+            print("Will regenerate all data to ensure consistency.")
             # Continue to cleaning and regeneration
     else:
-        print(f"❌ Missing {len(missing_files)} data files. Examples:")
+        print(f"Missing {len(missing_files)} data files. Examples:")
         for i, file in enumerate(missing_files[:5]):  # Show first 5 missing files
             print(f"   - {file}")
         if len(missing_files) > 5:
@@ -383,18 +383,18 @@ def generate_data_if_missing(config) -> bool:
         time.sleep(wait_interval)
         elapsed += wait_interval
     
-    print("🔄 Running data generation script...")
+    print("Running data generation script...")
     
     try:
         # Run gen_meas_best.py from the data directory
         data_gen_script = os.path.join("data", "gen_meas_best.py")
         
         if not os.path.exists(data_gen_script):
-            print(f"❌ Data generation script not found: {data_gen_script}")
+            print(f"ERROR: Data generation script not found: {data_gen_script}")
             return False
         
         # Run the script with per-system progress bars
-        print("📊 Starting data generation...\n")
+        print("Starting data generation...\n")
         
         # Start monitoring progress in background thread
         stop_event = threading.Event()
@@ -417,26 +417,26 @@ def generate_data_if_missing(config) -> bool:
         monitor_thread.join(timeout=3)  # Wait for thread to finish
         
         if result.returncode == 0:
-            print("\n✅ Data generation completed successfully!")
+            print("\nData generation completed successfully!")
             
             # Verify data was actually generated
             data_exist_after, remaining_missing = check_data_files_exist(config)
             if data_exist_after:
-                print("✅ All required data files now exist.\n")
+                print("All required data files now exist.\n")
                 return True
             else:
-                print(f"⚠️ Data generation completed but {len(remaining_missing)} files still missing.")
+                print(f"WARNING: Data generation completed but {len(remaining_missing)} files still missing.")
                 for missing in remaining_missing[:3]:  # Show a few examples
                     print(f"   - Still missing: {missing}")
                 return False
         else:
-            print(f"❌ Data generation failed with return code {result.returncode}")
+            print(f"ERROR: Data generation failed with return code {result.returncode}")
             if result.stderr:
                 print(f"Error details: {result.stderr}")
             return False
             
     except Exception as e:
-        print(f"❌ Error running data generation: {e}")
+        print(f"ERROR: Error running data generation: {e}")
         return False
 
 def display_convergence_analysis(config):
@@ -452,7 +452,7 @@ def display_convergence_analysis(config):
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     
     print("\n" + "="*80)
-    print("📊 CONVERGENCE ANALYSIS")
+    print("CONVERGENCE ANALYSIS")
     print("="*80)
     
     total_scenarios = 0
@@ -498,7 +498,7 @@ def display_convergence_analysis(config):
             if frac in all_data[num_buses]:
                 stats = all_data[num_buses][frac]
                 has_cont_fail = len(stats['failed_with_contingency']) > 0
-                icon = "⚠️" if has_cont_fail else "✅"
+                icon = "WARNING" if has_cont_fail else "OK"
                 rate = stats['success_rate']
                 
                 # Compact display with fixed width
@@ -506,9 +506,9 @@ def display_convergence_analysis(config):
                     nf = len(stats['failed_no_contingency'])
                     cf = len(stats['failed_with_contingency'])
                     if cf > 0:
-                        cell = f"{icon}{rate:5.1f}% {nf}💡{cf}🔴"
+                        cell = f"{icon}{rate:5.1f}% {nf}N{cf}C"
                     else:
-                        cell = f"{icon}{rate:5.1f}% {nf}💡"
+                        cell = f"{icon}{rate:5.1f}% {nf}N"
                 else:
                     cell = f"{icon}{rate:5.1f}%"
                 
@@ -518,7 +518,7 @@ def display_convergence_analysis(config):
                 row += f"| {'---':<{col_width-3}} "
         print(row)
     
-    print("\n📈 Summary:")
+    print("\nSummary:")
     
     # Count contingency-specific failures across all scenarios
     total_contingency_failures = 0
@@ -542,10 +542,10 @@ def display_convergence_analysis(config):
     overall_rate = (total_successful / total_timesteps * 100) if total_timesteps > 0 else 0
     contingency_success_rate = ((total_contingency_timesteps - total_contingency_failures) / total_contingency_timesteps * 100) if total_contingency_timesteps > 0 else 100
     
-    print(f"  • Overall: {overall_rate:.1f}% ({total_successful}/{total_timesteps}) | Normal fail: {total_normal_failures}💡 Contingency fail: {total_contingency_failures}🔴")
-    print(f"  • 🎯 Critical: {contingency_success_rate:.1f}% contingency success")
+    print(f"  • Overall: {overall_rate:.1f}% ({total_successful}/{total_timesteps}) | Normal fail: {total_normal_failures}N Contingency fail: {total_contingency_failures}C")
+    print(f"  • Critical: {contingency_success_rate:.1f}% contingency success")
     if scenarios_with_failures:
-        print(f"  • ⚠️  {len(scenarios_with_failures)} scenario(s) with contingency failures")
+        print(f"  • WARNING: {len(scenarios_with_failures)} scenario(s) with contingency failures")
     print("="*80)
 
 def force_clean_all_data(config) -> bool:
@@ -560,24 +560,24 @@ def force_clean_all_data(config) -> bool:
         bool: True if data generation was successful, False otherwise
     """
     print("\n" + "="*60)
-    print("🔄 FORCE REGENERATING ALL DATA")
+    print("FORCE REGENERATING ALL DATA")
     print("="*60)
     
     # Clean all existing data
     clean_existing_data(config)
     
-    print("\n🔄 Running data generation script...")
+    print("\nRunning data generation script...")
     
     try:
         # Run gen_meas_best.py from the data directory
         data_gen_script = os.path.join("data", "gen_meas_best.py")
         
         if not os.path.exists(data_gen_script):
-            print(f"❌ Data generation script not found: {data_gen_script}")
+            print(f"ERROR: Data generation script not found: {data_gen_script}")
             return False
         
         # Run the script with per-system progress bars
-        print("📊 Starting fresh data generation...\n")
+        print("Starting fresh data generation...\n")
         
         # Start monitoring progress in background thread
         stop_event = threading.Event()
@@ -600,16 +600,16 @@ def force_clean_all_data(config) -> bool:
         monitor_thread.join(timeout=2)
         
         if result.returncode == 0:
-            print("✅ Fresh data generation completed successfully!")
+            print("Fresh data generation completed successfully!")
             return True
         else:
-            print(f"❌ Data generation failed with return code {result.returncode}")
+            print(f"ERROR: Data generation failed with return code {result.returncode}")
             if result.stderr:
                 print(f"Error details: {result.stderr}")
             return False
             
     except Exception as e:
-        print(f"❌ Error running data generation: {e}")
+        print(f"ERROR: Error running data generation: {e}")
         return False
 
 def validate_data_before_training(config) -> bool:
@@ -624,7 +624,7 @@ def validate_data_before_training(config) -> bool:
         bool: True if data is ready for training, False otherwise
     """
     print("\n" + "="*80)
-    print("🔍 DATA VALIDATION")
+    print("DATA VALIDATION")
     print("="*80)
     
     success = generate_data_if_missing(config)
@@ -632,9 +632,9 @@ def validate_data_before_training(config) -> bool:
     if success:
         # Always show convergence analysis after successful data validation
         display_convergence_analysis(config)
-        print("\n✅ Ready for training!")
+        print("\nReady for training!")
     else:
-        print("\n❌ Data validation failed!")
+        print("\nData validation failed!")
     
     print("="*80)
     return success
