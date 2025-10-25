@@ -24,10 +24,10 @@ class adaptiveGCN(nn.Module):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
 
         # --- START CORRECTION ---
-        # The model needs to predict 6 features for each bus (Vm, Va, Pl, Ql, Pg, Qg).
+        # The model needs to predict 10 features for each bus (Vm, Va, Pl, Ql, P_ext, Q_ext, P_conv, Q_conv, P_ren, Q_ren).
         # The original output layer was `nn.Linear(hidden_dim, num_buses * 2)`, which
-        # was incorrect. The correct output is 6 features per node.
-        num_output_features = 6 
+        # was incorrect. The correct output is 10 features per node.
+        num_output_features = 10 
         self.output_layer = nn.Linear(hidden_dim, num_output_features)
         # --- END CORRECTION ---
 
@@ -60,6 +60,6 @@ class adaptiveGCN(nn.Module):
         # The output layer is now applied directly to the final node embeddings 'h'.
         # The result will have the correct shape [batch_size, num_buses, num_output_features].
         output = self.output_layer(h)
-        # Flatten to match expected output shape [batch_size, num_buses * 6]
+        # Flatten to match expected output shape [batch_size, num_buses * 10]
         return output.reshape(output.size(0), -1)
         # --- END CORRECTION ---

@@ -105,14 +105,9 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 # Calculate physics-based metrics for physics-informed models
                 norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                # Extract generation components from batch
-                ext_grid_gen = batch.get('ext_grid_gen', None)
-                conventional_gen = batch.get('conventional_gen', None)
-                renewable_gen = batch.get('renewable_gen', None)
-                
+                # Generation components are now included in the state tensor
                 emissions = physics_calculator._compute_carbon_emissions(
-                    outputs_phys, time_carbon, time_energy, renewable_frac,
-                    ext_grid_gen, conventional_gen, renewable_gen
+                    outputs_phys, time_carbon, time_energy, renewable_frac
                 )
                 norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
             else:

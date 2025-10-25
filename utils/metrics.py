@@ -35,7 +35,7 @@ def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: to
         if outputs.dim() == 2:
             # If outputs are flattened, reshape to 3D for physics calculations
             batch_size = outputs.shape[0]
-            num_features = 6  # Standard: vm, va, p_load, q_load, p_gen, q_gen
+            num_features = 10  # Standard: vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren
             num_buses = outputs.shape[1] // num_features
             outputs_3d = outputs.view(batch_size, num_buses, num_features)
         else:
@@ -164,10 +164,21 @@ class PowerSystemLoss(nn.Module):
 
     def _get_power_injections_pu(self, state: torch.Tensor):
         """Extracts power injections from the state tensor and converts them to per unit."""
+        # New 10-feature structure: [vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         p_load_mw = state[..., 2]
         q_load_mvar = state[..., 3]
-        p_gen_mw = state[..., 4]
-        q_gen_mvar = state[..., 5]
+        
+        # Calculate total generation from separated components
+        p_ext_mw = state[..., 4]  # External grid generation
+        q_ext_mvar = state[..., 5]
+        p_conv_mw = state[..., 6]  # Conventional generation
+        q_conv_mvar = state[..., 7]
+        p_ren_mw = state[..., 8]  # Renewable generation
+        q_ren_mvar = state[..., 9]
+        
+        # Total generation (local only, excluding slack bus)
+        p_gen_mw = p_conv_mw + p_ren_mw
+        q_gen_mvar = q_conv_mvar + q_ren_mvar
         
         p_inj_mw = p_gen_mw - p_load_mw
         q_inj_mvar = q_gen_mvar - q_load_mvar
@@ -179,10 +190,19 @@ class PowerSystemLoss(nn.Module):
     
     def _get_power_injections(self, state: torch.Tensor):
         """Extracts power injections from the state tensor in original units (MW, MVAr)."""
+        # New 10-feature structure: [vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         p_load_mw = state[..., 2]
         q_load_mvar = state[..., 3]
-        p_gen_mw = state[..., 4]
-        q_gen_mvar = state[..., 5]
+        
+        # Calculate total generation from separated components
+        p_conv_mw = state[..., 6]  # Conventional generation
+        q_conv_mvar = state[..., 7]
+        p_ren_mw = state[..., 8]  # Renewable generation
+        q_ren_mvar = state[..., 9]
+        
+        # Total generation (local only, excluding slack bus)
+        p_gen_mw = p_conv_mw + p_ren_mw
+        q_gen_mvar = q_conv_mvar + q_ren_mvar
         
         p_inj_mw = p_gen_mw - p_load_mw
         q_inj_mvar = q_gen_mvar - q_load_mvar
@@ -384,7 +404,7 @@ class PowerSystemLoss(nn.Module):
         but measuring flow magnitudes instead of balance mismatches.
         
         Args:
-            state: Tensor containing [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
+            state: Tensor containing [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
             Ybus: Admittance matrix [batch_size, num_buses, num_buses]
             epsilon: Small value to avoid division by zero
             
@@ -448,10 +468,7 @@ class PowerSystemLoss(nn.Module):
         predicted_state_physical: torch.Tensor, 
         time_carbon_coeff: torch.Tensor, 
         time_energy_coeff: torch.Tensor,
-        renewable_fraction: torch.Tensor = None,
-        ext_grid_generation: torch.Tensor = None,
-        conventional_generation: torch.Tensor = None,
-        renewable_generation: torch.Tensor = None
+        renewable_fraction: torch.Tensor = None
     ) -> Dict[str, torch.Tensor]:
         """
         Computes carbon emissions according to equation (3.7):
@@ -467,20 +484,13 @@ class PowerSystemLoss(nn.Module):
         from data generation (0.0, 0.2, 0.4, 0.6, 0.8, 1.0).
         """
         # Extract power consumption and generation from state
-        # State format: [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
+        # New 10-feature state format: [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         
         # Get total predicted load (Psum_t from equation 3.7)
         total_load_predicted = torch.sum(predicted_state_physical[..., 2], dim=-1)  # MW
         
-        # Require actual generation components - no fallbacks allowed
-        if ext_grid_generation is None or conventional_generation is None or renewable_generation is None:
-            raise ValueError(
-                "Generation components are required for carbon emissions calculation. "
-                "ext_grid_generation, conventional_generation, and renewable_generation must be provided."
-            )
-        
-        # Use actual separated generation components for accurate carbon emissions calculation
-        total_renewable_gen = torch.sum(renewable_generation, dim=-1)  # PDG_t from actual renewable generation
+        # Extract separated generation components from state tensor
+        total_renewable_gen = torch.sum(predicted_state_physical[..., 8], dim=-1)  # PDG_t from renewable generation (p_ren)
         power_from_grid_actual = total_load_predicted - total_renewable_gen
         
         # Calculate actual renewable fraction from the data

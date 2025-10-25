@@ -67,7 +67,7 @@ class Config:
     
     class _ModelConfig:
         """Base template for all model configurations"""
-        FEATURE_DIM = 6
+        FEATURE_DIM = 10  # Updated to include separated generation components: [vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         DROPOUT = 0.2
         HIDDEN_DIM_RANGE = (16, 128)  # Default fallback
         NUM_GC_LAYERS_RANGE = (1, 5)

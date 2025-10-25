@@ -24,13 +24,13 @@ class StateGraphLayer(nn.Module):
 # --- Corrected and Refactored AdaptivePIGCN ---
 
 class AdaptivePIGCN(BaseModel):
-    def __init__(self, feature_dim: int = 6, hidden_dim: int = 64,
+    def __init__(self, feature_dim: int = 10, hidden_dim: int = 64,
                  num_gc_layers: int = 3, num_buses: int = 118, dropout: float = 0.3,
                  embedding_dim: int = 16, phi: float = 0.5):
         """
         Initializes the Adaptive Physics-Informed Graph Convolutional Network.
         """
-        output_dim = num_buses * 6
+        output_dim = num_buses * 10  # Updated to 10 features per bus
         super().__init__(feature_dim=feature_dim, hidden_dim=hidden_dim,
                         output_dim=output_dim, num_gc_layers=num_gc_layers,
                         num_buses=num_buses, physics_informed=True)
@@ -128,6 +128,6 @@ class AdaptivePIGCN(BaseModel):
         x = self.mlp(x)
         
         # --- 4. Reshape back to 3D format [batch_size, num_buses, feature_dim] ---
-        x = x.reshape(batch_size, self.num_buses, 6)
+        x = x.reshape(batch_size, self.num_buses, self.feature_dim)
         
         return x

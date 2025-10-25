@@ -63,10 +63,8 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
                 "targets.npy", 
                 "adjacency.npy",
                 "time_energy_coeffs.txt",
-                "time_carbon_coeffs.txt",
-                "ext_grid_generation.npy",
-                "conventional_generation.npy",
-                "renewable_generation.npy"
+                "time_carbon_coeffs.txt"
+                # Note: Generation components are now included in features/targets matrices
             ]
             
             # Add Ybus files - check for sparse format

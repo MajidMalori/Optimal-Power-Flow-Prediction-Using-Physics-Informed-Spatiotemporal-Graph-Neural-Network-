@@ -234,7 +234,7 @@ def main():
         base_config.CASE_NAME = case_name
         try:
             data_tuple = load_power_system_data(base_config, case_name)
-            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer, _ext_grid_gen, _conventional_gen, _renewable_gen = data_tuple
+            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
         except FileNotFoundError as e:
             print(f"[CRITICAL ERROR] {e}")
             continue
@@ -288,8 +288,7 @@ def main():
                     loaders = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
                         _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                        is_static=(not is_sequential), ext_grid_generation=_ext_grid_gen, 
-                        conventional_generation=_conventional_gen, renewable_generation=_renewable_gen
+                        is_static=(not is_sequential)
                     )
                     train_loader, val_loader, test_loader = loaders
 

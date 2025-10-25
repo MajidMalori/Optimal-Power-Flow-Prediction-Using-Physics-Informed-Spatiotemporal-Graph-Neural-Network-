@@ -190,16 +190,14 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     num_buses = len(net.bus)
     time_steps = config['time_steps']
     
-    feature_matrix = np.zeros((time_steps, num_buses, 6))
-    target_matrix = np.zeros((time_steps, num_buses, 6))
+    feature_matrix = np.zeros((time_steps, num_buses, 10))
+    target_matrix = np.zeros((time_steps, num_buses, 10))
     adjacency_array = np.empty((time_steps,), dtype=object)
     time_energy_coeffs = np.zeros(time_steps)
     time_carbon_coeffs = np.zeros(time_steps)
     
-    # Separate generation components for carbon emissions calculation
-    ext_grid_matrix = np.zeros((time_steps, num_buses))
-    gen_matrix = np.zeros((time_steps, num_buses))
-    sgen_matrix = np.zeros((time_steps, num_buses))
+    # Note: Generation components are now included in the feature/target matrices
+    # No need for separate storage
     
     # Sparse Ybus storage: base + contingencies only
     ybus_base = None  # Base topology Ybus (set on first successful power flow)
@@ -321,10 +319,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
         sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
 
-        # 6. Store separate generation components for carbon emissions calculation
-        ext_grid_matrix[t] = ext_grid_p_by_bus.values
-        gen_matrix[t] = gen_p_by_bus.values
-        sgen_matrix[t] = sgen_p_by_bus.values
+        # Note: Generation components are now stored in the feature/target matrices
         
         # 7. Combine ALL generator types to get total injection per bus
         p_gen = (ext_grid_p_by_bus + gen_p_by_bus + sgen_p_by_bus).values
@@ -349,24 +344,29 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
         time_energy_coeffs[t] = config['max_energy_utilization_coeff'] - (net.res_line.pl_mw.sum() * config['loss_sensitivity'])
         
-        # Assemble the ground truth state vector (targets)
-        true_state = np.stack([vm_pu, va_rad, p_load, q_load, p_gen, q_gen], axis=1)
+        # Assemble the ground truth state vector (targets) with separated generation components
+        true_state = np.stack([vm_pu, va_rad, p_load, q_load, 
+                              ext_grid_p_by_bus.values, ext_grid_q_by_bus.values,  # Slack bus generation
+                              gen_p_by_bus.values, gen_q_by_bus.values,            # Conventional generation
+                              sgen_p_by_bus.values, sgen_q_by_bus.values], axis=1) # Renewable generation
         target_matrix[t] = true_state
 
-        # Create noisy measurements for the model features
+        # Create noisy measurements for the model features with separated generation components
         meas_vm = true_state[:,0] * (1 + np.random.normal(0, config['voltage_error_std'], num_buses))
         meas_va = true_state[:,1] + np.random.normal(0, config['angle_error_std'], num_buses)
         meas_pl = true_state[:,2] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
         meas_ql = true_state[:,3] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_pg = true_state[:,4] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_qg = true_state[:,5] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_p_ext = true_state[:,4] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_q_ext = true_state[:,5] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_p_conv = true_state[:,6] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_q_conv = true_state[:,7] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_p_ren = true_state[:,8] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        meas_q_ren = true_state[:,9] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
         
-        feature_matrix[t] = np.stack([meas_vm, meas_va, meas_pl, meas_ql, meas_pg, meas_qg], axis=1)
-        
-        # Store separate generation components for carbon emissions calculation
-        ext_grid_matrix[t] = ext_grid_p_by_bus.values
-        gen_matrix[t] = gen_p_by_bus.values
-        sgen_matrix[t] = sgen_p_by_bus.values
+        feature_matrix[t] = np.stack([meas_vm, meas_va, meas_pl, meas_ql, 
+                                     meas_p_ext, meas_q_ext,           # Slack bus generation
+                                     meas_p_conv, meas_q_conv,         # Conventional generation
+                                     meas_p_ren, meas_q_ren], axis=1)   # Renewable generation
         
         # Store adjacency matrix for this timestep (same for all timesteps in static case)
         if t == 0:  # Only calculate once for static networks
@@ -400,10 +400,8 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         "ybus_data": ybus_data,  # Sparse format
         "time_energy_coeffs": time_energy_coeffs, 
         "time_carbon_coeffs": time_carbon_coeffs,
-        "convergence_stats": convergence_stats,  # Detailed convergence report
-        "ext_grid_generation": ext_grid_matrix,  # External grid generation
-        "conventional_generation": gen_matrix,   # Conventional generator generation
-        "renewable_generation": sgen_matrix       # Renewable generator generation (PDG)
+        "convergence_stats": convergence_stats  # Detailed convergence report
+        # Note: Generation components are now included in features/targets matrices
     }
 
     
