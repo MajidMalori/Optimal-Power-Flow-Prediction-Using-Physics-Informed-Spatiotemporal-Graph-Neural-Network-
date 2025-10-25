@@ -121,7 +121,7 @@ def main():
     class Args:
         # Configuration for models to test - now centralized in config
         test_config = 'sequential_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-        bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+        bus_systems = '57,118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         seed = 42
         
         # === PARALLEL TRAINING CONFIGURATION ===
