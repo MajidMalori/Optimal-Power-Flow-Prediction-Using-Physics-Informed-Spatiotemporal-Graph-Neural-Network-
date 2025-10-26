@@ -359,16 +359,34 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         target_matrix[t] = true_state
 
         # Create noisy measurements for the model features with separated generation components
-        meas_vm = true_state[:,0] * (1 + np.random.normal(0, config['voltage_error_std'], num_buses))
-        meas_va = true_state[:,1] + np.random.normal(0, config['angle_error_std'], num_buses)
-        meas_pl = true_state[:,2] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_ql = true_state[:,3] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_p_ext = true_state[:,4] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_q_ext = true_state[:,5] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_p_conv = true_state[:,6] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_q_conv = true_state[:,7] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_p_ren = true_state[:,8] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
-        meas_q_ren = true_state[:,9] * (1 + np.random.normal(0, config['power_error_std'], num_buses))
+        # Use positive noise for ALL values to preserve original information and prevent sign changes
+        
+        # Generate positive noise for all values
+        positive_noise_vm = np.abs(np.random.normal(0, config['voltage_error_std'], num_buses))
+        positive_noise_angle = np.abs(np.random.normal(0, config['angle_error_std'], num_buses))
+        positive_noise_power = np.abs(np.random.normal(0, config['power_error_std'], num_buses))
+        
+        # Voltage magnitude: positive noise ensures non-negative result
+        meas_vm = true_state[:,0] * (1 + positive_noise_vm)
+        
+        # Voltage angle: positive noise preserves sign and magnitude relationship
+        meas_va = true_state[:,1] * (1 + positive_noise_angle)
+        
+        # Loads: positive noise ensures non-negative result
+        meas_pl = true_state[:,2] * (1 + positive_noise_power)
+        meas_ql = true_state[:,3] * (1 + positive_noise_power)
+        
+        # External grid: positive noise preserves sign and magnitude relationship
+        meas_p_ext = true_state[:,4] * (1 + positive_noise_power)
+        meas_q_ext = true_state[:,5] * (1 + positive_noise_power)
+        
+        # Conventional generation: positive noise ensures non-negative result
+        meas_p_conv = true_state[:,6] * (1 + positive_noise_power)
+        meas_q_conv = true_state[:,7] * (1 + positive_noise_power)
+        
+        # Renewable generation: positive noise ensures non-negative result
+        meas_p_ren = true_state[:,8] * (1 + positive_noise_power)
+        meas_q_ren = true_state[:,9] * (1 + positive_noise_power)
         
         feature_matrix[t] = np.stack([meas_vm, meas_va, meas_pl, meas_ql, 
                                      meas_p_ext, meas_q_ext,           # Slack bus generation

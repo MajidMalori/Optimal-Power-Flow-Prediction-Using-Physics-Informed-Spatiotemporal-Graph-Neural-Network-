@@ -35,8 +35,8 @@ class ResnetPIGCLSTM(BaseModel):
 
         # LSTM layers with residual connections and scalable sizing
         flattened_size = self.hidden_dim * self.num_buses  
-        # Use a reduced LSTM hidden size for larger systems to prevent memory explosion
-        lstm_hidden_size = min(flattened_size, max(256, flattened_size // 2))
+        # SIMPLIFIED: Use much smaller LSTM hidden size to prevent instability
+        lstm_hidden_size = min(flattened_size, max(64, flattened_size // 8))  # Much smaller than before
         
         self.residual_lstms = nn.ModuleList()
         self.lstm_layer_norms = nn.ModuleList()
@@ -109,5 +109,26 @@ class ResnetPIGCLSTM(BaseModel):
         
         # Apply the final linear transformation.
         final_output_per_node = self.output_transform(last_step_per_node)
+        
+        # PHYSICAL CONSTRAINTS: Ensure non-negative values for physically meaningful components
+        # p_ext can be negative (power back to grid), but p_conv, p_ren, p_load, q_load cannot
+        if final_output_per_node.shape[-1] >= 10:  # Ensure we have 10 features
+            # Apply ReLU to voltage magnitude (index 0) to ensure non-negative
+            final_output_per_node[..., 0] = torch.relu(final_output_per_node[..., 0])  # vm_pu ≥ 0
+            # Apply ReLU to p_conv (index 6) and p_ren (index 8) to ensure non-negative
+            final_output_per_node[..., 6] = torch.relu(final_output_per_node[..., 6])  # p_conv ≥ 0
+            final_output_per_node[..., 8] = torch.relu(final_output_per_node[..., 8])  # p_ren ≥ 0
+            # Apply ReLU to p_load (index 2) and q_load (index 3) to ensure non-negative
+            final_output_per_node[..., 2] = torch.relu(final_output_per_node[..., 2])  # p_load ≥ 0
+            final_output_per_node[..., 3] = torch.relu(final_output_per_node[..., 3])  # q_load ≥ 0
+            # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
+        
+        # DEBUG: Print ResNet model debug info
+        
+        # Check for extreme values
+        if torch.isnan(final_output_per_node).any():
+            print(f"  ⚠️  NaN values found in ResNet output!")
+        if (torch.abs(final_output_per_node) > 100).any():
+            print(f"  ⚠️  Extreme values found in ResNet output (>100)!")
         
         return final_output_per_node

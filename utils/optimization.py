@@ -110,6 +110,10 @@ def soa(num_agents: int, max_iter: int, lower_bound: np.ndarray, upper_bound: np
             positions[i, :] = np.clip(new_position, lower_bound, upper_bound)
 
         pbar.set_description(f"MoSOA Iteration {l+1}/{max_iter} | Best MSE: {best_score:.6f}")
+        
+        # Add spacing between iterations by updating progress bar with newline
+        if l < max_iter - 1:  # Don't add space after the last iteration
+            pbar.write("")  # Use pbar.write() instead of print() to avoid interference
     
     return best_score, best_position, convergence_curve, iteration_details
 

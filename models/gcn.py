@@ -36,4 +36,18 @@ class GCN(BaseModel):
             x = self.dropout_layer(x)
         
         out = self.output_layer(x)
+        
+        # PHYSICAL CONSTRAINTS: Ensure non-negative values for physically meaningful components
+        # p_ext can be negative (power back to grid), but p_conv, p_ren, p_load, q_load cannot
+        if out.shape[-1] >= 10:  # Ensure we have 10 features
+            # Apply ReLU to voltage magnitude (index 0) to ensure non-negative
+            out[..., 0] = torch.relu(out[..., 0])  # vm_pu ≥ 0
+            # Apply ReLU to p_conv (index 6) and p_ren (index 8) to ensure non-negative
+            out[..., 6] = torch.relu(out[..., 6])  # p_conv ≥ 0
+            out[..., 8] = torch.relu(out[..., 8])  # p_ren ≥ 0
+            # Apply ReLU to p_load (index 2) and q_load (index 3) to ensure non-negative
+            out[..., 2] = torch.relu(out[..., 2])  # p_load ≥ 0
+            out[..., 3] = torch.relu(out[..., 3])  # q_load ≥ 0
+            # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
+        
         return out.reshape(batch_size, -1)  # Flatten to [batch_size, num_buses * 10]

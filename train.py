@@ -9,6 +9,8 @@ import gc
 import time
 import signal
 import sys
+import psutil
+import tracemalloc
 # Removed ThreadPoolExecutor imports - parallel bus systems disabled
 
 def check_gpu_memory():
@@ -35,6 +37,79 @@ def clear_gpu_memory():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
         gc.collect()
+
+def log_memory_usage(stage_name):
+    """Log memory usage at different stages"""
+    if torch.cuda.is_available():
+        memory_info = check_gpu_memory()
+        print(f"[Memory] {stage_name}: {memory_info['allocated'] / 1024**3:.2f} GB allocated, "
+              f"{memory_info['free'] / 1024**3:.2f} GB free")
+    else:
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        print(f"[Memory] {stage_name}: {memory_mb:.1f} MB RAM used")
+
+def get_adaptive_batch_size(num_buses, base_batch_size=32):
+    """Get adaptive batch size based on system size"""
+    if num_buses >= 118:
+        return max(1, base_batch_size // 4)  # Large systems: smaller batches
+    elif num_buses >= 57:
+        return max(1, base_batch_size // 2)  # Medium systems: medium batches
+    else:
+        return base_batch_size  # Small systems: full batches
+
+def cleanup_bus_system_data():
+    """Clean up data between bus systems to free memory"""
+    global _features, _adjacency, _ybus_matrices, _targets
+    global _energy_coeffs, _carbon_coeffs, _renewable_fractions
+    
+    # Clear large data structures
+    if '_features' in globals():
+        del _features
+    if '_adjacency' in globals():
+        del _adjacency
+    if '_ybus_matrices' in globals():
+        del _ybus_matrices
+    if '_targets' in globals():
+        del _targets
+    if '_energy_coeffs' in globals():
+        del _energy_coeffs
+    if '_carbon_coeffs' in globals():
+        del _carbon_coeffs
+    if '_renewable_fractions' in globals():
+        del _renewable_fractions
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Clear GPU cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+def cleanup_model_resources(model, trainer, optimizer, criterion):
+    """Clean up model resources between different models"""
+    # Delete model and related objects
+    if model is not None:
+        del model
+    if trainer is not None:
+        del trainer
+    if optimizer is not None:
+        del optimizer
+    if criterion is not None:
+        del criterion
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Clear GPU cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+def enable_gradient_checkpointing(model):
+    """Enable gradient checkpointing for memory efficiency"""
+    if hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
+        print("  Gradient checkpointing enabled for memory efficiency")
 
 def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
     """Get a safe device for training, with automatic fallback to CPU if GPU memory is insufficient"""
@@ -73,8 +148,8 @@ from utils.data_validation import validate_data_before_training
 from utils.optimization import (soa, setup_hyperparameter_bounds, create_model_kwargs, 
                                generate_run_name, process_optimization_params, 
                                calculate_objective_score)
-from utils.evaluation import (evaluate_model, evaluate_moopf_objectives, 
-                             save_best_model_results, print_comprehensive_summary,
+from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_moopf_objectives, 
+                             evaluate_moopf_objectives_normalized, save_best_model_results, print_comprehensive_summary,
                              print_model_summary)
 from trainers.model_trainer import PowerSystemTrainer
 from config import Config
@@ -106,8 +181,22 @@ def signal_handler(signum, frame):
         _config_instance.finalize_run({'status': 'interrupted', 'reason': f'signal_{signum}'})
     sys.exit(0)
 
+def setup_professional_logging():
+    """Setup professional logging with memory tracking"""
+    # Use console logging only - detailed logs are already saved in experimental_results/
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    return logging.getLogger(__name__)
+
 def main():
     global _config_instance
+    
+    # Setup professional logging
+    logger = setup_professional_logging()
+    logger.info("Starting training session with memory optimizations")
     
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
@@ -120,8 +209,9 @@ def main():
     
     class Args:
         # Configuration for models to test - now centralized in config
-        test_config = 'sequential_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-        bus_systems = '57,118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+        test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+        bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+        models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
         seed = 42
         
         # === PARALLEL TRAINING CONFIGURATION ===
@@ -169,7 +259,7 @@ def main():
     print("="*80)
     
     # STEP 2: Validate data before training
-    if not validate_data_before_training(base_config):
+    if not validate_data_before_training(base_config, bus_systems_to_test):
         print("Data validation failed. Exiting training.")
         return
     
@@ -182,6 +272,7 @@ def main():
     
     # Configure hardware
     clear_gpu_memory()
+    log_memory_usage("Initial startup")
     
     def get_optimal_workers():
         if is_gpu and torch.cuda.is_available():
@@ -213,6 +304,15 @@ def main():
     model_class_map = base_config.get_model_class_map()
     model_config_map = base_config.model_config_map
     models_to_test = base_config.get_models_to_test(args.test_config)
+    
+    # Filter models based on user selection
+    if args.models_to_train != 'all':
+        selected_models = [m.strip() for m in args.models_to_train.split(',')]
+        models_to_test = [m for m in models_to_test if m in selected_models]
+        print(f"🎯 Selected models to train: {models_to_test}")
+        if not models_to_test:
+            print("❌ No valid models selected. Available models: PIGCLSTM, PIGCGRU, ResnetPIGCLSTM, ResnetPIGCGRU")
+            return
 
 
     # === MAIN TRAINING EXECUTION ===
@@ -240,7 +340,9 @@ def main():
             continue
 
         for model_name in models_to_test:
-            print(f"\n{model_name} on {num_buses}-bus")
+            print(f"\n{'='*60}")
+            print(f"{model_name} on {num_buses}-bus")
+            print(f"{'='*60}")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
@@ -283,7 +385,8 @@ def main():
                         print(f"GPU memory before model creation: {memory_info['allocated'] / 1024**3:.2f} GB allocated, {memory_info['free'] / 1024**3:.2f} GB free")
                     
                     # Use adaptive batch size based on system size
-                    run_config.BATCH_SIZE = run_config.get_adaptive_batch_size(num_buses)
+                    run_config.BATCH_SIZE = get_adaptive_batch_size(num_buses, run_config.BATCH_SIZE)
+                    log_memory_usage(f"Before loading {num_buses}-bus data")
                     
                     loaders = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
@@ -305,8 +408,11 @@ def main():
                             clear_gpu_memory()
                     
                     # Create model with error handling for OOM
+                    log_memory_usage(f"Before creating {model_name} model")
                     try:
                         model = model_class_map[model_name](**model_kwargs).to(device)
+                        # Enable gradient checkpointing for large models
+                        enable_gradient_checkpointing(model)
                     except RuntimeError as e:
                         if "out of memory" in str(e).lower():
                             print(f"CUDA OOM during model creation: {e}")
@@ -343,8 +449,8 @@ def main():
                     # Train the model
                     trainer.train(train_loader, val_loader)
 
-                    # Get validation metrics for hyperparameter optimization
-                    val_metrics = evaluate_model(model, val_loader, device, run_config, _normalizer, is_sequential)
+                    # Get validation metrics for hyperparameter optimization (use normalized data like training)
+                    val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
                     
                     # Get test metrics for final evaluation
                     test_metrics = evaluate_model(model, test_loader, device, run_config, _normalizer, is_sequential)
@@ -373,6 +479,7 @@ def main():
                         **test_metrics,  # Final test performance for reporting
                         'val_metrics': val_metrics,  # Validation metrics used for optimization
                         'total_loss': total_loss,  # Based on validation metrics
+                        'training_mse': val_metrics['mse'],  # FIXED: Store normalized training MSE
                         'training_history': trainer.get_training_history(),
                         'model_state': model_state,  # May be None for large models
                         'model_config': run_config  
@@ -386,15 +493,13 @@ def main():
                     return float('inf')
                 finally:
                     # Clean up model and memory
-                    if 'model' in locals():
-                        del model
-                    if 'criterion' in locals():
-                        del criterion
-                    if 'optimizer' in locals():
-                        del optimizer
-                    if 'trainer' in locals():
-                        del trainer
-                    clear_gpu_memory()
+                    cleanup_model_resources(
+                        locals().get('model'), 
+                        locals().get('trainer'), 
+                        locals().get('optimizer'), 
+                        locals().get('criterion')
+                    )
+                    log_memory_usage(f"After {model_name} training")
 
             # Run MoSOA optimization
             best_score, best_position, history, iteration_details = soa(
@@ -407,6 +512,7 @@ def main():
             best_params = process_optimization_params(param_keys, best_position)
 
             print(f"\nBest: {best_params} | Score: {best_score:.6f}")
+            print("\n" + "="*80)  # Add clear separator after MoSOA completion
 
             if not model_specific_results: 
                 print(f"No successful runs for {model_name}.")
@@ -471,15 +577,16 @@ def main():
                 else:
                     raise e
 
-            # Evaluate MOOPF objectives for the best model
-            moopf_results, renewable_impact_data = evaluate_moopf_objectives(
+            # Evaluate MOOPF objectives for the best model (using normalized data for consistent scoring)
+            moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
                 model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
             )
             
             # Calculate final test performance metric for comparison
             if is_physics_informed:
+                # Use MSE as the primary metric, but track MOOPF score separately
                 final_test_score = moopf_results['mse_score'].mean() if 'mse_score' in moopf_results.columns else best_run.get('mse', float('inf'))
-                final_metric_name = "MOOPF MSE"
+                final_metric_name = "MOOPF Score"  # This is just a label indicating we also have MOOPF evaluation
             else:
                 final_test_score = moopf_results['mse_score'].mean()
                 final_metric_name = "Test MSE"
@@ -491,7 +598,7 @@ def main():
                 'is_physics_informed': is_physics_informed,
                 'best_hidden_dim': best_run.get('HIDDEN_DIM', 'N/A'),
                 'best_gc_layers': best_run.get('NUM_GC_LAYERS', 'N/A'),
-                'training_mse': best_run.get('mse', float('inf')),
+                'training_mse': best_run.get('training_mse', best_run.get('mse', float('inf'))),
                 'final_test_score': final_test_score,
                 'final_metric_name': final_metric_name,
                 'power_violation': best_run.get('power_violation', 'N/A') if is_physics_informed else 'N/A',
@@ -553,6 +660,11 @@ def main():
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()
+        log_memory_usage(f"After completing {num_buses}-bus system")
+        
+        # Clean up data between bus systems
+        cleanup_bus_system_data()
+        log_memory_usage("After bus system cleanup")
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results)

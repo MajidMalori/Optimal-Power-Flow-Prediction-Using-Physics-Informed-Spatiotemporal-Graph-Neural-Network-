@@ -343,8 +343,30 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
         generator=torch.Generator().manual_seed(config.SEED)
     )
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
-    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS, collate_fn=collate_fn_to_use)
-    val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS, collate_fn=collate_fn_to_use)
-    test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS, collate_fn=collate_fn_to_use)
+    
+    # OPTIMIZED DataLoader settings for memory efficiency
+    train_dataloader_kwargs = {
+        'batch_size': config.BATCH_SIZE,
+        'shuffle': True,
+        'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
+        'collate_fn': collate_fn_to_use,
+        'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
+        'persistent_workers': True,  # Keep workers alive
+        'prefetch_factor': 2,  # Prefetch 2 batches per worker
+    }
+    
+    val_test_dataloader_kwargs = {
+        'batch_size': config.BATCH_SIZE,
+        'shuffle': False,
+        'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
+        'collate_fn': collate_fn_to_use,
+        'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
+        'persistent_workers': True,  # Keep workers alive
+        'prefetch_factor': 2,  # Prefetch 2 batches per worker
+    }
+    
+    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    val_loader = DataLoader(val_dataset, **val_test_dataloader_kwargs)
+    test_loader = DataLoader(test_dataset, **val_test_dataloader_kwargs)
     print("[Data] DataLoaders created.")
     return train_loader, val_loader, test_loader

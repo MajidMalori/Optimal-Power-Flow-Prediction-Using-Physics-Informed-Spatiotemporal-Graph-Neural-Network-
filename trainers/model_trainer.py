@@ -4,6 +4,7 @@ import torch
 from tqdm import tqdm
 from .base_trainer import BaseTrainer
 from torch_geometric.utils import to_dense_adj
+import gc
 
 class PowerSystemTrainer(BaseTrainer):
     """
@@ -35,12 +36,13 @@ class PowerSystemTrainer(BaseTrainer):
         accumulation_steps = self._get_gradient_accumulation_steps()
         effective_batch_size = self.config.BATCH_SIZE * accumulation_steps
         
-        pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Train] (eff_batch={effective_batch_size})")
+        pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Train]")
 
         for batch_idx, batch in enumerate(pbar):
-            features = batch['features'].to(self.device)
-            targets = batch['targets'].to(self.device)
-            ybus = batch['ybus_matrix'].to(self.device)
+            # Move data to device with memory efficiency
+            features = batch['features'].to(self.device, non_blocking=True)
+            targets = batch['targets'].to(self.device, non_blocking=True)
+            ybus = batch['ybus_matrix'].to(self.device, non_blocking=True)
             
             adjacency_batch = batch['adjacency']
             if isinstance(adjacency_batch, list):
@@ -62,25 +64,27 @@ class PowerSystemTrainer(BaseTrainer):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
             
-           # Update running totals for the epoch
+            # Update running totals for the epoch
             epoch_losses['total_loss'] += total_loss.item() * accumulation_steps
             epoch_losses['mse'] += loss_dict['mse'].item()
             epoch_losses['power_violation'] += loss_dict['power_violation'].item()
             epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
 
-            # Update the progress bar with detailed metrics for the current batch
+            # Update progress bar with running averages
             if self.is_physics_informed:
                 pbar.set_postfix(
-                    mse=f"{loss_dict['mse'].item():.4f}", 
-                    p_viol=f"{loss_dict['power_violation'].item():.4f}", 
-                    v_viol=f"{loss_dict['voltage_violation'].item():.4f}",
-                    acc_steps=f"{accumulation_steps}"
+                    mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}",
+                    p_viol=f"{epoch_losses['power_violation']/(batch_idx+1):.4f}",
+                    v_viol=f"{epoch_losses['voltage_violation']/(batch_idx+1):.4f}"
                 )
             else:
-                pbar.set_postfix(
-                    mse=f"{loss_dict['mse'].item():.4f}",
-                    acc_steps=f"{accumulation_steps}"
-                )
+                pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}")
+            
+            # Periodic memory cleanup for large systems
+            if batch_idx % 10 == 0 and self.config.NUM_BUSES >= 57:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             # --- END CORRECTION ---
 
         # --- START CORRECTION: Return the average of all loss components ---
@@ -101,7 +105,7 @@ class PowerSystemTrainer(BaseTrainer):
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
         with torch.no_grad():
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
                 features = batch['features'].to(self.device)
                 targets = batch['targets'].to(self.device)
                 ybus = batch['ybus_matrix'].to(self.device)
@@ -125,18 +129,15 @@ class PowerSystemTrainer(BaseTrainer):
                 epoch_losses['power_violation'] += loss_dict['power_violation'].item()
                 epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
 
-                # Update the progress bar with detailed metrics for the current batch
+                # Update progress bar with running averages
                 if self.is_physics_informed:
                     pbar.set_postfix(
-                        mse=f"{loss_dict['mse'].item():.4f}", 
-                        p_viol=f"{loss_dict['power_violation'].item():.4f}", 
-                        v_viol=f"{loss_dict['voltage_violation'].item():.4f}"
+                        mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}",
+                        p_viol=f"{epoch_losses['power_violation']/(batch_idx+1):.4f}",
+                        v_viol=f"{epoch_losses['voltage_violation']/(batch_idx+1):.4f}"
                     )
                 else:
-                    pbar.set_postfix(
-                        mse=f"{loss_dict['mse'].item():.4f}"
-                    )
-                # --- END CORRECTION ---
+                    pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}")
         
         # --- START CORRECTION: Return the average of all loss components ---
         num_batches = len(val_loader)

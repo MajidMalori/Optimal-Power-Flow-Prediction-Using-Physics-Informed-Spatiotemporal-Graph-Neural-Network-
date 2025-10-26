@@ -437,16 +437,25 @@ def generate_data_if_missing(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def display_convergence_analysis(config):
+def display_convergence_analysis(config, bus_systems_to_show=None):
     """
-    Display detailed convergence analysis from all generated convergence reports.
+    Display detailed convergence analysis from generated convergence reports.
     Shows power flow success rates and any failures (especially with contingencies).
+    
+    Args:
+        config: Configuration object
+        bus_systems_to_show: List of bus systems to show (if None, shows all available)
     """
     import json
     import glob
     
     data_dir = "./data"
-    bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    # Use provided bus systems or default to config
+    if bus_systems_to_show is not None:
+        bus_systems = bus_systems_to_show
+    else:
+        bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     
     print("\n" + "="*80)
@@ -517,6 +526,7 @@ def display_convergence_analysis(config):
         print(row)
     
     print("\nSummary:")
+    print("  N = Normal failures (no contingency), C = Contingency failures")
     
     # Count contingency-specific failures across all scenarios
     total_contingency_failures = 0
@@ -624,13 +634,14 @@ def force_clean_all_data(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def validate_data_before_training(config) -> bool:
+def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
     """
     Main function to validate data exists and generate if needed.
     Always displays convergence analysis after validation.
     
     Args:
         config: Configuration object
+        bus_systems_to_show: List of bus systems to show in convergence analysis
         
     Returns:
         bool: True if data is ready for training, False otherwise
@@ -642,8 +653,8 @@ def validate_data_before_training(config) -> bool:
     success = generate_data_if_missing(config)
     
     if success:
-        # Always show convergence analysis after successful data validation
-        display_convergence_analysis(config)
+        # Show convergence analysis for specific bus systems only
+        display_convergence_analysis(config, bus_systems_to_show)
         print("\nReady for training!")
     else:
         print("\nData validation failed!")
