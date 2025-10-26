@@ -5,12 +5,12 @@ Contains functions for model evaluation, results saving, and summary generation.
 
 import os
 import torch
+import torch.nn.functional as F
 import pandas as pd
 import logging
 from datetime import datetime
 from tqdm import tqdm
 from typing import Dict, List, Any, Tuple
-import torch.nn.functional as F
 
 from utils.metrics import PowerSystemLoss, compute_metrics
 from utils.visualization import (plot_training_history, plot_convergence, 
@@ -26,8 +26,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     all_ybus = []  # Add this to collect Ybus matrices
     
     with torch.no_grad():
-        pbar = tqdm(test_loader, desc=f"Evaluating {model.__class__.__name__}", leave=False)
-        for batch in pbar:
+        for batch in test_loader:
             features = batch['features'].to(device)
             targets = batch['targets'].to(device)
             adj = batch['adjacency'].to(device)
@@ -63,13 +62,115 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     if all_outputs_tensor.dim() == 2:
         # If model outputs flattened format [batch_size, num_buses * features]
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 6
+        num_features = 10  # Updated for 10-feature approach
         all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
     
     outputs_denorm = normalizer.denormalize(all_outputs_tensor, num_buses)
     targets_denorm = normalizer.denormalize(all_targets_tensor, num_buses)
 
     return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
+
+
+def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, 
+                              config: object, normalizer: Any) -> Dict[str, float]:
+    """Computes metrics on normalized data (same scale as training) for MoSOA optimization."""
+    with torch.no_grad():
+        # Ensure outputs and targets have the same shape
+        if outputs.dim() != targets.dim():
+            if outputs.dim() == 2 and targets.dim() == 3:
+                targets = targets.view(outputs.shape)
+            elif outputs.dim() == 3 and targets.dim() == 2:
+                outputs = outputs.view(targets.shape)
+            else:
+                raise ValueError(f"Cannot reconcile output shape {outputs.shape} with target shape {targets.shape}")
+        
+        # Standard regression metrics on normalized data
+        mse = F.mse_loss(outputs, targets).item()
+        rmse = torch.sqrt(torch.tensor(mse, device=outputs.device)).item()
+        
+        # For physics calculations, we need to denormalize only for physics violations
+        # but keep the same scale as training
+        if outputs.dim() == 2:
+            batch_size = outputs.shape[0]
+            num_features = 10  # Updated for 10-feature approach
+            num_buses = outputs.shape[1] // num_features
+            outputs_3d = outputs.view(batch_size, num_buses, num_features)
+        else:
+            outputs_3d = outputs
+        
+        # Denormalize only for physics calculations (same as training)
+        outputs_denorm = normalizer.denormalize(outputs_3d, config.NUM_BUSES)
+        
+        # Create PowerSystemLoss instance for physics calculations
+        physics_metrics = PowerSystemLoss(config=config, normalizer=normalizer)
+        
+        # Calculate physics violations (same method as training)
+        power_violation = physics_metrics._compute_power_balance_violation(
+            state=outputs_denorm,
+            ybus_batch=ybus_batch,
+            squared=False
+        ).mean().item()
+        
+        voltage_violation = torch.sqrt(physics_metrics._compute_voltage_limit_violation(
+            outputs_denorm
+        )).mean().item()
+        
+        return {
+            'mse': mse,
+            'rmse': rmse,
+            'power_violation': power_violation,
+            'voltage_violation': voltage_violation
+        }
+
+
+def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.data.DataLoader, 
+                            device: torch.device, config: Any, normalizer: Any, 
+                            is_sequential: bool) -> Dict[str, float]:
+    """Evaluates the model on normalized data (same as training) for MoSOA optimization."""
+    model.eval()
+    all_outputs, all_targets = [], []
+    all_ybus = []
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            features = batch['features'].to(device)
+            targets = batch['targets'].to(device)
+            adj = batch['adjacency'].to(device)
+            ybus = batch['ybus_matrix'].to(device)
+
+            # Handle sequential vs non-sequential models
+            if is_sequential and features.dim() == 3:
+                features_input = features[:, -1, :]
+            else:
+                features_input = features
+            
+            outputs = model(features_input, adj)
+
+            all_outputs.append(outputs)
+            all_targets.append(targets)
+            all_ybus.append(ybus)
+
+    all_outputs_tensor = torch.cat(all_outputs, dim=0)
+    all_targets_tensor = torch.cat(all_targets, dim=0)
+    all_ybus_tensor = torch.cat(all_ybus, dim=0)
+
+    # Get num_buses dynamically from config
+    if hasattr(config, 'NUM_BUSES'):
+        num_buses = config.NUM_BUSES
+        if isinstance(num_buses, list):
+            num_buses = num_buses[0]
+    else:
+        raise ValueError("Config must specify NUM_BUSES")
+    
+    # Handle shape consistency for different model types
+    if all_outputs_tensor.dim() == 2:
+        batch_size = all_outputs_tensor.shape[0]
+        num_features = 10  # Updated for 10-feature approach
+        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+    
+    # FIXED: Use normalized data for MoSOA (same as training)
+    # This ensures consistent evaluation scale between training and optimization
+    return compute_metrics_normalized(all_outputs_tensor, all_targets_tensor, all_ybus_tensor, config, normalizer)
 
 
 def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, 
@@ -96,23 +197,20 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             if outputs_norm.dim() == 2:
                 # If model outputs flattened format [batch_size, num_buses * features]
                 batch_size = outputs_norm.shape[0]
-                num_features = 6
+                num_features = 10  # Updated for 10-feature approach
                 outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
             
+            # FIXED: Use normalized data for MOOPF evaluation (same as training)
+            # Only denormalize for physics calculations that require physical units
             outputs_phys = normalizer.denormalize(outputs_norm, num_buses)
 
             if is_physics_informed:
                 # Calculate physics-based metrics for physics-informed models
                 norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                # Extract generation components from batch
-                ext_grid_gen = batch.get('ext_grid_gen', None)
-                conventional_gen = batch.get('conventional_gen', None)
-                renewable_gen = batch.get('renewable_gen', None)
-                
+                # Generation components are now included in the state tensor
                 emissions = physics_calculator._compute_carbon_emissions(
-                    outputs_phys, time_carbon, time_energy, renewable_frac,
-                    ext_grid_gen, conventional_gen, renewable_gen
+                    outputs_phys, time_carbon, time_energy, renewable_frac
                 )
                 norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
             else:
@@ -139,14 +237,112 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                     logging.warning(f"Could not extract renewable fraction from batch data: {e}")
 
             if is_physics_informed:
+                # Calculate test MSE for physics-informed models
+                targets = batch['targets'].to(device)
+                targets_norm = normalizer.normalize(targets)
+                test_mse = F.mse_loss(outputs_norm, targets_norm)
+                
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
+                    'mse_score': test_mse.item(),  # Add test MSE for physics-informed models
                     'moopf_score': moopf_score.mean().item(), 
                     'normalized_power_loss': norm_loss.mean().item(),
-                    'normalized_voltage_deviation': norm_vdev.mean().item(), 
+                    'normalized_voltage_deviation': norm_vdev.mean().item(),
+                    'normalized_power_flow': norm_power_flow.mean().item(),
                     'normalized_carbon_emissions': emissions['normalized'].mean().item(),
-                    'raw_carbon_emissions_tCO2': emissions['raw'].mean().item(),
-                    'normalized_power_flow': norm_power_flow.mean().item()
+                    'raw_carbon_emissions_tCO2': emissions['raw'].mean().item()
+                })
+            else:
+                # For non-physics models, only report MSE-based results
+                targets = batch['targets'].to(device)
+                targets_norm = normalizer.normalize(targets)
+                mse_only = F.mse_loss(outputs_norm, targets_norm)
+                all_results.append({
+                    'mse_score': mse_only.item()  # Only relevant metric for non-physics models
+                })
+
+    return pd.DataFrame(all_results), pd.DataFrame(renewable_impact_data)
+
+
+def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, 
+                                        config: Any, device: torch.device, normalizer: Any, 
+                                        is_physics_informed: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Evaluates multi-objective objectives using normalized data (same as training) for consistent scoring."""
+    model.eval()
+    num_buses_val = getattr(config, 'NUM_BUSES', 33)
+    num_buses = int(num_buses_val[0]) if isinstance(num_buses_val, list) else int(num_buses_val)
+    physics_calculator = PowerSystemLoss(config=config, normalizer=normalizer).to(device)
+    w_loss, w_vdev, w_carbon = config.MOOPF_WEIGHT_LOSS, config.MOOPF_WEIGHT_VDEV, config.MOOPF_WEIGHT_CARBON
+    all_results, renewable_impact_data = [], []
+
+    with torch.no_grad():
+        for batch in tqdm(data_loader, desc="Evaluating MOOPF Objectives"):
+            features, ybus = batch['features'].to(device), batch['ybus_matrix'].to(device)
+            time_carbon, time_energy = batch['time_carbon_coeffs'].to(device), batch['time_energy_coeffs'].to(device)
+            renewable_frac = batch['renewable_fraction'].to(device)
+            adj = batch['adjacency'].to(device)
+
+            outputs_norm = model(features, adj)
+            
+            # Handle shape consistency for different model types
+            if outputs_norm.dim() == 2:
+                batch_size = outputs_norm.shape[0]
+                num_features = 10  # Updated for 10-feature approach
+                outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
+            
+            # FIXED: Use normalized data for MOOPF evaluation (same as training)
+            # Only denormalize for physics calculations that require physical units
+            outputs_phys = normalizer.denormalize(outputs_norm, num_buses)
+
+            if is_physics_informed:
+                # Calculate physics-based metrics for physics-informed models
+                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
+                norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
+                # Generation components are now included in the state tensor
+                emissions = physics_calculator._compute_carbon_emissions(
+                    outputs_phys, time_carbon, time_energy, renewable_frac
+                )
+                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
+            else:
+                # For non-physics models, set physics metrics to zero/neutral values
+                batch_size = features.shape[0]
+                norm_loss = torch.zeros(batch_size, device=device)
+                norm_vdev = torch.zeros(batch_size, device=device)
+                emissions = {'raw': torch.zeros(batch_size, device=device), 'normalized': torch.zeros(batch_size, device=device)}
+                norm_power_flow = torch.zeros(batch_size, device=device)
+
+            # Capture data for analyzing the impact of renewables (only for physics-informed models)
+            if is_physics_informed:
+                try:
+                    # Vectorized batch conversion - much faster than looping
+                    batch_data = pd.DataFrame({
+                        'renewable_fraction': renewable_frac.cpu().numpy(),
+                        'normalized_carbon_emissions': emissions['normalized'].cpu().numpy(),
+                        'voltage_deviation': norm_vdev.cpu().numpy(),
+                        'power_loss': norm_loss.cpu().numpy(),
+                        'power_flow': norm_power_flow.cpu().numpy()
+                    })
+                    renewable_impact_data.extend(batch_data.to_dict('records'))
+                except (IndexError, KeyError) as e:
+                    logging.warning(f"Could not extract renewable fraction from batch data: {e}")
+
+            if is_physics_informed:
+                # Calculate test MSE for physics-informed models (normalized data)
+                targets = batch['targets'].to(device)
+                targets_norm = normalizer.normalize(targets)
+                test_mse = F.mse_loss(outputs_norm, targets_norm)
+                
+                # DEBUG: Print MSE calculation details
+                
+                moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
+                all_results.append({
+                    'mse_score': test_mse.item(),  # Normalized MSE for consistent scoring
+                    'moopf_score': moopf_score.mean().item(), 
+                    'normalized_power_loss': norm_loss.mean().item(),
+                    'normalized_voltage_deviation': norm_vdev.mean().item(),
+                    'normalized_power_flow': norm_power_flow.mean().item(),
+                    'normalized_carbon_emissions': emissions['normalized'].mean().item(),
+                    'raw_carbon_emissions_tCO2': emissions['raw'].mean().item()
                 })
             else:
                 # For non-physics models, only report MSE-based results
@@ -395,7 +591,9 @@ def print_model_summary(best_run: Dict[str, Any], moopf_results: pd.DataFrame,
     print(f" BEST MODEL SUMMARY: {model_name} on {num_buses}-bus system")
     print(f"{'='*60}")
     print(f" Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
-    print(f" Training Performance: MSE = {best_run.get('mse', 'N/A'):.6f}")
+    # FIXED: Use normalized MSE from training history instead of denormalized test MSE
+    training_mse = best_run.get('training_mse', best_run.get('mse', 'N/A'))
+    print(f" Training Performance: MSE = {training_mse:.6f}")
     
     if is_physics_informed:
         print(f" Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6f}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6f}")

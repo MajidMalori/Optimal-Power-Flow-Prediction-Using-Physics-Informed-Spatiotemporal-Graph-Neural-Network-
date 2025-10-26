@@ -24,19 +24,20 @@ class StateGraphLayer(nn.Module):
 # --- Corrected and Refactored AdaptivePIGCN ---
 
 class AdaptivePIGCN(BaseModel):
-    def __init__(self, feature_dim: int = 6, hidden_dim: int = 64,
+    def __init__(self, feature_dim: int = 10, hidden_dim: int = 64,
                  num_gc_layers: int = 3, num_buses: int = 118, dropout: float = 0.3,
                  embedding_dim: int = 16, phi: float = 0.5):
         """
         Initializes the Adaptive Physics-Informed Graph Convolutional Network.
         """
-        output_dim = num_buses * 6
+        output_dim = num_buses * 10  # Updated to 10 features per bus
         super().__init__(feature_dim=feature_dim, hidden_dim=hidden_dim,
                         output_dim=output_dim, num_gc_layers=num_gc_layers,
                         num_buses=num_buses, physics_informed=True)
 
         self.phi = phi
         self.num_buses = num_buses
+        self.feature_dim = feature_dim
 
         # --- Adaptive Graph Learning Components ---
         self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
@@ -128,6 +129,19 @@ class AdaptivePIGCN(BaseModel):
         x = self.mlp(x)
         
         # --- 4. Reshape back to 3D format [batch_size, num_buses, feature_dim] ---
-        x = x.reshape(batch_size, self.num_buses, 6)
+        x = x.reshape(batch_size, self.num_buses, self.feature_dim)
+        
+        # PHYSICAL CONSTRAINTS: Ensure non-negative values for physically meaningful components
+        # p_ext can be negative (power back to grid), but p_conv, p_ren, p_load, q_load cannot
+        if x.shape[-1] >= 10:  # Ensure we have 10 features
+            # Apply ReLU to voltage magnitude (index 0) to ensure non-negative
+            x[..., 0] = torch.relu(x[..., 0])  # vm_pu ≥ 0
+            # Apply ReLU to p_conv (index 6) and p_ren (index 8) to ensure non-negative
+            x[..., 6] = torch.relu(x[..., 6])  # p_conv ≥ 0
+            x[..., 8] = torch.relu(x[..., 8])  # p_ren ≥ 0
+            # Apply ReLU to p_load (index 2) and q_load (index 3) to ensure non-negative
+            x[..., 2] = torch.relu(x[..., 2])  # p_load ≥ 0
+            x[..., 3] = torch.relu(x[..., 3])  # q_load ≥ 0
+            # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
         
         return x

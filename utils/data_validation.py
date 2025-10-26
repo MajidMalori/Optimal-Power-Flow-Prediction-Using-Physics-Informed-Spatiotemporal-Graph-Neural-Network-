@@ -63,10 +63,8 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
                 "targets.npy", 
                 "adjacency.npy",
                 "time_energy_coeffs.txt",
-                "time_carbon_coeffs.txt",
-                "ext_grid_generation.npy",
-                "conventional_generation.npy",
-                "renewable_generation.npy"
+                "time_carbon_coeffs.txt"
+                # Note: Generation components are now included in features/targets matrices
             ]
             
             # Add Ybus files - check for sparse format
@@ -439,16 +437,25 @@ def generate_data_if_missing(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def display_convergence_analysis(config):
+def display_convergence_analysis(config, bus_systems_to_show=None):
     """
-    Display detailed convergence analysis from all generated convergence reports.
+    Display detailed convergence analysis from generated convergence reports.
     Shows power flow success rates and any failures (especially with contingencies).
+    
+    Args:
+        config: Configuration object
+        bus_systems_to_show: List of bus systems to show (if None, shows all available)
     """
     import json
     import glob
     
     data_dir = "./data"
-    bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    # Use provided bus systems or default to config
+    if bus_systems_to_show is not None:
+        bus_systems = bus_systems_to_show
+    else:
+        bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     
     print("\n" + "="*80)
@@ -519,6 +526,7 @@ def display_convergence_analysis(config):
         print(row)
     
     print("\nSummary:")
+    print("  N = Normal failures (no contingency), C = Contingency failures")
     
     # Count contingency-specific failures across all scenarios
     total_contingency_failures = 0
@@ -542,8 +550,22 @@ def display_convergence_analysis(config):
     overall_rate = (total_successful / total_timesteps * 100) if total_timesteps > 0 else 0
     contingency_success_rate = ((total_contingency_timesteps - total_contingency_failures) / total_contingency_timesteps * 100) if total_contingency_timesteps > 0 else 100
     
+    # Count fallback usage across all scenarios
+    total_fallback_used = 0
+    for num_buses in bus_systems:
+        case_name = f"case{num_buses}"
+        for frac in renewable_fractions:
+            pattern = f"{case_name}_convergence_report_frac{frac:.1f}_*.json"
+            report_files = glob.glob(os.path.join(data_dir, pattern))
+            if report_files:
+                with open(sorted(report_files)[-1], 'r') as f:
+                    stats = json.load(f)
+                total_fallback_used += stats.get('fallback_used', 0)
+    
     print(f"  • Overall: {overall_rate:.1f}% ({total_successful}/{total_timesteps}) | Normal fail: {total_normal_failures}N Contingency fail: {total_contingency_failures}C")
     print(f"  • Critical: {contingency_success_rate:.1f}% contingency success")
+    if total_fallback_used > 0:
+        print(f"  • Fallback: {total_fallback_used} timesteps used previous successful data")
     if scenarios_with_failures:
         print(f"  • WARNING: {len(scenarios_with_failures)} scenario(s) with contingency failures")
     print("="*80)
@@ -612,13 +634,14 @@ def force_clean_all_data(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def validate_data_before_training(config) -> bool:
+def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
     """
     Main function to validate data exists and generate if needed.
     Always displays convergence analysis after validation.
     
     Args:
         config: Configuration object
+        bus_systems_to_show: List of bus systems to show in convergence analysis
         
     Returns:
         bool: True if data is ready for training, False otherwise
@@ -630,8 +653,8 @@ def validate_data_before_training(config) -> bool:
     success = generate_data_if_missing(config)
     
     if success:
-        # Always show convergence analysis after successful data validation
-        display_convergence_analysis(config)
+        # Show convergence analysis for specific bus systems only
+        display_convergence_analysis(config, bus_systems_to_show)
         print("\nReady for training!")
     else:
         print("\nData validation failed!")

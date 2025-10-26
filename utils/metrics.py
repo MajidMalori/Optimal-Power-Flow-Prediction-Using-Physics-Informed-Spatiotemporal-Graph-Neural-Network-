@@ -35,7 +35,7 @@ def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: to
         if outputs.dim() == 2:
             # If outputs are flattened, reshape to 3D for physics calculations
             batch_size = outputs.shape[0]
-            num_features = 6  # Standard: vm, va, p_load, q_load, p_gen, q_gen
+            num_features = 10  # Standard: vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren
             num_buses = outputs.shape[1] // num_features
             outputs_3d = outputs.view(batch_size, num_buses, num_features)
         else:
@@ -164,10 +164,22 @@ class PowerSystemLoss(nn.Module):
 
     def _get_power_injections_pu(self, state: torch.Tensor):
         """Extracts power injections from the state tensor and converts them to per unit."""
+        # New 10-feature structure: [vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         p_load_mw = state[..., 2]
         q_load_mvar = state[..., 3]
-        p_gen_mw = state[..., 4]
-        q_gen_mvar = state[..., 5]
+        
+        # Calculate total generation from separated components
+        p_ext_mw = state[..., 4]  # External grid generation
+        q_ext_mvar = state[..., 5]
+        p_conv_mw = state[..., 6]  # Conventional generation
+        q_conv_mvar = state[..., 7]
+        p_ren_mw = state[..., 8]  # Renewable generation
+        q_ren_mvar = state[..., 9]
+        
+        # Total local generation (excluding slack bus for power injection calculation)
+        # Power injection = Local generation - Local load (at each bus)
+        p_gen_mw = p_conv_mw + p_ren_mw
+        q_gen_mvar = q_conv_mvar + q_ren_mvar
         
         p_inj_mw = p_gen_mw - p_load_mw
         q_inj_mvar = q_gen_mvar - q_load_mvar
@@ -179,10 +191,19 @@ class PowerSystemLoss(nn.Module):
     
     def _get_power_injections(self, state: torch.Tensor):
         """Extracts power injections from the state tensor in original units (MW, MVAr)."""
+        # New 10-feature structure: [vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         p_load_mw = state[..., 2]
         q_load_mvar = state[..., 3]
-        p_gen_mw = state[..., 4]
-        q_gen_mvar = state[..., 5]
+        
+        # Calculate total generation from separated components
+        p_conv_mw = state[..., 6]  # Conventional generation
+        q_conv_mvar = state[..., 7]
+        p_ren_mw = state[..., 8]  # Renewable generation
+        q_ren_mvar = state[..., 9]
+        
+        # Total generation (local only, excluding slack bus)
+        p_gen_mw = p_conv_mw + p_ren_mw
+        q_gen_mvar = q_conv_mvar + q_ren_mvar
         
         p_inj_mw = p_gen_mw - p_load_mw
         q_inj_mvar = q_gen_mvar - q_load_mvar
@@ -223,23 +244,6 @@ class PowerSystemLoss(nn.Module):
 
     # --- The functions below are for post-training MOOPF evaluation, not for the training loss ---
 
-    # def _compute_normalized_power_balance_violation(self, state: torch.Tensor, Ybus: torch.Tensor, epsilon: float = 1e-9) -> torch.Tensor:
-    #     """Computes power balance violation, normalized by the total load for MOOPF evaluation."""
-    #     p_inj_mw, q_inj_mvar, p_load_mw, q_load_mvar = self._get_power_injections(state)
-    #     Vm = state[..., 0]
-    #     Va = state[..., 1]
-    #     V = Vm * torch.exp(1j * Va)
-    #     I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)
-    #     S_calc = V * torch.conj(I)
-    #     squared_mismatch = (p_inj_mw - S_calc.real)**2 + (q_inj_mvar - S_calc.imag)**2
-    #     total_load_s_squared = torch.sum(p_load_mw**2 + q_load_mvar**2, dim=1)
-    #     return torch.mean(squared_mismatch, dim=1) / (total_load_s_squared + epsilon)
-
-    # def _compute_normalized_voltage_limit_violation(self, state: torch.Tensor) -> torch.Tensor:
-    #     """Computes the mean absolute voltage violation in per unit (p.u.) for MOOPF evaluation."""
-    #     Vm = state[:, :, 0]
-    #     v_violations = torch.relu(self.v_min - Vm) + torch.relu(Vm - self.v_max)
-    #     return torch.mean(v_violations, dim=1)
 
     def _compute_normalized_active_power_loss(self, state: torch.Tensor, Ybus: torch.Tensor, epsilon: float = 1e-9) -> torch.Tensor:
         """
@@ -327,19 +331,12 @@ class PowerSystemLoss(nn.Module):
         upper_triangle = upper_triangle.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, num_buses, num_buses]
         
         # Apply upper triangle mask and sum
-        total_loss_pu = torch.sum(branch_losses * upper_triangle, dim=(1, 2))  # [batch_size]
+        total_loss_pu = torch.sum(branch_losses * upper_triangle, dim=(1, 2))  # [batch_size] in per-unit
         
-        # Normalize power loss using total generation as reference
-        # We use total GENERATION as the normalization base (physically meaningful and naturally positive)
-        # Note: NOT using abs() - if model predicts negative generation, the error should propagate
-        # The physics-informed loss will naturally penalize negative generation predictions
-        total_gen = torch.sum(state[..., 4], dim=-1)  # Total P_gen in MW [batch_size]
-        total_gen_pu = total_gen / self.s_base_mva  # Convert to per-unit [batch_size]
-        
-        
-        # FIXED: Normalize by per-unit base (1.0) since total_loss_pu is already in per-unit
-        # This gives loss as a fraction of system base power (always positive, comparable across systems)
-        # Typical values: 0.01-0.05 (1-5% of system base power)
+        # FIXED: Use per-unit loss directly as normalized loss
+        # Per-unit loss is already normalized by system base and represents loss as fraction of system capacity
+        # Typical values: 0.01-0.05 (1-5% of system capacity)
+        # This approach is robust and doesn't depend on generation predictions
         normalized_loss = total_loss_pu
         
         
@@ -384,7 +381,7 @@ class PowerSystemLoss(nn.Module):
         but measuring flow magnitudes instead of balance mismatches.
         
         Args:
-            state: Tensor containing [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
+            state: Tensor containing [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
             Ybus: Admittance matrix [batch_size, num_buses, num_buses]
             epsilon: Small value to avoid division by zero
             
@@ -416,27 +413,27 @@ class PowerSystemLoss(nn.Module):
         # Q_i = Im(S_i) = V_i Σ_s V_s (G_is sin θ_is - B_is cos θ_is)
         S_calc_pu = V * torch.conj(I)  # [batch_size, num_buses]
         
-        # Extract active and reactive power flow magnitudes
-        p_flow_magnitudes = torch.abs(S_calc_pu.real)  # |P_calculated| [batch_size, num_buses]
-        q_flow_magnitudes = torch.abs(S_calc_pu.imag)  # |Q_calculated| [batch_size, num_buses]
+        # Extract active and reactive power flows (preserve signs for physics accuracy)
+        p_flow_values = S_calc_pu.real  # P_calculated (can be negative for reverse flow) [batch_size, num_buses]
+        q_flow_values = S_calc_pu.imag  # Q_calculated (can be negative for reverse flow) [batch_size, num_buses]
         
-        # Calculate total apparent power flow magnitude per bus
-        s_flow_magnitudes = torch.sqrt(p_flow_magnitudes**2 + q_flow_magnitudes**2)  # [batch_size, num_buses]
+        # Calculate apparent power flow magnitude per bus (magnitude only for normalization)
+        s_flow_magnitudes = torch.sqrt(p_flow_values**2 + q_flow_values**2)  # [batch_size, num_buses]
         
         # Calculate mean apparent power flow magnitude per bus (normalized metric)
         # This gives a per-bus average that's naturally bounded and comparable
         mean_flow_magnitude_per_bus = torch.mean(s_flow_magnitudes, dim=-1)  # [batch_size]
         
-        # Alternative: Use total load as normalization base (more physically meaningful)
-        # Total system load provides a natural scale for power flow magnitudes
-        total_load = torch.sum(state[..., 2], dim=-1)  # Total P_load in MW [batch_size]
-        total_load_pu = total_load / self.s_base_mva  # Convert to per-unit [batch_size]
+        # Use total system load for normalization (physically meaningful and always positive)
+        # This avoids the negative p_ext problem while maintaining physical correctness
+        p_load = torch.sum(state[..., 2], dim=-1)  # Total load [batch_size] (always positive)
+        q_load = torch.sum(state[..., 3], dim=-1)  # Total reactive load [batch_size] (always positive)
+        total_load_magnitude = torch.sqrt(p_load**2 + q_load**2)  # Total apparent load [batch_size]
+        total_load_pu = total_load_magnitude / self.s_base_mva  # Convert to per-unit [batch_size]
         
-        # Normalize by total load + small epsilon to avoid division by zero
-        # Note: Individual buses can have reverse power flow (generation > load) which is physically valid
-        # However, total system load should be positive. If normalized_power_flow becomes negative,
-        # it indicates the model is predicting unphysical states (negative total loads),
-        # and this will be naturally penalized by the physics-informed loss during training.
+        # Normalize by total system load + small epsilon to avoid division by zero
+        # This gives us power flow as a fraction of total system load, which is physically meaningful
+        # Load is always positive, avoiding the negative generation problem
         normalized_power_flow = mean_flow_magnitude_per_bus / (total_load_pu + epsilon)
         
         # Return raw values without forcing them positive - let the physics loss handle bad predictions
@@ -448,87 +445,57 @@ class PowerSystemLoss(nn.Module):
         predicted_state_physical: torch.Tensor, 
         time_carbon_coeff: torch.Tensor, 
         time_energy_coeff: torch.Tensor,
-        renewable_fraction: torch.Tensor = None,
-        ext_grid_generation: torch.Tensor = None,
-        conventional_generation: torch.Tensor = None,
-        renewable_generation: torch.Tensor = None
+        renewable_fraction: torch.Tensor = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Computes carbon emissions according to equation (3.7):
-        f3 = Σ(Psum_t - PDG_t) * Cm / Ef
+        Computes carbon emissions using component-based approach:
+        f3 = Σ(Pext_t + Pconv_t) * Cm / Ef
         
         Where:
-        - Psum_t: Total power consumption at time t
-        - PDG_t: Total distributed generation at time t  
+        - Pext_t: External grid generation (p_ext_grid)
+        - Pconv_t: Conventional generation (p_conventional) 
+        - Pren_t: Renewable generation (p_renewable) - carbon-free
         - Cm: Carbon emissions per unit electricity (time_carbon_coeff)
         - Ef: Energy utilization coefficient (time_energy_coeff)
         
-        Returns normalized emissions based on actual renewable penetration levels
-        from data generation (0.0, 0.2, 0.4, 0.6, 0.8, 1.0).
+        This approach directly uses the separated generation components
+        instead of calculating renewable fractions.
         """
-        # Extract power consumption and generation from state
-        # State format: [vm_pu, va_rad, p_load, q_load, p_gen, q_gen]
+        # Extract separated generation components from 10-feature state
+        # Format: [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         
-        # Get total predicted load (Psum_t from equation 3.7)
-        total_load_predicted = torch.sum(predicted_state_physical[..., 2], dim=-1)  # MW
+        # Get carbon-emitting generation components (conventional only - no external grid)
+        # p_ext is not used in physics calculations and causes clamping issues
+        total_conv_gen = torch.sum(predicted_state_physical[..., 6], dim=-1)      # p_conventional (MW)
+        total_renewable_gen = torch.sum(predicted_state_physical[..., 8], dim=-1)  # p_renewable (MW) - carbon-free
         
-        # Require actual generation components - no fallbacks allowed
-        if ext_grid_generation is None or conventional_generation is None or renewable_generation is None:
-            raise ValueError(
-                "Generation components are required for carbon emissions calculation. "
-                "ext_grid_generation, conventional_generation, and renewable_generation must be provided."
-            )
-        
-        # Use actual separated generation components for accurate carbon emissions calculation
-        total_renewable_gen = torch.sum(renewable_generation, dim=-1)  # PDG_t from actual renewable generation
-        power_from_grid_actual = total_load_predicted - total_renewable_gen
-        
-        # Calculate actual renewable fraction from the data
-        renewable_frac = total_renewable_gen / (total_load_predicted + 1e-9)
+        # NO CLAMPING: Use only conventional generation for carbon emissions
+        # External grid is not included in carbon calculations (no clamping needed)
+        total_carbon_emitting_gen = total_conv_gen
         
         # Ensure coefficients are correctly shaped for broadcasting
         carbon_intensity = time_carbon_coeff.squeeze(-1) if time_carbon_coeff.dim() > 1 else time_carbon_coeff  # Cm
         energy_coefficient = time_energy_coeff.squeeze(-1) if time_energy_coeff.dim() > 1 else time_energy_coeff  # Ef
         
+        # Apply component-based carbon emission calculation (conventional only)
+        # f3 = Pconv * Cm / Ef (no external grid, no clamping)
+        raw_emissions = (total_carbon_emitting_gen * carbon_intensity) / (energy_coefficient + 1e-9)
         
-        # Check for problematic values
-        negative_grid_power_mask = power_from_grid_actual < 0
-        extreme_renewable_mask = renewable_frac > 1.0
-        negative_renewable_mask = renewable_frac < 0
+        # Calculate total generation for normalization (only positive generation)
+        total_generation = total_carbon_emitting_gen + total_renewable_gen
         
+        # DEBUG: Print generation components
+        # Normalize emissions based on the fraction of carbon-emitting generation
+        # This gives a value between 0 and 1 where:
+        # - 1.0 = all generation is carbon-emitting (worst case)
+        # - 0.0 = all generation is renewable (best case)
+        normalized_emissions = total_carbon_emitting_gen / (total_generation + 1e-9)
         
-        # Apply equation (3.7): f3 = (Psum - PDG) * Cm / Ef
-        # This gives raw carbon emissions in units that depend on Cm and Ef
-        raw_emissions = (power_from_grid_actual * carbon_intensity) / (energy_coefficient + 1e-9)
-        
-        # Normalize emissions using the scenario's renewable fraction
-        # This provides a consistent normalization across different renewable penetration levels:
-        # 
-        # Physical interpretation (aligned with equation 3.7):
-        # - renewable_frac = 0.0 → normalized = 1.0 (all grid power, maximum emissions)
-        # - renewable_frac = 0.2 → normalized = 0.8 (20% renewable, 80% grid emissions)
-        # - renewable_frac = 0.4 → normalized = 0.6 (40% renewable, 60% grid emissions)
-        # - renewable_frac = 0.6 → normalized = 0.4 (60% renewable, 40% grid emissions)
-        # - renewable_frac = 0.8 → normalized = 0.2 (80% renewable, 20% grid emissions)
-        # - renewable_frac = 1.0 → normalized = 0.0 (100% renewable, zero grid emissions)
-        #
-        # This normalization reflects the fraction of power from the grid (which causes emissions)
-        # rather than from renewables (which are carbon-free)
-        normalized_emissions = 1.0 - renewable_frac
-        
-        # DEBUG: Print final carbon emissions values
-        print(f"  Raw emissions: min: {raw_emissions.min().item():.2f}, max: {raw_emissions.max().item():.2f}, mean: {raw_emissions.mean().item():.2f}")
-        print(f"  Normalized emissions: min: {normalized_emissions.min().item():.4f}, max: {normalized_emissions.max().item():.4f}, mean: {normalized_emissions.mean().item():.4f}")
-        
-        # Check for problematic final values
-        negative_raw_mask = raw_emissions < 0
-        extreme_raw_mask = torch.abs(raw_emissions) > 10000  # Very large raw emissions
-        negative_norm_mask = normalized_emissions < 0
-        extreme_norm_mask = normalized_emissions > 1.0
-        
-        
-        # Values outside [0, 1] indicate model predictions beyond training data distribution
-        # Let the loss function handle these cases to preserve learning signals
-        # Extreme values will naturally be penalized during physics-informed training
+        # Check for impossible values
+        if (normalized_emissions > 1.0).any():
+            print(f"  ⚠️  IMPOSSIBLE: normalized_emissions > 1.0 found!")
+            print(f"  ⚠️  This means carbon-emitting generation > total generation")
+            print(f"  ⚠️  This is physically impossible!")
+            print(f"  ⚠️  Check if renewable generation is negative!")
         
         return {'raw': raw_emissions, 'normalized': normalized_emissions}

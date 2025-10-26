@@ -83,8 +83,7 @@ class PowerSystemDataset(Dataset):
     Supports lazy Ybus reconstruction to save memory for large datasets.
     """
     def __init__(self, features, adjacency_matrix, ybus_matrices, targets, 
-                 time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1,
-                 ext_grid_generation=None, conventional_generation=None, renewable_generation=None):
+                 time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1):
         
         self.features = torch.from_numpy(features).float()
         self.adjacency = torch.from_numpy(adjacency_matrix).float()
@@ -109,10 +108,9 @@ class PowerSystemDataset(Dataset):
         self.time_carbon_coeffs = torch.from_numpy(time_carbon_coeffs).float()
         self.renewable_fractions = torch.from_numpy(renewable_fractions).float()
         
-        # Store generation components for carbon emissions calculation
-        self.ext_grid_generation = torch.from_numpy(ext_grid_generation).float() if ext_grid_generation is not None else None
-        self.conventional_generation = torch.from_numpy(conventional_generation).float() if conventional_generation is not None else None
-        self.renewable_generation = torch.from_numpy(renewable_generation).float() if renewable_generation is not None else None
+        # Note: Generation components are now included in the features/targets matrices
+        # Features: [vm_pu, va_rad, p_load, q_load, p_ext_grid, q_ext_grid, p_conventional, q_conventional, p_renewable, q_renewable]
+        # Targets: Same structure as features
         
         self.is_static = is_static
         self.sequence_length = sequence_length
@@ -159,10 +157,10 @@ class PowerSystemDataset(Dataset):
         time_carbon = self.time_carbon_coeffs[target_idx]
         renewable_fraction = self.renewable_fractions[target_idx]
 
-        # Get generation components for the target timestep
-        ext_grid_gen = self.ext_grid_generation[target_idx] if self.ext_grid_generation is not None else None
-        conventional_gen = self.conventional_generation[target_idx] if self.conventional_generation is not None else None
-        renewable_gen = self.renewable_generation[target_idx] if self.renewable_generation is not None else None
+        # Extract generation components from the target tensor (10 features: vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren)
+        ext_grid_gen = target_tensor[:, 4:6]  # p_ext_grid, q_ext_grid
+        conventional_gen = target_tensor[:, 6:8]  # p_conventional, q_conventional  
+        renewable_gen = target_tensor[:, 8:10]  # p_renewable, q_renewable
         
         return {
             'features': features_tensor,
@@ -215,8 +213,7 @@ def load_power_system_data(config, case_name):
     all_energy_coeffs, all_carbon_coeffs = [], []
     all_renewable_fractions = []  # Track renewable fractions for each data file
     
-    # Generation components for carbon emissions calculation
-    all_ext_grid, all_conventional, all_renewable = [], [], []
+    # Note: Generation components are now included in the features/targets matrices
     
     for f_path in feature_files:
         # --- START CORRECTION: Update filenames to match new saved data ---
@@ -270,15 +267,7 @@ def load_power_system_data(config, case_name):
             all_energy_coeffs.append(np.loadtxt(energy_path))
             all_carbon_coeffs.append(np.loadtxt(carbon_path))
             
-            # Load generation components for carbon emissions calculation
-            ext_grid_path = f_path.replace('features', 'ext_grid_generation')
-            conventional_path = f_path.replace('features', 'conventional_generation')
-            renewable_path = f_path.replace('features', 'renewable_generation')
-            
-            # Load generation components - no fallbacks allowed
-            all_ext_grid.append(np.load(ext_grid_path))
-            all_conventional.append(np.load(conventional_path))
-            all_renewable.append(np.load(renewable_path))
+            # Note: Generation components are now included in the features/targets matrices
             
             # Create renewable fraction array for this data file
             renewable_fractions_for_file = np.full(features_data.shape[0], renewable_fraction)
@@ -295,10 +284,7 @@ def load_power_system_data(config, case_name):
     concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0)
     concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0)
     
-    # Concatenate generation components
-    concatenated_ext_grid = np.concatenate(all_ext_grid, axis=0)
-    concatenated_conventional = np.concatenate(all_conventional, axis=0)
-    concatenated_renewable = np.concatenate(all_renewable, axis=0)
+    # Note: Generation components are now included in the features/targets matrices
     
     # Handle Ybus - merge lazy loading data or concatenate pre-loaded arrays
     if all(isinstance(yb, dict) and 'lazy' in yb for yb in all_ybus):
@@ -321,11 +307,9 @@ def load_power_system_data(config, case_name):
     features_norm = normalizer.normalize(concatenated_features)
     print(f"[Data] Loaded {len(feature_files)} scenarios -> {concatenated_features.shape[0]} samples")
     
-    # --- START CORRECTION: Return concatenated arrays including renewable fractions and generation components ---
+    # Return concatenated arrays (generation components are now included in features/targets)
     return (features_norm, static_adjacency_matrix, concatenated_ybus, concatenated_targets, 
-            concatenated_energy_coeffs, concatenated_carbon_coeffs, concatenated_renewable_fractions, normalizer,
-            concatenated_ext_grid, concatenated_conventional, concatenated_renewable)
-    # --- END CORRECTION ---
+            concatenated_energy_coeffs, concatenated_carbon_coeffs, concatenated_renewable_fractions, normalizer)
 
 def _collate_static(batch):
     # This collate function will now work correctly as targets are already single slices.
@@ -343,12 +327,12 @@ def _collate_sequential_padded(batch):
     collated_batch['targets'] = default_collate([item['targets'] for item in batch])
     return collated_batch
 
-def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static, ext_grid_generation=None, conventional_generation=None, renewable_generation=None):
+def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static):
     seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
     dataset = PowerSystemDataset(
         features, adjacency, ybus_matrices, targets, 
         time_energy_coeffs, time_carbon_coeffs, renewable_fractions,
-        is_static, seq_len, ext_grid_generation, conventional_generation, renewable_generation
+        is_static, seq_len
     )
     dataset_size = len(dataset)
     train_size = int(config.TRAIN_SPLIT * dataset_size)
@@ -359,8 +343,30 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
         generator=torch.Generator().manual_seed(config.SEED)
     )
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
-    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS, collate_fn=collate_fn_to_use)
-    val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS, collate_fn=collate_fn_to_use)
-    test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, shuffle=False, num_workers=config.NUM_WORKERS, collate_fn=collate_fn_to_use)
+    
+    # OPTIMIZED DataLoader settings for memory efficiency
+    train_dataloader_kwargs = {
+        'batch_size': config.BATCH_SIZE,
+        'shuffle': True,
+        'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
+        'collate_fn': collate_fn_to_use,
+        'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
+        'persistent_workers': True,  # Keep workers alive
+        'prefetch_factor': 2,  # Prefetch 2 batches per worker
+    }
+    
+    val_test_dataloader_kwargs = {
+        'batch_size': config.BATCH_SIZE,
+        'shuffle': False,
+        'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
+        'collate_fn': collate_fn_to_use,
+        'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
+        'persistent_workers': True,  # Keep workers alive
+        'prefetch_factor': 2,  # Prefetch 2 batches per worker
+    }
+    
+    train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
+    val_loader = DataLoader(val_dataset, **val_test_dataloader_kwargs)
+    test_loader = DataLoader(test_dataset, **val_test_dataloader_kwargs)
     print("[Data] DataLoaders created.")
     return train_loader, val_loader, test_loader
