@@ -5,6 +5,7 @@ from tqdm import tqdm
 from .base_trainer import BaseTrainer
 from torch_geometric.utils import to_dense_adj
 import gc
+from torch.cuda.amp import autocast, GradScaler
 
 class PowerSystemTrainer(BaseTrainer):
     """
@@ -15,6 +16,9 @@ class PowerSystemTrainer(BaseTrainer):
         # The __init__ from BaseTrainer is called, which sets up self.current_epoch
         super().__init__(model, criterion, optimizer, config, device)
         self.is_physics_informed = is_physics_informed
+        
+        # Initialize mixed precision scaler for GPU training
+        self.scaler = GradScaler() if torch.cuda.is_available() else None
     
     def _get_gradient_accumulation_steps(self):
         """Calculate gradient accumulation steps based on system size to reduce memory usage"""
@@ -44,28 +48,49 @@ class PowerSystemTrainer(BaseTrainer):
             targets = batch['targets'].to(self.device, non_blocking=True)
             ybus = batch['ybus_matrix'].to(self.device, non_blocking=True)
             
+            # Optimized adjacency matrix handling
             adjacency_batch = batch['adjacency']
             if isinstance(adjacency_batch, list):
-                dense_adj_list = [to_dense_adj(adj.to(self.device), max_num_nodes=self.config.NUM_BUSES).squeeze(0) 
-                                  for adj in adjacency_batch]
-                adjacency_input = torch.stack(dense_adj_list, dim=0)
+                # Pre-allocate tensor for better memory efficiency
+                batch_size = len(adjacency_batch)
+                adjacency_input = torch.zeros(batch_size, self.config.NUM_BUSES, self.config.NUM_BUSES, 
+                                            device=self.device, dtype=torch.float32)
+                for i, adj in enumerate(adjacency_batch):
+                    dense_adj = to_dense_adj(adj.to(self.device), max_num_nodes=self.config.NUM_BUSES).squeeze(0)
+                    adjacency_input[i] = dense_adj
             else:
                 adjacency_input = adjacency_batch.to(self.device)
 
-            outputs = self.model(features, adjacency_input)
-            
-            loss_dict = self.criterion(outputs, targets, ybus)
-            total_loss = loss_dict['total_loss'] / accumulation_steps  # Scale loss for accumulation
+            # Use mixed precision for forward pass
+            if self.scaler is not None:
+                with autocast():
+                    outputs = self.model(features, adjacency_input)
+                    loss_dict = self.criterion(outputs, targets, ybus)
+                    total_loss = loss_dict['total_loss'] / accumulation_steps  # Scale loss for accumulation
 
-            total_loss.backward()
+                # Scale loss and backward pass
+                self.scaler.scale(total_loss).backward()
+                
+                # Only step optimizer after accumulating gradients
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
+            else:
+                # CPU training without mixed precision
+                outputs = self.model(features, adjacency_input)
+                loss_dict = self.criterion(outputs, targets, ybus)
+                total_loss = loss_dict['total_loss'] / accumulation_steps  # Scale loss for accumulation
+
+                total_loss.backward()
+                
+                # Only step optimizer after accumulating gradients
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
             
-            # Only step optimizer after accumulating gradients
-            if (batch_idx + 1) % accumulation_steps == 0:
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-            
-            # Update running totals for the epoch
-            epoch_losses['total_loss'] += total_loss.item() * accumulation_steps
+            # Update running totals for the epoch (use unscaled loss for reporting)
+            epoch_losses['total_loss'] += loss_dict['total_loss'].item()
             epoch_losses['mse'] += loss_dict['mse'].item()
             epoch_losses['power_violation'] += loss_dict['power_violation'].item()
             epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
@@ -80,8 +105,8 @@ class PowerSystemTrainer(BaseTrainer):
             else:
                 pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}")
             
-            # Periodic memory cleanup for large systems
-            if batch_idx % 10 == 0 and self.config.NUM_BUSES >= 57:
+            # Periodic memory cleanup for large systems (reduced frequency)
+            if batch_idx % 100 == 0 and self.config.NUM_BUSES >= 57:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -110,15 +135,25 @@ class PowerSystemTrainer(BaseTrainer):
                 targets = batch['targets'].to(self.device)
                 ybus = batch['ybus_matrix'].to(self.device)
                 
+                # Optimized adjacency matrix handling (validation)
                 adjacency_batch = batch['adjacency']
                 if isinstance(adjacency_batch, list):
-                    dense_adj_list = [to_dense_adj(adj.to(self.device), max_num_nodes=self.config.NUM_BUSES).squeeze(0)
-                                      for adj in adjacency_batch]
-                    adjacency_input = torch.stack(dense_adj_list, dim=0)
+                    # Pre-allocate tensor for better memory efficiency
+                    batch_size = len(adjacency_batch)
+                    adjacency_input = torch.zeros(batch_size, self.config.NUM_BUSES, self.config.NUM_BUSES, 
+                                                device=self.device, dtype=torch.float32)
+                    for i, adj in enumerate(adjacency_batch):
+                        dense_adj = to_dense_adj(adj.to(self.device), max_num_nodes=self.config.NUM_BUSES).squeeze(0)
+                        adjacency_input[i] = dense_adj
                 else:
                     adjacency_input = adjacency_batch.to(self.device)
 
-                outputs = self.model(features, adjacency_input)
+                # Use mixed precision for validation forward pass
+                if self.scaler is not None:
+                    with autocast():
+                        outputs = self.model(features, adjacency_input)
+                else:
+                    outputs = self.model(features, adjacency_input)
                 
                 # --- START CORRECTION: Process the dictionary of losses ---
                 loss_dict = self.criterion(outputs, targets, ybus)
