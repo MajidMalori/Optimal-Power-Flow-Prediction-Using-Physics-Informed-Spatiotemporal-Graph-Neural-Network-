@@ -333,16 +333,63 @@ class PowerSystemLoss(nn.Module):
         # Apply upper triangle mask and sum
         total_loss_pu = torch.sum(branch_losses * upper_triangle, dim=(1, 2))  # [batch_size] in per-unit
         
-        # FIXED: Use per-unit loss directly as normalized loss
-        # Per-unit loss is already normalized by system base and represents loss as fraction of system capacity
-        # Typical values: 0.01-0.05 (1-5% of system capacity)
-        # This approach is robust and doesn't depend on generation predictions
-        normalized_loss = total_loss_pu
+        # CORRECTED: Use pandapower physics with Ybus matrix
+        # Calculate complex voltages
+        V = Vm * torch.exp(1j * Va)  # [batch_size, num_buses]
         
+        # Calculate current injection using Ybus (pandapower method)
+        I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)  # [batch_size, num_buses]
         
-        # Do NOT scale or clamp - report actual loss percentages
-        # Let the physics loss naturally penalize excessive or unphysical losses
-        # Values outside typical ranges provide important learning signals during training
+        # Calculate complex power injection
+        S = V * torch.conj(I)  # [batch_size, num_buses]
+        
+        # Power loss = sum of all power injections (conservation of energy)
+        # Positive injection = generation, negative injection = load
+        total_power_injection = torch.sum(S.real, dim=-1)  # [batch_size]
+        
+        # Power loss is the positive part (generation exceeds load)
+        power_loss_pu = torch.relu(total_power_injection)  # Only positive injections contribute to loss
+        
+        # DEBUG: Print all variables for normalized power loss calculation
+        print(f"\n=== DEBUG: Corrected Power Loss Calculation ===")
+        print(f"batch_size: {batch_size}")
+        print(f"num_buses: {num_buses}")
+        print(f"s_base_mva: {self.s_base_mva}")
+        print(f"Vm range: [{Vm.min().item():.6f}, {Vm.max().item():.6f}]")
+        print(f"Va range: [{Va.min().item():.6f}, {Va.max().item():.6f}]")
+        print(f"total_power_injection range: [{total_power_injection.min().item():.6f}, {total_power_injection.max().item():.6f}]")
+        print(f"power_loss_pu range: [{power_loss_pu.min().item():.6f}, {power_loss_pu.max().item():.6f}]")
+        
+        # Extract generation components for normalization
+        p_ext_total = torch.sum(state[..., 4], dim=-1)  # External grid (can be negative!)
+        p_conv_total = torch.sum(state[..., 6], dim=-1)  # Conventional generation (always positive)
+        p_ren_total = torch.sum(state[..., 8], dim=-1)  # Renewable generation (always positive)
+        p_load_total = torch.sum(state[..., 2], dim=-1)  # Load (always positive)
+        
+        print(f"p_ext_total range: [{p_ext_total.min().item():.6f}, {p_ext_total.max().item():.6f}] MW")
+        print(f"p_conv_total range: [{p_conv_total.min().item():.6f}, {p_conv_total.max().item():.6f}] MW")
+        print(f"p_ren_total range: [{p_ren_total.min().item():.6f}, {p_ren_total.max().item():.6f}] MW")
+        print(f"p_load_total range: [{p_load_total.min().item():.6f}, {p_load_total.max().item():.6f}] MW")
+        
+        # CORRECTED NORMALIZATION: Use only positive generation sources
+        # This avoids the negative total generation problem
+        local_generation_pu = (p_conv_total + p_ren_total) / self.s_base_mva  # Always positive
+        total_load_pu = p_load_total / self.s_base_mva  # Always positive
+        
+        print(f"local_generation_pu range: [{local_generation_pu.min().item():.6f}, {local_generation_pu.max().item():.6f}]")
+        print(f"total_load_pu range: [{total_load_pu.min().item():.6f}, {total_load_pu.max().item():.6f}]")
+        
+        # Use energy conservation: P_loss = P_generation - P_load
+        # But use local generation to avoid negative denominators
+        power_loss_from_physics = torch.relu(local_generation_pu - total_load_pu)
+        
+        # Normalize by local generation (always positive)
+        normalized_loss = power_loss_from_physics / (local_generation_pu + epsilon)
+        
+        print(f"power_loss_from_physics range: [{power_loss_from_physics.min().item():.6f}, {power_loss_from_physics.max().item():.6f}]")
+        print(f"normalized_loss range: [{normalized_loss.min().item():.6f}, {normalized_loss.max().item():.6f}]")
+        print(f"=== END DEBUG ===\n")
+        
         return normalized_loss
 
     def _compute_normalized_voltage_deviation(self, state: torch.Tensor) -> torch.Tensor:
