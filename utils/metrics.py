@@ -516,11 +516,11 @@ class PowerSystemLoss(nn.Module):
         # - 0.0 = all generation is renewable (best case)
         normalized_emissions = total_carbon_emitting_gen / (total_generation + 1e-9)
         
-        # Check for impossible values
-        if (normalized_emissions > 1.0).any():
-            print(f"  ⚠️  IMPOSSIBLE: normalized_emissions > 1.0 found!")
-            print(f"  ⚠️  This means carbon-emitting generation > total generation")
-            print(f"  ⚠️  This is physically impossible!")
-            print(f"  ⚠️  Check if renewable generation is negative!")
+        # # Check for impossible values
+        # if (normalized_emissions > 1.0).any():
+        #     print(f"  ⚠️  IMPOSSIBLE: normalized_emissions > 1.0 found!")
+        #     print(f"  ⚠️  This means carbon-emitting generation > total generation")
+        #     print(f"  ⚠️  This is physically impossible!")
+        #     print(f"  ⚠️  Check if renewable generation is negative!")
         
         return {'raw': raw_emissions, 'normalized': normalized_emissions}

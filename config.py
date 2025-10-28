@@ -21,7 +21,7 @@ class Config:
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 2
+    NUM_EPOCHS = 5
     EARLY_STOPPING_PATIENCE = 25
     TRAIN_SPLIT = 0.7
     VAL_SPLIT = 0.15

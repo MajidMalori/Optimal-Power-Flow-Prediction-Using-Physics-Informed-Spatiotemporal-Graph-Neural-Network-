@@ -67,11 +67,11 @@ class BaseTrainer(ABC):
             self.history['val_power_violation'].append(val_metrics['power_violation'])
             self.history['val_voltage_violation'].append(val_metrics['voltage_violation'])
 
-            # Display epoch summary only for physics-informed models
-            if hasattr(self, 'is_physics_informed') and self.is_physics_informed:
-                print(f"Epoch {epoch} Summary:")
-                print(f"  Train Loss: {train_metrics['loss']:.6f} (MSE: {train_metrics['mse']:.6f} + Physics: {train_metrics['power_violation']:.6f} + {train_metrics['voltage_violation']:.6f})")
-                print(f"  Val Loss:   {val_metrics['loss']:.6f} (MSE: {val_metrics['mse']:.6f} + Physics: {val_metrics['power_violation']:.6f} + {val_metrics['voltage_violation']:.6f})")
+            # # Display epoch summary only for physics-informed models
+            # if hasattr(self, 'is_physics_informed') and self.is_physics_informed:
+            #     print(f"Epoch {epoch} Summary:")
+            #     print(f"  Train Loss: {train_metrics['loss']:.6f} (MSE: {train_metrics['mse']:.6f} + Physics: {train_metrics['power_violation']:.6f} + {train_metrics['voltage_violation']:.6f})")
+            #     print(f"  Val Loss:   {val_metrics['loss']:.6f} (MSE: {val_metrics['mse']:.6f} + Physics: {val_metrics['power_violation']:.6f} + {val_metrics['voltage_violation']:.6f})")
 
             # Early stopping logic
             val_loss = val_metrics.get('loss', float('inf'))

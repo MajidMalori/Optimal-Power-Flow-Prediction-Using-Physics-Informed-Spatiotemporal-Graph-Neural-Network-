@@ -123,12 +123,5 @@ class ResnetPIGCLSTM(BaseModel):
             final_output_per_node[..., 3] = torch.relu(final_output_per_node[..., 3])  # q_load ≥ 0
             # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
         
-        # DEBUG: Print ResNet model debug info
-        
-        # Check for extreme values
-        if torch.isnan(final_output_per_node).any():
-            print(f"  ⚠️  NaN values found in ResNet output!")
-        if (torch.abs(final_output_per_node) > 100).any():
-            print(f"  ⚠️  Extreme values found in ResNet output (>100)!")
         
         return final_output_per_node

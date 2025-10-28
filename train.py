@@ -210,8 +210,8 @@ def main():
     class Args:
         # Configuration for models to test - now centralized in config
         test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-        bus_systems = '57,118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-        models_to_train = 'AdaptivePIGCN'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
+        bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+        models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
         seed = 42        
         # === PARALLEL TRAINING CONFIGURATION ===
         # Device configuration

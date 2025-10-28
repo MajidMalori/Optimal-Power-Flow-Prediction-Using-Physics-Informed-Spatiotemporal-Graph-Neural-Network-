@@ -30,6 +30,7 @@ Vast_AI_Simple_Guide.md
 # JSON files (configurations, results, etc.)
 *.json
 *.ipynb
+*.rar
 
 
 # Runs directory (automatically created by some frameworks)
