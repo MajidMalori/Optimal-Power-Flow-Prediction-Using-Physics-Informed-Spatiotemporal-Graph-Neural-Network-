@@ -32,6 +32,8 @@ Vast_AI_Simple_Guide.md
 *.ipynb
 *.rar
 
+test.py
+
 
 # Runs directory (automatically created by some frameworks)
 runs/
