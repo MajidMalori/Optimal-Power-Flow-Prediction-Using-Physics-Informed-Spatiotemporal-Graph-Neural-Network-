@@ -23,13 +23,8 @@ class adaptiveGCN(nn.Module):
         for _ in range(num_gc_layers - 1):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
 
-        # --- START CORRECTION ---
-        # The model needs to predict 10 features for each bus (Vm, Va, Pl, Ql, P_ext, Q_ext, P_conv, Q_conv, P_ren, Q_ren).
-        # The original output layer was `nn.Linear(hidden_dim, num_buses * 2)`, which
-        # was incorrect. The correct output is 10 features per node.
         num_output_features = 10 
         self.output_layer = nn.Linear(hidden_dim, num_output_features)
-        # --- END CORRECTION ---
 
     def forward(self, x, static_adj):
         # ... (forward pass logic as corrected before) ...
@@ -56,24 +51,17 @@ class adaptiveGCN(nn.Module):
             h = F.relu(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
 
-        # --- START CORRECTION ---
-        # The output layer is now applied directly to the final node embeddings 'h'.
-        # The result will have the correct shape [batch_size, num_buses, num_output_features].
         output = self.output_layer(h)
         
-        # PHYSICAL CONSTRAINTS: Ensure non-negative values for physically meaningful components
-        # p_ext can be negative (power back to grid), but p_conv, p_ren, p_load, q_load cannot
+        # PHYSICAL CONSTRAINTS: Apply ReLU only to parameters that MUST be non-negative
+        # Based on physics: vm_pu, p_load, p_conv, p_ren must be positive
+        # Can be negative: va_rad, q_load, p_ext, q_ext, q_conv, q_ren (for reactive power control)
         if output.shape[-1] >= 10:  # Ensure we have 10 features
-            # Apply ReLU to voltage magnitude (index 0) to ensure non-negative
-            output[..., 0] = torch.relu(output[..., 0])  # vm_pu ≥ 0
-            # Apply ReLU to p_conv (index 6) and p_ren (index 8) to ensure non-negative
-            output[..., 6] = torch.relu(output[..., 6])  # p_conv ≥ 0
-            output[..., 8] = torch.relu(output[..., 8])  # p_ren ≥ 0
-            # Apply ReLU to p_load (index 2) and q_load (index 3) to ensure non-negative
-            output[..., 2] = torch.relu(output[..., 2])  # p_load ≥ 0
-            output[..., 3] = torch.relu(output[..., 3])  # q_load ≥ 0
-            # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
+            output[..., 0] = torch.relu(output[..., 0])  # vm_pu ≥ 0 (voltage magnitude always positive)
+            output[..., 2] = torch.relu(output[..., 2])  # p_load ≥ 0 (loads consume power)
+            output[..., 6] = torch.relu(output[..., 6])  # p_conv ≥ 0 (generators produce power)
+            output[..., 8] = torch.relu(output[..., 8])  # p_ren ≥ 0 (renewables produce power)
+            # DO NOT apply ReLU to: va_rad [1], q_load [3], p_ext [4], q_ext [5], q_conv [7], q_ren [9]
+            # These can be negative for physical reasons (angles, reactive power, slack balancing)
         
-        # Flatten to match expected output shape [batch_size, num_buses * 10]
         return output.reshape(output.size(0), -1)
-        # --- END CORRECTION ---

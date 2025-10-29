@@ -14,13 +14,6 @@ class PowerSystemNormalizer:
         self.mean = np.mean(features, axis=(0, 1))
         self.std = np.std(features, axis=(0, 1))
         self.std[self.std == 0] = 1.0
-        
-        # # DEBUG: Print normalization statistics
-        # feature_names = ['Vm (p.u.)', 'Va (rad)', 'P_load (MW)', 'Q_load (MVAr)', 'P_gen (MW)', 'Q_gen (MVAr)']
-        # print(f"\n[DEBUG] Normalization Statistics:")
-        # for i, name in enumerate(feature_names):
-        #     if i < len(self.mean):
-        #         print(f"  {name}: mean={self.mean[i]:.4f}, std={self.std[i]:.4f}")
 
     def normalize(self, data):
         # Handle both numpy arrays and PyTorch tensors
@@ -47,34 +40,38 @@ class PowerSystemNormalizer:
         else:
             return result
 
-    def denormalize(self, data: torch.Tensor, num_buses: int) -> torch.Tensor:
-        original_shape = data.shape
-        if data.dim() == 3:
-            num_output_features = data.shape[-1]
-            data_reshaped = data
-        elif data.dim() == 2:
-            if num_buses <= 0: raise ValueError("num_buses must be positive for 2D tensor denormalization.")
-            num_output_features = data.shape[-1] // num_buses
-            if num_output_features == 0:
-                total_features = data.shape[-1]
-                expected_features_per_bus = 6
-                if total_features % expected_features_per_bus == 0:
-                    actual_num_buses = total_features // expected_features_per_bus
-                    raise ValueError(f"Shape mismatch: Expected {num_buses} buses but model output suggests {actual_num_buses} buses. "
-                                   f"Data shape: {data.shape}. This may indicate a model architecture issue.")
-                else:
-                    raise ValueError(f"Invalid tensor shape: {data.shape} for {num_buses} buses. Cannot determine features per bus.")
-            data_reshaped = data.view(-1, num_buses, num_output_features)
-        else:
-            raise ValueError(f"denormalize expects a 2D or 3D tensor, but got {data.dim()}D.")
-
+    def denormalize(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Denormalize data back to physical units.
+        
+        Args:
+            data: Tensor of shape [batch_size, num_buses, num_features]
+            
+        Returns:
+            Denormalized tensor of the same shape
+        """
+        if data.dim() != 3:
+            raise ValueError(
+                f"denormalize expects a 3D tensor [batch_size, num_buses, num_features], "
+                f"but got {data.dim()}D tensor with shape {data.shape}.\n"
+                f"Please reshape your data before calling denormalize().\n"
+                f"Example: data.view(batch_size, num_buses, num_features)"
+            )
+        
+        num_output_features = data.shape[-1]
+        
+        # Slice mean/std to match the number of features being denormalized
         mean_slice = self.mean[:num_output_features]
         std_slice = self.std[:num_output_features]
+        
+        # Convert to tensors on the same device as data
         mean_tensor = torch.from_numpy(mean_slice).float().to(data.device)
         std_tensor = torch.from_numpy(std_slice).float().to(data.device)
-
-        denormalized_data = data_reshaped * std_tensor + mean_tensor
-        return denormalized_data.view(original_shape)
+        
+        # Simple denormalization: x_original = x_normalized * std + mean
+        denormalized_data = data * std_tensor + mean_tensor
+        
+        return denormalized_data
 
 class PowerSystemDataset(Dataset):
     """

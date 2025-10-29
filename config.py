@@ -42,6 +42,10 @@ class Config:
     LAMBDA_P = 10.0  # Weight for power balance violation
     LAMBDA_V = 10.0  # Weight for voltage limit violation
     
+    # --- Data Mode Configuration ---
+    DATA_MODE = 'train'  # Options: 'train' (10000 timesteps) or 'test' (100 timesteps)
+    DATA_MODE_TIMESTEPS = {'train': 10000, 'test': 100}  # Timesteps for each mode
+    
     # --- Project Structure ---
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(ROOT_DIR, 'data')
@@ -135,28 +139,58 @@ class Config:
     adaptiveGCNConfig.PHI_RANGE = (0.0, 1.0)
 
     PIGCLSTMConfig = _ModelConfig()
-    PIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
-    PIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
-    PIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
+    PIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)
+    PIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
+    PIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)
     PIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
     
+    @staticmethod
+    def get_sequential_ranges(num_buses):
+        """
+        Get system-size-dependent ranges for sequential models.
+        Large systems need aggressive constraints to avoid OOM and slow training.
+        """
+        if num_buses <= 33:
+            return {
+                'hidden_dim': (32, 64),
+                'sequence_length': (5, 10),
+                'rnn_layers': (1, 3)
+            }
+        elif num_buses <= 57:
+            return {
+                'hidden_dim': (16, 48),
+                'sequence_length': (3, 8),
+                'rnn_layers': (1, 2)
+            }
+        else:  # 118-bus and larger
+            return {
+                'hidden_dim': (16, 32),
+                'sequence_length': (3, 5),
+                'rnn_layers': (1, 2)
+            }
+    
+    PIGCLSTMConfig.get_sequential_ranges = get_sequential_ranges
+    
     PIGCGRUConfig = _ModelConfig()
-    PIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
-    PIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
-    PIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
+    PIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)
+    PIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
+    PIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)
     PIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
+    PIGCGRUConfig.get_sequential_ranges = get_sequential_ranges
 
     ResnetPIGCGRUConfig = _ModelConfig()
-    ResnetPIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
-    ResnetPIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
-    ResnetPIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
+    ResnetPIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)
+    ResnetPIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
+    ResnetPIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)
     ResnetPIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
+    ResnetPIGCGRUConfig.get_sequential_ranges = get_sequential_ranges
     
     ResnetPIGCLSTMConfig = _ModelConfig()
-    ResnetPIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)  # Reduced from (1, 5) to prevent OOM
-    ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)  # Reduced from (5, 15) to prevent OOM
-    ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)  # Reduced from (8, 32) to prevent OOM
+    ResnetPIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)
+    ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
+    ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)
     ResnetPIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
+    ResnetPIGCLSTMConfig.get_sequential_ranges = get_sequential_ranges
 
     # =============================================================================
     # PROPERTIES
@@ -197,23 +231,41 @@ class Config:
     # INITIALIZATION
     # =============================================================================
 
-    def __init__(self):
+    def __init__(self, data_mode='train', save_results=True, test_timesteps=100):
         """Initializes directories and sets up experimental run structure."""
+        # Set save_results flag
+        self.SAVE_RESULTS = save_results
+        
+        # Update test timesteps if provided
+        if data_mode == 'test' and test_timesteps != self.DATA_MODE_TIMESTEPS['test']:
+            self.DATA_MODE_TIMESTEPS['test'] = test_timesteps
+            print(f"Test mode timesteps set to: {test_timesteps}")
+        
+        # Set data mode and corresponding data directory
+        self.DATA_MODE = data_mode
+        if data_mode not in self.DATA_MODE_TIMESTEPS:
+            raise ValueError(f"Invalid data_mode '{data_mode}'. Must be 'train' or 'test'")
+        
+        # Update DATA_DIR to point to mode-specific subdirectory
+        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', data_mode)
+        
         # Initialize timestamp only when actually starting a run
         self._initialize_run_timestamp()
         
-        # Create base directories
-        for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
-            os.makedirs(dir_path, exist_ok=True)
-        
-        # Create current run directory
-        os.makedirs(self.CURRENT_RUN_DIR, exist_ok=True)
-        
-        # Update latest run (copy current run info)
-        self._update_latest_run_link()
-        
-        # Create run metadata
-        self._create_run_metadata()
+        # Only create directories if saving results
+        if self.SAVE_RESULTS:
+            # Create base directories
+            for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
+                os.makedirs(dir_path, exist_ok=True)
+            
+            # Create current run directory
+            os.makedirs(self.CURRENT_RUN_DIR, exist_ok=True)
+            
+            # Update latest run (copy current run info)
+            self._update_latest_run_link()
+            
+            # Create run metadata
+            self._create_run_metadata()
     
     # =============================================================================
     # STATIC METHODS - Configuration Helpers
@@ -400,6 +452,10 @@ class Config:
     
     def finalize_run(self, run_summary: dict = None):
         """Finalize the current run by updating latest_run and logging."""
+        # Skip if saving is disabled
+        if not self.SAVE_RESULTS:
+            return
+        
         import shutil
         import json
         import csv

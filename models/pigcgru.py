@@ -135,18 +135,16 @@ class PIGCGRU(BaseModel):
         # 7. Apply the final transformation to get the desired output shape.
         final_output_per_node = self.output_transform(last_step_per_node)
         
-        # PHYSICAL CONSTRAINTS: Ensure non-negative values for physically meaningful components
-        # p_ext can be negative (power back to grid), but p_conv, p_ren, p_load, q_load cannot
+        # PHYSICAL CONSTRAINTS: Apply ReLU only to parameters that MUST be non-negative
+        # Based on physics: vm_pu, p_load, p_conv, p_ren must be positive
+        # Can be negative: va_rad, q_load, p_ext, q_ext, q_conv, q_ren (for reactive power control)
         if final_output_per_node.shape[-1] >= 10:  # Ensure we have 10 features
-            # Apply ReLU to voltage magnitude (index 0) to ensure non-negative
-            final_output_per_node[..., 0] = torch.relu(final_output_per_node[..., 0])  # vm_pu ≥ 0
-            # Apply ReLU to p_conv (index 6) and p_ren (index 8) to ensure non-negative
-            final_output_per_node[..., 6] = torch.relu(final_output_per_node[..., 6])  # p_conv ≥ 0
-            final_output_per_node[..., 8] = torch.relu(final_output_per_node[..., 8])  # p_ren ≥ 0
-            # Apply ReLU to p_load (index 2) and q_load (index 3) to ensure non-negative
-            final_output_per_node[..., 2] = torch.relu(final_output_per_node[..., 2])  # p_load ≥ 0
-            final_output_per_node[..., 3] = torch.relu(final_output_per_node[..., 3])  # q_load ≥ 0
-            # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
+            final_output_per_node[..., 0] = torch.relu(final_output_per_node[..., 0])  # vm_pu ≥ 0 (voltage magnitude always positive)
+            final_output_per_node[..., 2] = torch.relu(final_output_per_node[..., 2])  # p_load ≥ 0 (loads consume power)
+            final_output_per_node[..., 6] = torch.relu(final_output_per_node[..., 6])  # p_conv ≥ 0 (generators produce power)
+            final_output_per_node[..., 8] = torch.relu(final_output_per_node[..., 8])  # p_ren ≥ 0 (renewables produce power)
+            # DO NOT apply ReLU to: va_rad [1], q_load [3], p_ext [4], q_ext [5], q_conv [7], q_ren [9]
+            # These can be negative for physical reasons (angles, reactive power, slack balancing)
         
         # Return the structured output [batch_size, num_nodes, feature_dim].
         return final_output_per_node

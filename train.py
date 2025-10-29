@@ -3,15 +3,11 @@ import torch
 import logging
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 import copy
 import gc
-import time
 import signal
 import sys
 import psutil
-import tracemalloc
-# Removed ThreadPoolExecutor imports - parallel bus systems disabled
 
 def check_gpu_memory():
     """Check available GPU memory and return status"""
@@ -145,7 +141,7 @@ import matplotlib.pyplot as plt
 from utils.data_loader import load_power_system_data, create_data_loaders
 from utils.metrics import PowerSystemLoss
 from utils.data_validation import validate_data_before_training
-from utils.optimization import (soa, setup_hyperparameter_bounds, create_model_kwargs, 
+from utils.optimization import (mosoa_optimizer, trial_based_search, setup_hyperparameter_bounds, create_model_kwargs, 
                                generate_run_name, process_optimization_params, 
                                calculate_objective_score)
 from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_moopf_objectives, 
@@ -174,7 +170,7 @@ def setup_logging(log_path: str):
 # Global variable to store config for signal handler
 _config_instance = None
 
-def signal_handler(signum, frame):
+def signal_handler(signum, _):
     """Handle interrupt signals to ensure proper cleanup."""
     print(f"\nReceived signal {signum}. Cleaning up...")
     if _config_instance:
@@ -212,7 +208,17 @@ def main():
         test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
         bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
-        seed = 42        
+        data_mode = 'test'  # Options: 'train' or 'test'
+        test_timesteps = 1000  # Number of timesteps for test mode (100 for quick debug, 1000 for thorough testing)
+        seed = 42
+        
+        # === RESULTS SAVING CONFIGURATION ===
+        save_results = True  # False: No files saved (console output only), True: Save all results
+        
+        # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
+        use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)
+        num_trials = 20  # Only used if use_mosoa=False
+        
         # === PARALLEL TRAINING CONFIGURATION ===
         # Device configuration
         force_cpu = False  # Set to True to force CPU training even if GPU is available
@@ -224,7 +230,7 @@ def main():
         data_workers = 'auto'         # Number of data loading workers
     
     args = Args()
-    base_config = Config()
+    base_config = Config(data_mode=args.data_mode, save_results=args.save_results, test_timesteps=args.test_timesteps)
     _config_instance = base_config  # Store for signal handler
     
     # Parse bus systems to test
@@ -254,7 +260,9 @@ def main():
     
     # STEP 1: Print run information
     run_info = base_config.get_run_info()
-    print(f"\nRUN: {run_info['run_id']} | Config: {args.test_config} | Bus Systems: {bus_systems_to_test}")
+    actual_timesteps = base_config.DATA_MODE_TIMESTEPS[args.data_mode]
+    print(f"\nRUN: {run_info['run_id']} | Config: {args.test_config} | Mode: {args.data_mode.upper()} ({actual_timesteps} timesteps)")
+    print(f"Bus Systems: {bus_systems_to_test}")
     print("="*80)
     
     # STEP 2: Validate data before training
@@ -308,9 +316,9 @@ def main():
     if args.models_to_train != 'all':
         selected_models = [m.strip() for m in args.models_to_train.split(',')]
         models_to_test = [m for m in models_to_test if m in selected_models]
-        print(f"🎯 Selected models to train: {models_to_test}")
+        print(f"Selected models to train: {models_to_test}")
         if not models_to_test:
-            print("❌ No valid models selected. Available models: PIGCLSTM, PIGCGRU, ResnetPIGCLSTM, ResnetPIGCGRU")
+            print("ERROR: No valid models selected. Available models: PIGCLSTM, PIGCGRU, ResnetPIGCLSTM, ResnetPIGCGRU")
             return
 
 
@@ -373,7 +381,8 @@ def main():
                 run_name = generate_run_name(model_name, params, num_buses, is_sequential)
 
                 try:
-                    setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
+                    if run_config.SAVE_RESULTS:
+                        setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
                     
                     # Clear GPU memory before starting
                     clear_gpu_memory()
@@ -500,12 +509,23 @@ def main():
                     )
                     log_memory_usage(f"After {model_name} training")
 
-            # Run MoSOA optimization
-            best_score, best_position, history, iteration_details = soa(
-                mosoa_params['num_seagulls'], 
-                mosoa_params['max_iterations'], 
-                lower_bounds, upper_bounds, dim, objective_function
-            )
+            if args.use_mosoa:
+                print(f"Optimizing with MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
+                best_score, best_position, history, iteration_details = mosoa_optimizer(
+                    mosoa_params['num_seagulls'], 
+                    mosoa_params['max_iterations'], 
+                    lower_bounds, upper_bounds, dim, objective_function
+                )
+            else:
+                print(f"Optimizing with trial-based search: {args.num_trials} trials")
+                best_score, best_position, history, iteration_details = trial_based_search(
+                    num_trials=args.num_trials,
+                    lower_bound=lower_bounds,
+                    upper_bound=upper_bounds,
+                    dim=dim,
+                    objective_func=objective_function,
+                    search_strategy='latin_hypercube'
+                )
 
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
@@ -637,25 +657,26 @@ def main():
             
             clear_gpu_memory()
         
-        print(f"\n Generating plots for {num_buses}-bus...")
-        
-        # Import comparative visualization functions
-        from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
-        
-        # Create comparative renewable impact plots for all tested models
-        # Always create plots if any models were tested, regardless of physics type
-        if all_tested_models:
-            try:
-                create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
-            except Exception as e:
-                print(f"  Warning: Could not create renewable impact plots: {e}")
-        
-        # Create comparative convergence plot
-        if bus_convergence_data:
-            try:
-                create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
-            except Exception as e:
-                print(f"  Warning: Could not create convergence plots: {e}")
+        if base_config.SAVE_RESULTS:
+            print(f"\n Generating plots for {num_buses}-bus...")
+            
+            # Import comparative visualization functions
+            from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
+            
+            # Create comparative renewable impact plots for all tested models
+            # Always create plots if any models were tested, regardless of physics type
+            if all_tested_models:
+                try:
+                    create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
+                except Exception as e:
+                    print(f"  Warning: Could not create renewable impact plots: {e}")
+            
+            # Create comparative convergence plot
+            if bus_convergence_data:
+                try:
+                    create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
+                except Exception as e:
+                    print(f"  Warning: Could not create convergence plots: {e}")
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()
@@ -666,19 +687,28 @@ def main():
         log_memory_usage("After bus system cleanup")
     
     # Print comprehensive final summary
-    print_comprehensive_summary(all_results)
+    print_comprehensive_summary(all_results, base_config)
     
     # Finalize the run with summary
     if all_results:
         successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]
+        
+        # Find the actual best model by sorting by final_test_score (lower is better)
+        if successful_results:
+            best_result = min(successful_results, key=lambda x: x['final_test_score'])
+            best_model_name = f"{best_result['model_name']} ({best_result['num_buses']}-bus)"
+            best_score_val = best_result['final_test_score']
+        else:
+            best_model_name = 'None'
+            best_score_val = float('inf')
         
         run_summary = {
             'models_tested': [r['model_name'] for r in all_results],
             'total_models': len(all_results),
             'successful_models': len(successful_results),
             'test_config': args.test_config,
-            'best_model': successful_results[0]['model_name'] if successful_results else 'None',
-            'best_score': successful_results[0]['final_test_score'] if successful_results else float('inf'),
+            'best_model': best_model_name,
+            'best_score': best_score_val,
             'bus_systems_tested': list(set(r['num_buses'] for r in all_results))
         }
         
@@ -687,7 +717,7 @@ def main():
         base_config.finalize_run({'status': 'no_results', 'test_config': args.test_config})
 
 
-def signal_handler(signum, frame):
+def signal_handler(signum, _):
     """Handle interrupt signals gracefully"""
     print(f"\n Received signal {signum}, cleaning up...")
     import gc

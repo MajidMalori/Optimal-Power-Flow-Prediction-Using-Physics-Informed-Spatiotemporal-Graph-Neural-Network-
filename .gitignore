@@ -1,13 +1,18 @@
-# Data files - exclude generated data but keep generation script
+# Data folders - exclude entire train/test folders (too heavy for git)
+data/train/
+data/test/
+
+# Data files in root data folder
 data/*.npy
 data/*.txt
+data/*.json
 data/case*
 
 # Keep the data generation script
 !data/gen_meas_best.py
 !data/check_data.py
 
-# Explicitly exclude time coefficient files
+# Explicitly exclude time coefficient files in root data folder
 data/*time_energy_coeffs.txt
 data/*time_carbon_coeffs.txt
 
@@ -21,11 +26,20 @@ comprehensive_evaluation.py
 train_scalable.py
 test_physics_loss.py
 maxsea.py
-Physics_Informed_Machine_Learning_Research_Paper.md
 
-profile.md
-Readme1.md
-Vast_AI_Simple_Guide.md
+# Images and plots
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.bmp
+*.tiff
+*.txt
+
+# Markdown files (except README.md)
+*.md
+!README.md
 
 # JSON files (configurations, results, etc.)
 *.json

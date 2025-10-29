@@ -21,6 +21,9 @@ def find_latest_timestamp(data_dir: str) -> str:
     import glob
     import re
     
+    if not os.path.exists(data_dir):
+        return None
+    
     # Look for any timestamped files with pattern YYYYMMDD_HHMMSS
     timestamp_pattern = r"_(\d{8}_\d{6})"
     timestamps = set()
@@ -48,7 +51,7 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]  # Standard fractions from gen_meas_best.py
     
     missing_files = []
-    data_dir = "./data"
+    data_dir = config.DATA_DIR  # Use mode-specific directory from config
     
     # First, try to find the latest timestamp from existing files
     latest_timestamp = find_latest_timestamp(data_dir)
@@ -143,9 +146,13 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     import re
     import glob
     import numpy as np
-    from data.gen_meas_best import CONFIG as GEN_CONFIG
     
-    data_dir = "./data"
+    data_dir = config.DATA_DIR  # Use mode-specific directory
+    
+    # Check if directory exists
+    if not os.path.exists(data_dir):
+        return True, "Data directory does not exist yet"
+    
     filename_timestamps = set()
     
     # Look for timestamp patterns in filenames
@@ -187,7 +194,7 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     
     # Check if data was generated with correct number of timesteps
     bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
-    expected_timesteps = GEN_CONFIG['time_steps']
+    expected_timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]  # Use mode-specific timesteps
     
     # Check first available features file to validate timesteps
     for num_buses in bus_systems:
@@ -220,7 +227,7 @@ def monitor_data_generation_progress_per_system(config, stop_event):
     import re
     bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    data_dir = "./data"
+    data_dir = config.DATA_DIR  # Use mode-specific directory
     
     # Expected files per scenario: 9 files (5 base + 3 ybus + 1 convergence report)
     files_per_scenario = 9
@@ -294,10 +301,10 @@ def clean_existing_data(config):
     """
     import glob
     
-    data_dir = "./data"
+    data_dir = config.DATA_DIR  # Use mode-specific directory
     files_removed = 0
     
-    print("Cleaning existing data files to ensure data integrity...")
+    print(f"Cleaning existing {config.DATA_MODE.upper()} data files to ensure data integrity...")
     
     # Remove all data files (both timestamped and legacy formats)
     patterns = [
@@ -364,7 +371,7 @@ def generate_data_if_missing(config) -> bool:
     
     # Wait for file system to sync and confirm deletion (especially important on slower systems)
     import glob
-    data_dir = "./data"
+    data_dir = config.DATA_DIR
     max_wait = 5  # Maximum 5 seconds
     wait_interval = 0.2
     elapsed = 0
@@ -402,9 +409,10 @@ def generate_data_if_missing(config) -> bool:
         )
         monitor_thread.start()
         
-        # Run data generation script (capture output to avoid interference)
+        # Run data generation script with mode and timesteps (capture output to avoid interference)
+        timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
         result = subprocess.run(
-            [sys.executable, data_gen_script],
+            [sys.executable, data_gen_script, config.DATA_MODE, str(timesteps)],
             cwd=".",
             capture_output=True,  # Capture to avoid interfering with progress bar
             text=True
@@ -449,7 +457,7 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
     import json
     import glob
     
-    data_dir = "./data"
+    data_dir = config.DATA_DIR  # Use mode-specific directory
     # Use provided bus systems or default to config
     if bus_systems_to_show is not None:
         bus_systems = bus_systems_to_show

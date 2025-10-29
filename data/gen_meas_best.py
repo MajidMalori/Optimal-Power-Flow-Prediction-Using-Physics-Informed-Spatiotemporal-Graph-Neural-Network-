@@ -16,8 +16,8 @@ from datetime import datetime
 # =============================================================================
 CONFIG = {
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
-    "time_steps": 10000,
-    "output_dir": "./data", # Save to the data subdirectory
+    "time_steps": 10000,  # Will be overridden by command-line argument if provided
+    "output_dir": "./data", # Base directory - mode-specific subdirectory will be appended
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
     "max_wind_mw": 0.04,    # Per-unit scaling: 4% of total load per generator
@@ -486,9 +486,35 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
 # SECTION 4: MAIN EXECUTION BLOCK
 # =============================================================================
 if __name__ == "__main__":
+    import sys
+    
+    # Parse command-line arguments for data mode and timesteps
+    data_mode = 'train'  # Default
+    timesteps = None  # Will use CONFIG default or mode-specific default
+    
+    if len(sys.argv) > 1:
+        data_mode = sys.argv[1].lower()
+        if data_mode not in ['train', 'test']:
+            print(f"ERROR: Invalid data_mode '{data_mode}'. Use 'train' or 'test'.")
+            sys.exit(1)
+    
+    if len(sys.argv) > 2:
+        try:
+            timesteps = int(sys.argv[2])
+        except ValueError:
+            print(f"ERROR: Invalid timesteps '{sys.argv[2]}'. Must be an integer.")
+            sys.exit(1)
+    
+    # Set mode-specific defaults if timesteps not provided
+    if timesteps is None:
+        timesteps = 10000 if data_mode == 'train' else 100
+    
+    CONFIG['time_steps'] = timesteps
+    
     # Generate a single timestamp for this entire data generation run
     generation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"\nStarting data generation with timestamp: {generation_timestamp}")
+    print(f"\nStarting data generation [{data_mode.upper()} MODE - {timesteps} timesteps]")
+    print(f"Timestamp: {generation_timestamp}")
     print("All files will be tagged with this timestamp to ensure data consistency.")
     
     for case in CONFIG["test_cases"]:
@@ -504,14 +530,14 @@ if __name__ == "__main__":
                 net_with_renewables = configure_renewables(net_for_run, frac, CONFIG)
                 generated_data = simulate_time_series(net_with_renewables, CONFIG)
                 
-                # Ensure we save to the data directory regardless of where script is run from
+                # Ensure we save to the mode-specific data directory
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 if "data" in script_dir:
                     # Script is being run from data/ subdirectory
-                    output_path = script_dir  # Save directly to data/ directory
+                    output_path = os.path.join(script_dir, data_mode)
                 else:
                     # Script is being run from main directory
-                    output_path = os.path.join(script_dir, "data")  # Save to data/ subdirectory
+                    output_path = os.path.join(script_dir, "data", data_mode)
                     
                 # Pass the generation timestamp to ensure all files have the same timestamp
                 save_data(generated_data, save_case_name, frac, output_path, generation_timestamp)

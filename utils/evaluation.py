@@ -65,8 +65,8 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
         num_features = 10  # Updated for 10-feature approach
         all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
     
-    outputs_denorm = normalizer.denormalize(all_outputs_tensor, num_buses)
-    targets_denorm = normalizer.denormalize(all_targets_tensor, num_buses)
+    outputs_denorm = normalizer.denormalize(all_outputs_tensor)
+    targets_denorm = normalizer.denormalize(all_targets_tensor)
 
     return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
 
@@ -84,9 +84,27 @@ def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybu
             else:
                 raise ValueError(f"Cannot reconcile output shape {outputs.shape} with target shape {targets.shape}")
         
-        # Standard regression metrics on normalized data
-        mse = F.mse_loss(outputs, targets).item()
-        rmse = torch.sqrt(torch.tensor(mse, device=outputs.device)).item()
+        # Standard regression metrics - consistent with training loss calculation
+        # Denormalize first, then compute MSE on physical values
+        if outputs.dim() == 2:
+            batch_size = outputs.shape[0]
+            num_features = 10
+            outputs_for_mse = outputs.view(batch_size, num_buses, num_features)
+            targets_for_mse = targets.view(batch_size, num_buses, num_features)
+        else:
+            outputs_for_mse = outputs
+            targets_for_mse = targets
+        
+        outputs_denorm_mse = normalizer.denormalize(outputs_for_mse)
+        targets_denorm_mse = normalizer.denormalize(targets_for_mse)
+        
+        # Get system base power for normalization
+        s_base_mva = 10.0 if 'case33' in str(config.CASE_NAME).lower() else 100.0
+        
+        # MSE on physical values, normalized by S_BASE^2 (same as training)
+        mse_physical = F.mse_loss(outputs_denorm_mse, targets_denorm_mse).item()
+        mse = mse_physical / (s_base_mva ** 2)
+        rmse = torch.sqrt(torch.tensor(mse)).item()
         
         # For physics calculations, we need to denormalize only for physics violations
         # but keep the same scale as training
@@ -99,7 +117,7 @@ def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybu
             outputs_3d = outputs
         
         # Denormalize only for physics calculations (same as training)
-        outputs_denorm = normalizer.denormalize(outputs_3d, config.NUM_BUSES)
+        outputs_denorm = normalizer.denormalize(outputs_3d)
         
         # Create PowerSystemLoss instance for physics calculations
         physics_metrics = PowerSystemLoss(config=config, normalizer=normalizer)
@@ -202,7 +220,7 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             
             # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
-            outputs_phys = normalizer.denormalize(outputs_norm, num_buses)
+            outputs_phys = normalizer.denormalize(outputs_norm)
 
             if is_physics_informed:
                 # Calculate physics-based metrics for physics-informed models
@@ -237,14 +255,17 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                     logging.warning(f"Could not extract renewable fraction from batch data: {e}")
 
             if is_physics_informed:
-                # Calculate test MSE for physics-informed models
+                # Calculate test MSE for physics-informed models (consistent with training)
+                # MSE on physical values normalized by S_BASE^2 for comparability
                 targets = batch['targets'].to(device)
-                targets_norm = normalizer.normalize(targets)
-                test_mse = F.mse_loss(outputs_norm, targets_norm)
+                targets_phys = normalizer.denormalize(targets)
+                mse_physical = F.mse_loss(outputs_phys, targets_phys)
+                s_base_mva = physics_calculator.s_base_mva
+                test_mse = mse_physical / (s_base_mva ** 2)
                 
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
-                    'mse_score': test_mse.item(),  # Add test MSE for physics-informed models
+                    'mse_score': test_mse.item(),  # MSE in per-unit squared (consistent with training)
                     'moopf_score': moopf_score.mean().item(), 
                     'normalized_power_loss': norm_loss.mean().item(),
                     'normalized_voltage_deviation': norm_vdev.mean().item(),
@@ -253,12 +274,14 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                     'raw_carbon_emissions_tCO2': emissions['raw'].mean().item()
                 })
             else:
-                # For non-physics models, only report MSE-based results
+                # For non-physics models, compute MSE consistent with training
                 targets = batch['targets'].to(device)
-                targets_norm = normalizer.normalize(targets)
-                mse_only = F.mse_loss(outputs_norm, targets_norm)
+                targets_phys = normalizer.denormalize(targets)
+                mse_physical = F.mse_loss(outputs_phys, targets_phys)
+                s_base_mva = physics_calculator.s_base_mva
+                mse_normalized = mse_physical / (s_base_mva ** 2)
                 all_results.append({
-                    'mse_score': mse_only.item()  # Only relevant metric for non-physics models
+                    'mse_score': mse_normalized.item()  # MSE in per-unit squared (consistent with training)
                 })
 
     return pd.DataFrame(all_results), pd.DataFrame(renewable_impact_data)
@@ -292,7 +315,7 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
             
             # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
-            outputs_phys = normalizer.denormalize(outputs_norm, num_buses)
+            outputs_phys = normalizer.denormalize(outputs_norm)
 
             if is_physics_informed:
                 # Calculate physics-based metrics for physics-informed models
@@ -327,12 +350,13 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
                     logging.warning(f"Could not extract renewable fraction from batch data: {e}")
 
             if is_physics_informed:
-                # Calculate test MSE for physics-informed models (normalized data)
+                # Calculate test MSE for physics-informed models (consistent with training)
+                # MSE on physical values normalized by S_BASE^2 for comparability
                 targets = batch['targets'].to(device)
-                targets_norm = normalizer.normalize(targets)
-                test_mse = F.mse_loss(outputs_norm, targets_norm)
-                
-                # DEBUG: Print MSE calculation details
+                targets_phys = normalizer.denormalize(targets)
+                mse_physical = F.mse_loss(outputs_phys, targets_phys)
+                s_base_mva = physics_calculator.s_base_mva
+                test_mse = mse_physical / (s_base_mva ** 2)
                 
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
@@ -345,12 +369,14 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
                     'raw_carbon_emissions_tCO2': emissions['raw'].mean().item()
                 })
             else:
-                # For non-physics models, only report MSE-based results
+                # For non-physics models, compute MSE consistent with training
                 targets = batch['targets'].to(device)
-                targets_norm = normalizer.normalize(targets)
-                mse_only = F.mse_loss(outputs_norm, targets_norm)
+                targets_phys = normalizer.denormalize(targets)
+                mse_physical = F.mse_loss(outputs_phys, targets_phys)
+                s_base_mva = physics_calculator.s_base_mva
+                mse_normalized = mse_physical / (s_base_mva ** 2)
                 all_results.append({
-                    'mse_score': mse_only.item()  # Only relevant metric for non-physics models
+                    'mse_score': mse_normalized.item()  # MSE in per-unit squared (consistent with training)
                 })
 
     return pd.DataFrame(all_results), pd.DataFrame(renewable_impact_data)
@@ -402,6 +428,10 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
                            is_physics_informed: bool = True, iteration_details: List[Dict] = None,
                            param_keys: List[str] = None):
     """Saves all results for the best model in the new directory structure."""
+    # Skip saving if disabled
+    if hasattr(config, 'SAVE_RESULTS') and not config.SAVE_RESULTS:
+        return
+    
     model_name = best_run['model_name']
     
     # Create necessary directories
@@ -473,7 +503,7 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
         print(f"ℹ  Skipping renewable impact plots for non-physics-informed model: {model_name}")
 
 
-def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
+def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any = None):
     """Print and save a comprehensive summary of all model performances across all bus systems."""
     if not all_results:
         print("\n No results to summarize.")
@@ -515,22 +545,23 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]]):
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
     
-    # Save to CSV file in experimental_results directory  
-    model_eval_dir = "experimental_results"
-    os.makedirs(model_eval_dir, exist_ok=True)
-    
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_filename = f"comprehensive_summary_{timestamp}.csv"
-    csv_path = os.path.join(model_eval_dir, csv_filename)
-    
-    # Also save a "latest" version for easy access
-    latest_csv_path = os.path.join(model_eval_dir, "comprehensive_summary_latest.csv")
-    
-    df = pd.DataFrame(csv_data)
-    df.to_csv(csv_path, index=False)
-    df.to_csv(latest_csv_path, index=False)
-    
-    print(f" Results saved: {os.path.basename(csv_path)}")
+    # Save to CSV file in experimental_results directory (if saving enabled)
+    if config and hasattr(config, 'SAVE_RESULTS') and config.SAVE_RESULTS:
+        model_eval_dir = "experimental_results"
+        os.makedirs(model_eval_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        csv_filename = f"comprehensive_summary_{timestamp}.csv"
+        csv_path = os.path.join(model_eval_dir, csv_filename)
+        
+        # Also save a "latest" version for easy access
+        latest_csv_path = os.path.join(model_eval_dir, "comprehensive_summary_latest.csv")
+        
+        df = pd.DataFrame(csv_data)
+        df.to_csv(csv_path, index=False)
+        df.to_csv(latest_csv_path, index=False)
+        
+        print(f" Results saved: {os.path.basename(csv_path)}")
     print()
     
     # Print table header

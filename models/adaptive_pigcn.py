@@ -56,23 +56,11 @@ class AdaptivePIGCN(BaseModel):
             nn.BatchNorm1d(hidden_dim) for _ in range(num_gc_layers)
         ])
 
-        # --- Scalable MLP layers for final prediction ---
-        # Scale intermediate layer sizes based on system size to avoid bottlenecks
-        input_size = hidden_dim * num_buses
-        intermediate_size1 = max(256, input_size // 4)  # At least 256, but scales with system size
-        intermediate_size2 = max(128, input_size // 8)  # At least 128, but scales with system size
-        
-        self.mlp = nn.Sequential(
-            nn.Linear(input_size, intermediate_size1),
-            nn.ReLU(),
-            nn.BatchNorm1d(intermediate_size1),
-            nn.Dropout(dropout),
-            nn.Linear(intermediate_size1, intermediate_size2),
-            nn.ReLU(),
-            nn.BatchNorm1d(intermediate_size2),
-            nn.Dropout(dropout),
-            nn.Linear(intermediate_size2, output_dim)
-        )
+        # --- CORRECTED: Node-wise output layer instead of global MLP ---
+        # This preserves the graph structure by applying the same transformation to each node
+        # The output layer predicts 10 features per node: [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
+        num_output_features = 10
+        self.output_layer = nn.Linear(hidden_dim, num_output_features)
         
         self.dropout_layer = nn.Dropout(dropout)
 
@@ -120,28 +108,20 @@ class AdaptivePIGCN(BaseModel):
             
             x = F.relu(x)
             
-            # CORRECTION 3: Apply dropout to all but the last layer
             if i < len(self.gc_layers) - 1:
                 x = self.dropout_layer(x)
         
-        # --- 3. Reshape and pass through MLP for final output ---
-        x = x.reshape(batch_size, -1)
-        x = self.mlp(x)
+        x = self.output_layer(x)
         
-        # --- 4. Reshape back to 3D format [batch_size, num_buses, feature_dim] ---
-        x = x.reshape(batch_size, self.num_buses, self.feature_dim)
-        
-        # PHYSICAL CONSTRAINTS: Ensure non-negative values for physically meaningful components
-        # p_ext can be negative (power back to grid), but p_conv, p_ren, p_load, q_load cannot
+        # PHYSICAL CONSTRAINTS: Apply ReLU only to parameters that MUST be non-negative
+        # Based on physics: vm_pu, p_load, p_conv, p_ren must be positive
+        # Can be negative: va_rad, q_load, p_ext, q_ext, q_conv, q_ren (for reactive power control)
         if x.shape[-1] >= 10:  # Ensure we have 10 features
-            # Apply ReLU to voltage magnitude (index 0) to ensure non-negative
-            x[..., 0] = torch.relu(x[..., 0])  # vm_pu ≥ 0
-            # Apply ReLU to p_conv (index 6) and p_ren (index 8) to ensure non-negative
-            x[..., 6] = torch.relu(x[..., 6])  # p_conv ≥ 0
-            x[..., 8] = torch.relu(x[..., 8])  # p_ren ≥ 0
-            # Apply ReLU to p_load (index 2) and q_load (index 3) to ensure non-negative
-            x[..., 2] = torch.relu(x[..., 2])  # p_load ≥ 0
-            x[..., 3] = torch.relu(x[..., 3])  # q_load ≥ 0
-            # p_ext (index 4) and q_conv (index 7) can remain negative - no constraint
+            x[..., 0] = torch.relu(x[..., 0])  # vm_pu ≥ 0 (voltage magnitude always positive)
+            x[..., 2] = torch.relu(x[..., 2])  # p_load ≥ 0 (loads consume power)
+            x[..., 6] = torch.relu(x[..., 6])  # p_conv ≥ 0 (generators produce power)
+            x[..., 8] = torch.relu(x[..., 8])  # p_ren ≥ 0 (renewables produce power)
+            # DO NOT apply ReLU to: va_rad [1], q_load [3], p_ext [4], q_ext [5], q_conv [7], q_ren [9]
+            # These can be negative for physical reasons (angles, reactive power, slack balancing)
         
         return x

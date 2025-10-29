@@ -1,6 +1,5 @@
 """
 Optimization utilities for hyperparameter tuning and algorithm implementation.
-Contains MoSOA (Multi-objective Seagull Optimization Algorithm) and related functions.
 """
 
 import numpy as np
@@ -21,14 +20,14 @@ def _init_positions(num_agents: int, dim: int, upper_bound: np.ndarray, lower_bo
     return positions
 
 
-def soa(num_agents: int, max_iter: int, lower_bound: np.ndarray, upper_bound: np.ndarray, 
-        dim: int, objective_func: Callable) -> Tuple[float, np.ndarray, List[float], List[Dict]]:
+def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarray, upper_bound: np.ndarray,
+                   dim: int, objective_func: Callable) -> Tuple[float, np.ndarray, List[float], List[Dict]]:
     """
-    Enhanced Seagull Optimization Algorithm for hyperparameter tuning.
+    Modified Seagull Optimization Algorithm (MoSOA) for hyperparameter optimization.
     
     Args:
         num_agents: Number of seagull agents
-        max_iter: Maximum number of iterations
+        max_iterations: Maximum number of iterations
         lower_bound: Lower bounds for parameters
         upper_bound: Upper bounds for parameters
         dim: Dimension of parameter space
@@ -37,84 +36,77 @@ def soa(num_agents: int, max_iter: int, lower_bound: np.ndarray, upper_bound: np
     Returns:
         Tuple of (best_score, best_position, convergence_history, iteration_details)
     """
-    print("\nStarting Enhanced Seagull Optimization Algorithm for Hyperparameter Tuning...")
     
-    best_position, best_score = np.zeros(dim), float('inf')
+    # --- 1. Initialization ---
+    best_position = np.zeros(dim)
+    best_score = float('inf')
+    
     positions = _init_positions(num_agents, dim, upper_bound, lower_bound)
     convergence_curve = []
-    iteration_details = []  # Track best configuration per iteration
+    iteration_details = []
     
-    # Algorithm parameters
-    lambda_uncertainty, lambda_beta, beta_max = 5.0, 5.0, 2.0
+    # MoSOA-specific parameters from the paper
+    v_max, v_min = 1.0, 0.0
+    u = 1.0
+    w_max, w_min = 0.9, 0.2
+    beta_max = 1.0
+    lambda_val = 2.0
+    fc_min, fc_max = 0.0, 2.0
     
-    pbar = tqdm(range(max_iter), desc="MoSOA Progress")
+    # --- 2. Main Optimization Loop ---
+    pbar = tqdm(range(max_iterations), desc="MoSOA Progress")
     for l in pbar:
-        # Evaluate fitness for all agents
-        fitness_all = [objective_func(np.clip(p, lower_bound, upper_bound)) for p in positions]
-        valid_fitness = [(f, i) for i, f in enumerate(fitness_all) if f is not None and f != float('inf')]
-        
-        # Track iteration details - best configuration in THIS iteration
-        iteration_best_score = float('inf')
-        iteration_best_position = None
-        
-        # Update best solution
-        if valid_fitness:
-            current_best_score_iter, best_agent_idx = min(valid_fitness, key=lambda item: item[0])
-            iteration_best_score = current_best_score_iter
-            iteration_best_position = positions[best_agent_idx].copy()
+        # --- 2a. Fitness Evaluation and Global Best Update ---
+        fitness_all = np.full(num_agents, np.inf)
+        for i in range(num_agents):
+            positions[i, :] = np.clip(positions[i, :], lower_bound, upper_bound)
+            fitness = objective_func(positions[i, :])
+            fitness_all[i] = fitness
             
-            if current_best_score_iter < best_score:
-                best_score = current_best_score_iter
-                best_position = positions[best_agent_idx].copy()
+            if fitness < best_score:
+                best_score = fitness
+                best_position = positions[i, :].copy()
+
+        # --- 2b. Calculate Adaptive Parameters ---
+        f_max, f_min, f_avg = np.max(fitness_all), np.min(fitness_all), np.mean(fitness_all)
+        sigma = np.std(fitness_all)
         
-        # Store iteration details (best configuration found in this iteration)
+        M = 1.0 if (f_avg - f_min) == 0 else (f_max - f_avg) / (f_avg - f_min)
+        fc_ada = fc_min + M * (fc_max - fc_min) + (sigma * np.random.randn())
+        A = fc_ada * (1 - np.sin((np.pi / 2) * (l / max_iterations)))
+        
+        v = v_max * (1 - l / max_iterations)
+        w = (w_max - w_min) * (1 - np.cos(np.pi / 2 * (l / max_iterations))) + w_min
+        beta = beta_max * np.exp(-lambda_val * (l / max_iterations))
+        
+        # --- 2c. Update Agent Positions ---
+        for i in range(num_agents):
+            B = 2 * (A**2) * np.random.rand()
+            Ms = B * (best_position - positions[i, :])
+            Ds = np.abs(Ms)
+            
+            k = np.random.uniform(0, 2 * np.pi)
+            r = u * np.exp(k * v)
+            spiral_attack = Ds * r * np.cos(2 * np.pi * k)
+
+            rand_agent_idx = np.random.randint(0, num_agents)
+            p_rand = positions[rand_agent_idx, :]
+            perturbation = beta * (p_rand - positions[i, :])
+            
+            positions[i, :] = spiral_attack + (w * best_position) + perturbation
+        
+        # Track iteration details
         iteration_details.append({
             'iteration': l + 1,
-            'best_score': iteration_best_score,
-            'best_position': iteration_best_position.copy() if iteration_best_position is not None else None,
+            'best_score': best_score,
+            'best_position': best_position.copy(),
             'global_best_score': best_score,
-            'num_valid_evaluations': len(valid_fitness)
+            'num_valid_evaluations': num_agents
         })
         
         convergence_curve.append(best_score)
-        
-        # Calculate diversity measure
-        sigma = np.std([f for f, _ in valid_fitness]) if valid_fitness else 1e-9
-        if sigma == 0: 
-            sigma = 1e-9
-        
-        # Update algorithm parameters
-        fc = 2 - l * (2 / max_iter)
-        beta = beta_max * np.exp(-lambda_beta * (l / max_iter))
-        
-        # Update positions for all agents
-        for i in range(num_agents):
-            # Time and uncertainty factors
-            time_factor = 1 - np.sin((np.pi / 2) * (l / max_iter))
-            uncertainty_factor = 1 / (1 + lambda_uncertainty * sigma)
-            
-            # Seagull algorithm parameters
-            A1 = 1.0 * time_factor * uncertainty_factor
-            b = 1.0 * (1 - 2 / (1 + np.exp((2 * l) / max_iter))) + -1.0
-            rand_ll = (fc - 1) * np.random.rand() + 1
+        pbar.set_description(f"MoSOA Iteration {l+1}/{max_iterations} | Best Score: {best_score:.6e}")
 
-            # Update position using seagull migration behavior
-            D_alphs = fc * positions[i, :] + A1 * (best_position - positions[i, :])
-            X1 = D_alphs * np.exp(b * rand_ll) * np.cos(rand_ll * 2 * np.pi) + best_position
-
-            # Add random component from other seagulls
-            P_rand = positions[np.random.randint(0, num_agents), :]
-            new_position = X1 + beta * (P_rand - positions[i, :])
-            
-            # CRITICAL: Ensure positions stay within bounds
-            positions[i, :] = np.clip(new_position, lower_bound, upper_bound)
-
-        pbar.set_description(f"MoSOA Iteration {l+1}/{max_iter} | Best MSE: {best_score:.6f}")
-        
-        # Add spacing between iterations by updating progress bar with newline
-        if l < max_iter - 1:  # Don't add space after the last iteration
-            pbar.write("")  # Use pbar.write() instead of print() to avoid interference
-    
     return best_score, best_position, convergence_curve, iteration_details
 
 
@@ -140,6 +132,16 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
                    if hasattr(model_config, 'get_hidden_dim_range') 
                    else model_config.HIDDEN_DIM_RANGE)
     
+    # For sequential models, use system-size-dependent ranges to prevent OOM on large systems
+    if is_sequential and hasattr(model_config, 'get_sequential_ranges'):
+        seq_ranges = model_config.get_sequential_ranges(num_buses)
+        hidden_range = seq_ranges['hidden_dim']
+        sequence_range = seq_ranges['sequence_length']
+        rnn_layers_range = seq_ranges['rnn_layers']
+    else:
+        sequence_range = model_config.SEQUENCE_LENGTH_RANGE if is_sequential else None
+        rnn_layers_range = model_config.RNN_LAYERS_RANGE if is_sequential else None
+    
     param_bounds = {
         'HIDDEN_DIM': hidden_range, 
         'NUM_GC_LAYERS': model_config.NUM_GC_LAYERS_RANGE
@@ -150,11 +152,11 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
         param_bounds['LAMBDA_P'] = (1.0, 50.0)
         param_bounds['LAMBDA_V'] = (1.0, 50.0)
     
-    # Add sequential model parameters
+    # Add sequential model parameters with adaptive ranges
     if is_sequential: 
         param_bounds.update({
-            'SEQUENCE_LENGTH': model_config.SEQUENCE_LENGTH_RANGE, 
-            'RNN_LAYERS': model_config.RNN_LAYERS_RANGE
+            'SEQUENCE_LENGTH': sequence_range, 
+            'RNN_LAYERS': rnn_layers_range
         })
     
     # Add adaptive graph parameters
@@ -255,3 +257,104 @@ def calculate_objective_score(metrics: Dict[str, float], config: Any, is_physics
         total_loss = metrics['mse']
     
     return total_loss
+
+
+def trial_based_search(num_trials: int, lower_bound: np.ndarray, upper_bound: np.ndarray,
+                      dim: int, objective_func: Callable, 
+                      search_strategy: str = 'random') -> Tuple[float, np.ndarray, List[float], List[Dict]]:
+    """
+    Trial-based hyperparameter search with fixed budget.
+    
+    Args:
+        num_trials: Total number of training runs
+        lower_bound: Lower bounds for parameters
+        upper_bound: Upper bounds for parameters
+        dim: Dimension of parameter space
+        objective_func: Function that trains model and returns validation loss
+        search_strategy: 'random' or 'latin_hypercube' sampling
+        
+    Returns:
+        Tuple of (best_score, best_position, convergence_history, trial_details)
+    """
+    
+    best_position = np.zeros(dim)
+    best_score = float('inf')
+    convergence_curve = []
+    trial_details = []
+    
+    # Convert bounds to arrays if they're scalars
+    if isinstance(upper_bound, (int, float)):
+        upper_bound = np.full(dim, upper_bound)
+    if isinstance(lower_bound, (int, float)):
+        lower_bound = np.full(dim, lower_bound)
+    
+    # Generate all trial positions at once
+    if search_strategy == 'latin_hypercube':
+        # Latin Hypercube Sampling for better space coverage
+        positions = _latin_hypercube_sampling(num_trials, dim, lower_bound, upper_bound)
+    else:
+        # Random sampling (default)
+        positions = np.zeros((num_trials, dim))
+        for i in range(dim):
+            positions[:, i] = np.random.uniform(lower_bound[i], upper_bound[i], num_trials)
+    
+    # Run trials sequentially (ONE training run per trial)
+    pbar = tqdm(range(num_trials), desc="Trial Progress")
+    for trial_idx in pbar:
+        current_params = positions[trial_idx]
+        
+        # Clip to ensure bounds
+        current_params = np.clip(current_params, lower_bound, upper_bound)
+        
+        # ONE full model training run
+        try:
+            score = objective_func(current_params)
+        except Exception as e:
+            print(f"Trial {trial_idx + 1} failed: {e}")
+            score = float('inf')
+        
+        # Update best if this trial is better
+        if score < best_score:
+            best_score = score
+            best_position = current_params.copy()
+        
+        # Track convergence (best score so far)
+        convergence_curve.append(best_score)
+        
+        # Store trial details
+        trial_details.append({
+            'trial': trial_idx + 1,
+            'score': score,
+            'position': current_params.copy(),
+            'is_best': (score == best_score),
+            'global_best_score': best_score
+        })
+        
+        pbar.set_description(f"Trial {trial_idx + 1}/{num_trials} | Best Score: {best_score:.6f}")
+    
+    return best_score, best_position, convergence_curve, trial_details
+
+
+def _latin_hypercube_sampling(num_samples: int, dim: int, 
+                              lower_bound: np.ndarray, upper_bound: np.ndarray) -> np.ndarray:
+    """
+    Latin Hypercube Sampling for better coverage of parameter space.
+    
+    This ensures samples are more evenly distributed than pure random sampling.
+    """
+    # Generate Latin Hypercube samples in [0, 1]
+    samples = np.zeros((num_samples, dim))
+    
+    for d in range(dim):
+        # Divide [0,1] into num_samples equal intervals
+        intervals = np.linspace(0, 1, num_samples + 1)
+        # Randomly sample within each interval
+        samples[:, d] = np.random.uniform(intervals[:-1], intervals[1:])
+        # Shuffle to avoid correlation between dimensions
+        np.random.shuffle(samples[:, d])
+    
+    # Scale to actual bounds
+    for d in range(dim):
+        samples[:, d] = samples[:, d] * (upper_bound[d] - lower_bound[d]) + lower_bound[d]
+    
+    return samples
