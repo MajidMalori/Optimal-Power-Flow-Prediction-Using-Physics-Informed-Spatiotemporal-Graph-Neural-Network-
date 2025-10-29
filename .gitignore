@@ -35,7 +35,11 @@ maxsea.py
 *.svg
 *.bmp
 *.tiff
-*.txt
+
+# Text files (info/debug files, but keep requirements)
+info*.txt
+*_info.txt
+debug*.txt
 
 # Markdown files (except README.md)
 *.md
