@@ -2,6 +2,7 @@
 
 import os
 import traceback
+import json
 import pandapower as pp
 import pandapower.networks as pn
 import pandapower.topology as top
@@ -29,12 +30,140 @@ CONFIG = {
     "max_energy_utilization_coeff": 0.98,
     "loss_sensitivity": 0.01,
     "base_carbon_intensity_grid": 0.55,
-    "max_carbon_reduction_from_renewables": 0.30
+    "max_carbon_reduction_from_renewables": 0.30,
+    
+    # Time-series generation settings
+    "use_time_series": True,  # True: Generate realistic daily cycles, False: Random scenarios (Monte Carlo)
+    "hours_per_day": 24,  # Number of hours in a day
+    "num_days": None,  # Will be calculated from time_steps and hours_per_day
 }
 
 # =============================================================================
 # SECTION 2: HELPER FUNCTIONS
 # =============================================================================
+
+def get_daily_load_profile(hour: int, season: str = 'summer') -> float:
+    """
+    Returns realistic hourly load multiplier (0.0-1.0) based on time of day.
+    
+    Args:
+        hour: Hour of day (0-23)
+        season: 'summer', 'winter', 'spring', 'fall' (affects shape slightly)
+    
+    Returns:
+        Load multiplier relative to peak demand
+    """
+    # Base hourly load pattern (typical residential/commercial mix)
+    # Values represent percentage of peak load
+    hourly_pattern = {
+        0: 0.40,   # Midnight - low demand
+        1: 0.35,   # 1 AM - lowest demand
+        2: 0.33,   # 2 AM
+        3: 0.32,   # 3 AM
+        4: 0.35,   # 4 AM - starting to rise
+        5: 0.42,   # 5 AM - morning ramp begins
+        6: 0.55,   # 6 AM - people waking up
+        7: 0.70,   # 7 AM - morning peak begins
+        8: 0.85,   # 8 AM - high morning demand
+        9: 0.90,   # 9 AM - business hours
+        10: 0.92,  # 10 AM
+        11: 0.95,  # 11 AM - approaching noon
+        12: 0.97,  # Noon - high demand
+        13: 0.95,  # 1 PM
+        14: 0.93,  # 2 PM
+        15: 0.92,  # 3 PM
+        16: 0.94,  # 4 PM - load rising again
+        17: 0.98,  # 5 PM - evening ramp
+        18: 1.00,  # 6 PM - PEAK DEMAND (evening peak)
+        19: 0.98,  # 7 PM - still high
+        20: 0.90,  # 8 PM - starting to decline
+        21: 0.80,  # 9 PM
+        22: 0.65,  # 10 PM
+        23: 0.50,  # 11 PM - winding down
+    }
+    
+    base_load = hourly_pattern.get(hour, 0.5)
+    
+    # Add small random variation (±5%) for realism
+    variation = np.random.uniform(0.95, 1.05)
+    
+    return base_load * variation
+
+
+def get_solar_generation_profile(hour: int, day_of_year: int = 180) -> float:
+    """
+    Returns realistic hourly solar generation multiplier (0.0-1.0).
+    
+    Args:
+        hour: Hour of day (0-23)
+        day_of_year: Day of year (1-365, affects sun strength and day length)
+    
+    Returns:
+        Solar generation multiplier (0 = night, 1 = peak solar)
+    """
+    # Solar only during daylight hours (roughly 6 AM to 6 PM)
+    if hour < 5 or hour > 19:
+        return 0.0  # Night time
+    
+    # Solar follows a bell curve peaking at noon
+    # Convert hour to solar angle (peak at hour 12)
+    hour_from_noon = abs(hour - 12)
+    
+    if hour_from_noon > 7:
+        return 0.0  # Too far from noon
+    
+    # Bell curve: peak at noon (12), declining towards sunrise/sunset
+    # Using cosine function for smooth curve
+    solar_angle = (hour - 12) * (np.pi / 14)  # Map to -pi/2 to pi/2
+    base_solar = max(0, np.cos(solar_angle))  # 0 at edges, 1 at noon
+    
+    # Add cloud cover variation (random 0.7-1.0)
+    cloud_factor = np.random.uniform(0.7, 1.0)
+    
+    # Season factor (summer stronger, winter weaker)
+    season_factor = 0.85 + 0.15 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
+    
+    return base_solar * cloud_factor * season_factor
+
+
+def get_wind_generation_profile(hour: int, day: int = 0) -> float:
+    """
+    Returns realistic hourly wind generation multiplier (0.0-1.0).
+    
+    Args:
+        hour: Hour of day (0-23)
+        day: Day number (for day-to-day variation)
+    
+    Returns:
+        Wind generation multiplier
+    """
+    # Wind has less predictable daily pattern but tends to be:
+    # - Higher at night (cooler temperatures)
+    # - Lower during midday (solar heating reduces wind)
+    
+    # Base diurnal pattern (higher at night)
+    if 0 <= hour < 6:
+        base_wind = 0.75  # High nighttime wind
+    elif 6 <= hour < 12:
+        base_wind = 0.50  # Morning transition
+    elif 12 <= hour < 18:
+        base_wind = 0.40  # Lower daytime wind
+    else:  # 18-24
+        base_wind = 0.65  # Evening pickup
+    
+    # Add significant random variation (wind is variable)
+    # Day-to-day variation
+    day_seed = np.random.RandomState(day)
+    daily_factor = day_seed.uniform(0.6, 1.4)
+    
+    # Hourly variation
+    hourly_variation = np.random.uniform(0.7, 1.3)
+    
+    wind = base_wind * daily_factor * hourly_variation
+    
+    # Clip to valid range
+    return np.clip(wind, 0.0, 1.0)
+
 
 def load_network(case_name: str) -> pp.pandapowerNet:
     """Loads a pandapower network based on its name."""
@@ -258,21 +387,45 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         # Store as dense matrix to avoid object dtype issues
         adjacency_array[t] = current_adjacency_matrix
 
-        # Apply random variations to loads
-        net.load.p_mw = base_load_p * np.random.uniform(0.8, 1.2, len(base_load_p))
-        net.load.q_mvar = base_load_q * np.random.uniform(0.8, 1.2, len(base_load_q))
-
-        # Apply random variations to renewable generation based on time of day
-        current_total_renewable_p_mw = 0
-        if 'type' in net.sgen.columns and not net.sgen.empty:
-            for i, sgen in net.sgen.iterrows():
-                p_gen = 0
-                if sgen.type == 'solar':
-                    p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
-                elif sgen.type == 'wind':
-                    p_gen = np.random.uniform(0, max_individual_wind_mw)
-                net.sgen.at[i, 'p_mw'] = p_gen
-                current_total_renewable_p_mw += p_gen
+        # Apply load and generation profiles (time-series or random)
+        if config.get('use_time_series', False):
+            # TIME-SERIES MODE: Realistic daily patterns
+            current_hour = t % config['hours_per_day']
+            current_day = t // config['hours_per_day']
+            
+            # Apply realistic hourly load profile
+            load_multiplier = get_daily_load_profile(current_hour)
+            net.load.p_mw = base_load_p * load_multiplier
+            net.load.q_mvar = base_load_q * load_multiplier
+            
+            # Apply realistic renewable generation profiles
+            current_total_renewable_p_mw = 0
+            if 'type' in net.sgen.columns and not net.sgen.empty:
+                for i, sgen in net.sgen.iterrows():
+                    p_gen = 0
+                    if sgen.type == 'solar':
+                        solar_profile = get_solar_generation_profile(current_hour, day_of_year=180 + current_day % 180)
+                        p_gen = solar_profile * max_individual_solar_mw
+                    elif sgen.type == 'wind':
+                        wind_profile = get_wind_generation_profile(current_hour, day=current_day)
+                        p_gen = wind_profile * max_individual_wind_mw
+                    net.sgen.at[i, 'p_mw'] = p_gen
+                    current_total_renewable_p_mw += p_gen
+        else:
+            # MONTE CARLO MODE: Random scenarios (original approach)
+            net.load.p_mw = base_load_p * np.random.uniform(0.8, 1.2, len(base_load_p))
+            net.load.q_mvar = base_load_q * np.random.uniform(0.8, 1.2, len(base_load_q))
+            
+            current_total_renewable_p_mw = 0
+            if 'type' in net.sgen.columns and not net.sgen.empty:
+                for i, sgen in net.sgen.iterrows():
+                    p_gen = 0
+                    if sgen.type == 'solar':
+                        p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
+                    elif sgen.type == 'wind':
+                        p_gen = np.random.uniform(0, max_individual_wind_mw)
+                    net.sgen.at[i, 'p_mw'] = p_gen
+                    current_total_renewable_p_mw += p_gen
         
         try:
             # Run the power flow calculation
@@ -541,14 +694,20 @@ if __name__ == "__main__":
                 net_with_renewables = configure_renewables(net_for_run, frac, CONFIG)
                 generated_data = simulate_time_series(net_with_renewables, CONFIG)
                 
-                # Ensure we save to the mode-specific data directory
+                # Ensure we save to the generation_mode/data_mode directory structure
+                # Structure: data/monte_carlo/train or data/time_series/test
+                generation_mode = 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo'
+                
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 if "data" in script_dir:
                     # Script is being run from data/ subdirectory
-                    output_path = os.path.join(script_dir, data_mode)
+                    output_path = os.path.join(script_dir, generation_mode, data_mode)
                 else:
                     # Script is being run from main directory
-                    output_path = os.path.join(script_dir, "data", data_mode)
+                    output_path = os.path.join(script_dir, "data", generation_mode, data_mode)
+                
+                # Create directory if it doesn't exist
+                os.makedirs(output_path, exist_ok=True)
                     
                 # Pass the generation timestamp to ensure all files have the same timestamp
                 save_data(generated_data, save_case_name, frac, output_path, generation_timestamp)
@@ -558,5 +717,40 @@ if __name__ == "__main__":
             traceback.print_exc()
             print("\nSkipping to the next test case.")
             continue
+    
+    # Write metadata file for smart data detection
+    try:
+        generation_mode = 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo'
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if "data" in script_dir:
+            output_path = os.path.join(script_dir, generation_mode, data_mode)
+        else:
+            output_path = os.path.join(script_dir, "data", generation_mode, data_mode)
+        
+        os.makedirs(output_path, exist_ok=True)
+        
+        metadata = {
+            'generation_mode': 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo',
+            'data_mode': data_mode,
+            'timesteps': timesteps,
+            'timestamp': generation_timestamp,
+            'hours_per_day': CONFIG.get('hours_per_day', 24),
+            'use_time_series': CONFIG.get('use_time_series', False),
+            'test_cases': CONFIG["test_cases"],
+            'renewable_fractions': CONFIG["renewable_fractions_to_run"],
+            'generation_date': datetime.now().isoformat()
+        }
+        
+        metadata_file = os.path.join(output_path, "data_generation_metadata.json")
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"\n[Metadata] Saved generation metadata to: {metadata_file}")
+        print(f"  Mode: {metadata['generation_mode']}")
+        print(f"  Data type: {metadata['data_mode']}")
+        print(f"  Timesteps: {metadata['timesteps']}")
+    except Exception as e:
+        print(f"\n[Warning] Could not save metadata file: {e}")
             
     print("\n\nAll data generation processes are complete.")

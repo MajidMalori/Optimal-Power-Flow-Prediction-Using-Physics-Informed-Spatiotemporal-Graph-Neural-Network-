@@ -80,10 +80,17 @@ class PowerSystemDataset(Dataset):
     Supports lazy Ybus reconstruction to save memory for large datasets.
     """
     def __init__(self, features, adjacency_matrix, ybus_matrices, targets, 
-                 time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1):
-        
+                 time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1,
+                 is_time_series=False, hours_per_day=24):
+        """
+        Args:
+            is_time_series: If True, respects day boundaries when creating sequences
+            hours_per_day: Number of hours per day (for time-series mode)
+        """
         self.features = torch.from_numpy(features).float()
         self.adjacency = torch.from_numpy(adjacency_matrix).float()
+        self.is_time_series = is_time_series
+        self.hours_per_day = hours_per_day
         
         # Handle Ybus - either pre-loaded array or lazy reconstruction data
         if isinstance(ybus_matrices, dict) and 'lazy' in ybus_matrices:
@@ -326,25 +333,56 @@ def _collate_sequential_padded(batch):
 
 def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static):
     seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
+    
+    # Check if time-series mode is enabled
+    use_time_series = getattr(config, 'USE_TIME_SERIES', False)
+    hours_per_day = getattr(config, 'HOURS_PER_DAY', 24)
+    
     dataset = PowerSystemDataset(
         features, adjacency, ybus_matrices, targets, 
         time_energy_coeffs, time_carbon_coeffs, renewable_fractions,
-        is_static, seq_len
+        is_static, seq_len, is_time_series=use_time_series, hours_per_day=hours_per_day
     )
     dataset_size = len(dataset)
     train_size = int(config.TRAIN_SPLIT * dataset_size)
     val_size = int(config.VAL_SPLIT * dataset_size)
     test_size = dataset_size - train_size - val_size
-    train_dataset, val_dataset, test_dataset = random_split(
-        dataset, [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(config.SEED)
-    )
+    
+    # For SEQUENTIAL models (time-series), use CONTIGUOUS splits (NO SHUFFLING)
+    # For NON-SEQUENTIAL models, use RANDOM splits (shuffling is fine)
+    if not is_static and use_time_series:
+        # SEQUENTIAL + TIME-SERIES: Contiguous splits to preserve temporal order
+        print("[Data] Using CONTIGUOUS splits (no shuffling) for time-series sequential models")
+        
+        # Create contiguous indices
+        train_indices = list(range(0, train_size))
+        val_indices = list(range(train_size, train_size + val_size))
+        test_indices = list(range(train_size + val_size, dataset_size))
+        
+        train_dataset = torch.utils.data.Subset(dataset, train_indices)
+        val_dataset = torch.utils.data.Subset(dataset, val_indices)
+        test_dataset = torch.utils.data.Subset(dataset, test_indices)
+        
+        # NO SHUFFLING for sequential models
+        shuffle_train = False
+    else:
+        # NON-SEQUENTIAL or NON-TIME-SERIES: Random splits (can shuffle)
+        print("[Data] Using RANDOM splits (with shuffling) for non-sequential or Monte Carlo models")
+        
+        train_dataset, val_dataset, test_dataset = random_split(
+            dataset, [train_size, val_size, test_size],
+            generator=torch.Generator().manual_seed(config.SEED)
+        )
+        
+        # CAN SHUFFLE for non-sequential models
+        shuffle_train = True
+    
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
     
     # OPTIMIZED DataLoader settings for memory efficiency
     train_dataloader_kwargs = {
         'batch_size': config.BATCH_SIZE,
-        'shuffle': True,
+        'shuffle': shuffle_train,  # Dynamic based on model type
         'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
         'collate_fn': collate_fn_to_use,
         'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
@@ -354,7 +392,7 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     
     val_test_dataloader_kwargs = {
         'batch_size': config.BATCH_SIZE,
-        'shuffle': False,
+        'shuffle': False,  # Never shuffle val/test
         'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
         'collate_fn': collate_fn_to_use,
         'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU

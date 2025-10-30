@@ -134,8 +134,8 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
 
 def check_data_consistency(config) -> Tuple[bool, str]:
     """
-    Check if existing data files have consistent timestamps and correct timesteps.
-    Validates both file consistency and configuration match.
+    Check if existing data files have consistent timestamps, correct timesteps, and matching generation mode.
+    Validates both file consistency and configuration match (including time-series vs Monte Carlo).
     
     Args:
         config: Configuration object
@@ -146,6 +146,7 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     import re
     import glob
     import numpy as np
+    import json
     
     data_dir = config.DATA_DIR  # Use mode-specific directory
     
@@ -153,6 +154,40 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     if not os.path.exists(data_dir):
         return True, "Data directory does not exist yet"
     
+    # Check for metadata file (new system)
+    metadata_file = os.path.join(data_dir, "data_generation_metadata.json")
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            # Check generation mode (time-series vs Monte Carlo)
+            current_mode = "time_series" if getattr(config, 'USE_TIME_SERIES', False) else "monte_carlo"
+            stored_mode = metadata.get('generation_mode', 'monte_carlo')
+            
+            if current_mode != stored_mode:
+                return False, f"Data generation mode mismatch: existing={stored_mode}, config={current_mode}. Regeneration needed."
+            
+            # Check data mode (train vs test)
+            stored_data_mode = metadata.get('data_mode', 'unknown')
+            if stored_data_mode != config.DATA_MODE:
+                return False, f"Data mode mismatch: existing={stored_data_mode}, config={config.DATA_MODE}. Regeneration needed."
+            
+            # Check timesteps
+            expected_timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
+            stored_timesteps = metadata.get('timesteps', 0)
+            if stored_timesteps != expected_timesteps:
+                return False, f"Data generated with {stored_timesteps} timesteps, but config requires {expected_timesteps}. Regeneration needed."
+            
+            # Check timestamp
+            timestamp = metadata.get('timestamp', 'unknown')
+            
+            return True, f"Data consistent ({stored_mode} mode, {stored_timesteps} timesteps, {stored_data_mode})"
+            
+        except Exception as e:
+            return False, f"Error reading metadata file: {e}. Regeneration recommended."
+    
+    # Fallback to old timestamp-based validation if no metadata file
     filename_timestamps = set()
     
     # Look for timestamp patterns in filenames
@@ -181,7 +216,7 @@ def check_data_consistency(config) -> Tuple[bool, str]:
                 break
         
         if legacy_files_exist:
-            return False, "Found legacy data files without timestamps - mixed data possible"
+            return False, "Found legacy data files without metadata. Regeneration recommended."
         else:
             return True, "No data files found"
     
@@ -216,7 +251,7 @@ def check_data_consistency(config) -> Tuple[bool, str]:
             except Exception as e:
                 return False, f"Error reading data file for timestep validation: {e}"
     
-    return True, f"All data files consistent (timestamp: {timestamp}, timesteps: {expected_timesteps})"
+    return False, f"Data files exist but no metadata found (timestamp: {timestamp}). Regeneration recommended to add metadata."
 
 def monitor_data_generation_progress_per_system(config, stop_event):
     """

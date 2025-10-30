@@ -2,6 +2,56 @@ import os
 import torch
 from datetime import datetime
 
+
+# =============================================================================
+# TRAINING ARGUMENTS CONFIGURATION
+# =============================================================================
+
+class Args:
+    """
+    Training arguments and configuration.
+    Centralized location for all training-related parameters.
+    
+    ⚙️ QUICK ACCESS - Modify these for your experiments
+    """
+    # === MODEL & SYSTEM CONFIGURATION ===
+    test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+    models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
+    seed = 42
+    
+    # === DATA CONFIGURATION ===
+    data_mode = 'test'  # Options: 'train' or 'test'
+    test_timesteps = 20  # Number of timesteps for test mode (100 for quick debug, 1000 for thorough testing)
+    
+    # Data generation mode
+    use_time_series = True  # True: Time-Series (realistic daily cycles), False: Monte Carlo (random scenarios)
+    hours_per_day = 24      # Number of hours in a day for time-series mode
+    sequence_length = 5     # Sequence length for LSTM/GRU models (past N hours to predict current)
+    
+    # === RESULTS SAVING CONFIGURATION ===
+    save_results = True  # False: No files saved (console output only), True: Save all results
+    clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
+    
+    # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
+    use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)
+    num_trials = 20  # Only used if use_mosoa=False
+    
+    # === PARALLEL TRAINING CONFIGURATION ===
+    # Device configuration
+    force_cpu = False  # Set to True to force CPU training even if GPU is available
+    
+    # Parallel training mode
+    parallel_data_loading = True   # DISABLED for low-RAM systems (< 2GB available)
+    
+    # Worker configuration (auto-configured based on device if set to 'auto')
+    data_workers = 'auto'         # Number of data loading workers
+
+
+# =============================================================================
+# MAIN CONFIGURATION CLASS
+# =============================================================================
+
 class Config:
     """
     Main configuration class for the project.
@@ -23,8 +73,12 @@ class Config:
     LEARNING_RATE = 0.0005
     NUM_EPOCHS = 1
     EARLY_STOPPING_PATIENCE = 25
-    TRAIN_SPLIT = 0.7
-    VAL_SPLIT = 0.15
+    TRAIN_SPLIT = 0.6  # Changed to 0.6 for time-series (was 0.7)
+    VAL_SPLIT = 0.2    # Changed to 0.2 for time-series (was 0.15)
+    
+    # --- Time-Series Configuration (Set during __init__ from Args) ---
+    # USE_TIME_SERIES, HOURS_PER_DAY, and SEQUENCE_LENGTH are set dynamically in __init__()
+    # Modify Args.use_time_series, Args.hours_per_day, Args.sequence_length at the top of this file instead
     
     # --- Multi-Objective Optimization Weights (normalized to sum to 1.0) ---
     MOOPF_WEIGHT_LOSS = 1/3
@@ -42,9 +96,9 @@ class Config:
     LAMBDA_P = 10.0  # Weight for power balance violation
     LAMBDA_V = 10.0  # Weight for voltage limit violation
     
-    # --- Data Mode Configuration ---
-    DATA_MODE = 'train'  # Options: 'train' (10000 timesteps) or 'test' (100 timesteps)
-    DATA_MODE_TIMESTEPS = {'train': 10000, 'test': 100}  # Timesteps for each mode
+    # --- Data Mode Configuration (Set during __init__ from Args) ---
+    # DATA_MODE and DATA_MODE_TIMESTEPS are set dynamically in __init__()
+    # Modify Args.data_mode and Args.test_timesteps at the top of this file instead
     
     # --- Project Structure ---
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -231,7 +285,8 @@ class Config:
     # INITIALIZATION
     # =============================================================================
 
-    def __init__(self, data_mode='train', save_results=True, test_timesteps=100, clear_results=False):
+    def __init__(self, data_mode='train', save_results=True, test_timesteps=100, clear_results=False, 
+                 use_time_series=True, hours_per_day=24, sequence_length=5):
         """Initializes directories and sets up experimental run structure."""
         # Set save_results flag
         self.SAVE_RESULTS = save_results
@@ -246,18 +301,31 @@ class Config:
             except Exception as e:
                 print(f"[Clear Results] ✗ Warning: Could not delete experimental_results folder: {e}")
         
-        # Update test timesteps if provided
-        if data_mode == 'test' and test_timesteps != self.DATA_MODE_TIMESTEPS['test']:
-            self.DATA_MODE_TIMESTEPS['test'] = test_timesteps
-            print(f"Test mode timesteps set to: {test_timesteps}")
+        # Initialize DATA_MODE_TIMESTEPS with default values
+        self.DATA_MODE_TIMESTEPS = {'train': 10000, 'test': test_timesteps}
         
-        # Set data mode and corresponding data directory
+        # Set data mode and validate
         self.DATA_MODE = data_mode
         if data_mode not in self.DATA_MODE_TIMESTEPS:
             raise ValueError(f"Invalid data_mode '{data_mode}'. Must be 'train' or 'test'")
         
-        # Update DATA_DIR to point to mode-specific subdirectory
-        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', data_mode)
+        # Set time-series configuration from Args
+        self.USE_TIME_SERIES = use_time_series
+        self.HOURS_PER_DAY = hours_per_day
+        self.SEQUENCE_LENGTH = sequence_length
+        
+        print(f"Data mode: {self.DATA_MODE}, Timesteps: {self.DATA_MODE_TIMESTEPS[self.DATA_MODE]}")
+        print(f"Generation mode: {'Time-Series' if self.USE_TIME_SERIES else 'Monte Carlo'}")
+        
+        # Determine generation mode folder (monte_carlo or time_series)
+        generation_mode = 'time_series' if self.USE_TIME_SERIES else 'monte_carlo'
+        
+        # Update DATA_DIR to point to generation_mode/data_mode subdirectory
+        # Structure: data/monte_carlo/train or data/time_series/test
+        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', generation_mode, data_mode)
+        
+        print(f"\n[Data Mode] Using {generation_mode} data in {data_mode} mode")
+        print(f"[Data Directory] {self.DATA_DIR}")
         
         # Initialize timestamp only when actually starting a run
         self._initialize_run_timestamp()

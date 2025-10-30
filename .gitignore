@@ -1,4 +1,9 @@
-# Data folders - exclude entire train/test folders (too heavy for git)
+# Data folders - exclude entire data generation folders (too heavy for git)
+# New dual-mode structure: monte_carlo and time_series
+data/monte_carlo/
+data/time_series/
+
+# Legacy data folders (in case old structure still exists)
 data/train/
 data/test/
 
@@ -8,7 +13,7 @@ data/*.txt
 data/*.json
 data/case*
 
-# Keep the data generation script
+# Keep the data generation script and migration script
 !data/gen_meas_best.py
 !data/check_data.py
 
@@ -63,6 +68,9 @@ checkpoints/
 
 # Experimental results (new structure)
 experimental_results/
+
+# Test results (generated during development/testing)
+test_results/
 
 # Model evaluation results (legacy)
 model_evaluation/

@@ -18,6 +18,7 @@ import torch
 def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, Dict]:
     """
     Load network topology and extract bus positions for visualization.
+    Uses proper hierarchical/radial layouts that match actual power system topology.
     
     Args:
         case_name: Name of the test case (e.g., "case33", "case57", "case118")
@@ -44,17 +45,98 @@ def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, D
     for bus_idx in net.bus.index:
         G.add_node(bus_idx)
     
-    # Add edges (lines)
+    # Add edges (lines) - THESE ARE THE ACTUAL POWER SYSTEM CONNECTIONS
     for _, line in net.line.iterrows():
         G.add_edge(line.from_bus, line.to_bus)
     
-    # Generate positions using spring layout (will look similar to typical power system layouts)
-    if case_name == "case33":
-        # For case33, use a hierarchical layout (it's a radial feeder)
-        pos = nx.spring_layout(G, seed=42, k=2, iterations=50)
-    else:
-        # For larger systems, use spring layout with more iterations
-        pos = nx.spring_layout(G, seed=42, k=1, iterations=100)
+    # Generate LAYERED HIERARCHICAL layout for power networks
+    # Handles disconnected components and meshed networks properly
+    
+    from collections import deque, defaultdict
+    import math
+    
+    # Find all connected components
+    components = list(nx.connected_components(G))
+    
+    # Sort components: largest first, or component containing bus 0 first
+    def component_priority(comp):
+        if 0 in comp:
+            return (0, -len(comp))  # Bus 0 component first, then by size
+        return (1, -len(comp))
+    
+    components = sorted(components, key=component_priority)
+    
+    pos = {}
+    component_offset = 0
+    
+    for comp_idx, component in enumerate(components):
+        # Create subgraph for this component
+        subgraph = G.subgraph(component)
+        
+        # Find root node (bus 0 if in this component, otherwise lowest numbered node)
+        if 0 in component:
+            root = 0
+        else:
+            root = min(component)
+        
+        # Assign levels using BFS from root
+        levels = {}
+        parent = {}
+        children = defaultdict(list)
+        
+        queue = deque([root])
+        visited = {root}
+        levels[root] = 0
+        
+        while queue:
+            node = queue.popleft()
+            for neighbor in sorted(subgraph.neighbors(node)):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    parent[neighbor] = node
+                    if node not in children:
+                        children[node] = []
+                    children[node].append(neighbor)
+                    levels[neighbor] = levels[node] + 1
+                    queue.append(neighbor)
+        
+        # Group nodes by level
+        level_nodes = defaultdict(list)
+        for node, level in levels.items():
+            level_nodes[level].append(node)
+        
+        # Position nodes using layered approach
+        # Each level is a horizontal layer, nodes distributed evenly
+        max_level = max(levels.values()) if levels else 0
+        
+        # Calculate width needed for this component
+        max_nodes_at_level = max(len(nodes) for nodes in level_nodes.values()) if level_nodes else 1
+        component_width = max_nodes_at_level * 4  # Horizontal spacing = 4 units
+        
+        # Position nodes level by level
+        for level in range(max_level + 1):
+            nodes_at_level = sorted(level_nodes[level])
+            n_nodes = len(nodes_at_level)
+            
+            if n_nodes == 0:
+                continue
+            
+            # Calculate x positions for this level
+            if n_nodes == 1:
+                # Single node - center it
+                x_positions = [component_offset + component_width / 2]
+            else:
+                # Multiple nodes - distribute evenly
+                spacing = component_width / (n_nodes + 1)
+                x_positions = [component_offset + spacing * (i + 1) for i in range(n_nodes)]
+            
+            # Assign positions
+            for node, x in zip(nodes_at_level, x_positions):
+                y = -level * 5  # Vertical spacing = 5 units
+                pos[node] = (x, y)
+        
+        # Update offset for next component
+        component_offset += component_width + 15  # 15 units gap between components
     
     return net, G, pos
 
@@ -139,23 +221,52 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
         
         spatial_unc = uncertainty_data[frac]['spatial']
         
-        # Draw network
-        nx.draw_networkx_edges(G, pos, ax=ax, alpha=0.3, width=2, edge_color='gray')
+        # Adjust node size based on number of buses
+        num_buses = len(G.nodes())
+        if num_buses <= 33:
+            node_size = 350
+            font_size = 9
+        elif num_buses <= 57:
+            node_size = 280
+            font_size = 8
+        else:
+            node_size = 180
+            font_size = 7
+        
+        # Draw edges FIRST (background layer)
+        # The improved layouts ensure nodes don't overlap with edges
+        nx.draw_networkx_edges(
+            G, pos, ax=ax, 
+            alpha=0.5, 
+            width=2.5, 
+            edge_color='#666666'
+        )
         
         # Draw nodes colored by uncertainty
         nodes = nx.draw_networkx_nodes(
             G, pos, ax=ax,
             node_color=spatial_unc,
-            node_size=500,
+            node_size=node_size,
             cmap='YlOrRd',
             vmin=vmin,
             vmax=vmax,
             edgecolors='black',
-            linewidths=1.5
+            linewidths=2.0,
+            alpha=0.95
         )
         
         # Add node labels
-        nx.draw_networkx_labels(G, pos, ax=ax, font_size=8, font_weight='bold')
+        labels = nx.draw_networkx_labels(G, pos, ax=ax, font_size=font_size, 
+                                        font_weight='bold', font_color='black')
+        
+        # Draw edges AGAIN on top (foreground layer)
+        # This ensures edges are visible even if they pass near nodes
+        nx.draw_networkx_edges(
+            G, pos, ax=ax, 
+            alpha=0.25, 
+            width=2.5, 
+            edge_color='#333333'
+        )
         
         # Title
         ax.set_title(f'{int(frac*100)}% Renewables\n(Mean σ: {uncertainty_data[frac]["mean_spatial"]:.4f} p.u.)',
@@ -182,7 +293,7 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
 
 
 def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
-                                   output_path: str, model_name: str = ""):
+                                   output_path: str, model_name: str = "", config=None):
     """
     Generate temporal uncertainty comparison with 6 curves overlaid.
     
@@ -191,6 +302,7 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         case_name: Name of the test case
         output_path: Where to save the output image
         model_name: Optional model name for title
+        config: Optional config object to check if using time-series mode
     """
     fig, ax = plt.subplots(figsize=(14, 8))
     
@@ -200,22 +312,44 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     # Color map for different renewable fractions
     colors = plt.cm.viridis(np.linspace(0, 1, len(fractions)))
     
+    # Determine if we should use hours or timesteps for x-axis
+    use_time_series = getattr(config, 'USE_TIME_SERIES', False) if config else False
+    hours_per_day = getattr(config, 'HOURS_PER_DAY', 24) if config else 24
+    
     for frac, color in zip(fractions, colors):
         temporal_unc = uncertainty_data[frac]['temporal']
-        timesteps = np.arange(len(temporal_unc))
+        n_points = len(temporal_unc)
+        
+        if use_time_series:
+            # TIME-SERIES MODE: X-axis shows hours (0-24)
+            # Map timesteps to hours within a day
+            hours = np.arange(n_points) % hours_per_day
+            x_values = hours
+        else:
+            # MONTE CARLO MODE: X-axis shows timesteps
+            x_values = np.arange(n_points)
         
         # Plot with label
-        ax.plot(timesteps, temporal_unc, 
+        ax.plot(x_values, temporal_unc, 
                label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
-               color=color, linewidth=2, alpha=0.8)
+               color=color, linewidth=2, alpha=0.8, marker='o', markersize=4)
     
     # Labels and title
-    ax.set_xlabel('Timestep (e.g., hour)', fontsize=14, fontweight='bold')
+    if use_time_series:
+        ax.set_xlabel('Hour of Day', fontsize=14, fontweight='bold')
+        # Set x-axis to show 0-24 hours
+        ax.set_xlim(0, hours_per_day)
+        ax.set_xticks(np.arange(0, hours_per_day+1, 3))  # Show every 3 hours
+    else:
+        ax.set_xlabel('Timestep', fontsize=14, fontweight='bold')
+    
     ax.set_ylabel('Mean System Uncertainty σ_t (p.u.)', fontsize=14, fontweight='bold')
     
     title = f'Temporal Uncertainty Curve - {case_name.upper()}'
     if model_name:
         title += f' - {model_name}'
+    if use_time_series:
+        title += ' (Daily Cycle)'
     ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
     
     # Legend
@@ -230,11 +364,12 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     # Save
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
+    print(f"[Uncertainty] Saved temporal comparison: {output_path}")
 
 
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
                                        renewable_fractions: np.ndarray, case_name: str,
-                                       output_dir: str, model_name: str = ""):
+                                       output_dir: str, model_name: str = "", config=None):
     """
     Main function to generate all uncertainty visualizations.
     
@@ -245,6 +380,7 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
         case_name: Test case name (e.g., "case33")
         output_dir: Directory to save outputs
         model_name: Optional model name for titles and filenames
+        config: Optional config object for time-series mode detection
     
     Returns:
         uncertainty_data: Dictionary with all calculated metrics
@@ -257,13 +393,13 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Generate spatial comparison grid
+    # Generate spatial comparison grid (topology-aware)
     spatial_output = os.path.join(output_dir, 'uncertainty_spatial_comparison.png')
     plot_spatial_comparison_grid(uncertainty_data, case_name, spatial_output, model_name)
     
-    # Generate temporal comparison curves
+    # Generate temporal comparison curves (hours if time-series mode)
     temporal_output = os.path.join(output_dir, 'uncertainty_temporal_comparison.png')
-    plot_temporal_comparison_curves(uncertainty_data, case_name, temporal_output, model_name)
+    plot_temporal_comparison_curves(uncertainty_data, case_name, temporal_output, model_name, config)
     
     return uncertainty_data
 

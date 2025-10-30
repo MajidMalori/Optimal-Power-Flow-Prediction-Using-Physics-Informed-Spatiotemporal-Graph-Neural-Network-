@@ -149,7 +149,7 @@ from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluat
                              save_best_model_results, print_comprehensive_summary, print_model_summary)
 from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from trainers.model_trainer import PowerSystemTrainer
-from config import Config
+from config import Config, Args
 
 
 def setup_logging(log_path: str):
@@ -204,35 +204,17 @@ def main():
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         print("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
-    class Args:
-        # Configuration for models to test - now centralized in config
-        test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-        bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-        models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
-        data_mode = 'test'  # Options: 'train' or 'test'
-        test_timesteps = 20  # Number of timesteps for test mode (100 for quick debug, 1000 for thorough testing)
-        seed = 42
-        
-        # === RESULTS SAVING CONFIGURATION ===
-        save_results = True  # False: No files saved (console output only), True: Save all results
-        clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
-        
-        # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
-        use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)
-        num_trials = 20  # Only used if use_mosoa=False
-        
-        # === PARALLEL TRAINING CONFIGURATION ===
-        # Device configuration
-        force_cpu = False  # Set to True to force CPU training even if GPU is available
-        
-        # Parallel training mode
-        parallel_data_loading = True   # DISABLED for low-RAM systems (< 2GB available)
-        
-        # Worker configuration (auto-configured based on device if set to 'auto')
-        data_workers = 'auto'         # Number of data loading workers
-    
+    # Initialize arguments from centralized config
     args = Args()
-    base_config = Config(data_mode=args.data_mode, save_results=args.save_results, test_timesteps=args.test_timesteps, clear_results=args.clear_results)
+    base_config = Config(
+        data_mode=args.data_mode, 
+        save_results=args.save_results, 
+        test_timesteps=args.test_timesteps, 
+        clear_results=args.clear_results,
+        use_time_series=args.use_time_series,
+        hours_per_day=args.hours_per_day,
+        sequence_length=args.sequence_length
+    )
     _config_instance = base_config  # Store for signal handler
     
     # Parse bus systems to test
@@ -628,7 +610,8 @@ def main():
                         renewable_fractions=uncertainty_data['renewable_fractions'],
                         case_name=case_name,
                         output_dir=model_output_dir,
-                        model_name=model_name
+                        model_name=model_name,
+                        config=best_config  # Pass config for time-series mode detection
                     )
                 except Exception as e:
                     print(f"  Warning: Could not generate uncertainty visualizations: {e}")
