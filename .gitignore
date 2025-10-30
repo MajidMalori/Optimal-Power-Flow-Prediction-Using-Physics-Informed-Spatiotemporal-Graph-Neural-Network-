@@ -27,6 +27,7 @@ train_scalable.py
 test_physics_loss.py
 maxsea.
 analyze_results.py
+analyze_convergence.py
 
 # Images and plots
 *.png

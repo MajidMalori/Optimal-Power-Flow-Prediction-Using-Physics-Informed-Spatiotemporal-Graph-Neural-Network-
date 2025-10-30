@@ -230,7 +230,6 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     # Save
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"[Uncertainty] Saved temporal comparison: {output_path}")
 
 
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
@@ -265,8 +264,6 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     # Generate temporal comparison curves
     temporal_output = os.path.join(output_dir, 'uncertainty_temporal_comparison.png')
     plot_temporal_comparison_curves(uncertainty_data, case_name, temporal_output, model_name)
-    
-    print(f"[Uncertainty] ✓ Generated 2 uncertainty visualizations in {output_dir}")
     
     return uncertainty_data
 
