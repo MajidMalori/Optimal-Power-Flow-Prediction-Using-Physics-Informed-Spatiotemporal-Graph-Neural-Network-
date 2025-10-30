@@ -144,9 +144,10 @@ from utils.data_validation import validate_data_before_training
 from utils.optimization import (mosoa_optimizer, trial_based_search, setup_hyperparameter_bounds, create_model_kwargs, 
                                generate_run_name, process_optimization_params, 
                                calculate_objective_score)
-from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_moopf_objectives, 
-                             evaluate_moopf_objectives_normalized, save_best_model_results, print_comprehensive_summary,
-                             print_model_summary)
+from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_model_with_uncertainty,
+                             evaluate_moopf_objectives, evaluate_moopf_objectives_normalized, 
+                             save_best_model_results, print_comprehensive_summary, print_model_summary)
+from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from trainers.model_trainer import PowerSystemTrainer
 from config import Config
 
@@ -209,11 +210,12 @@ def main():
         bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
         models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
         data_mode = 'test'  # Options: 'train' or 'test'
-        test_timesteps = 1000  # Number of timesteps for test mode (100 for quick debug, 1000 for thorough testing)
+        test_timesteps = 20  # Number of timesteps for test mode (100 for quick debug, 1000 for thorough testing)
         seed = 42
         
         # === RESULTS SAVING CONFIGURATION ===
         save_results = True  # False: No files saved (console output only), True: Save all results
+        clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
         
         # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
         use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)
@@ -230,7 +232,7 @@ def main():
         data_workers = 'auto'         # Number of data loading workers
     
     args = Args()
-    base_config = Config(data_mode=args.data_mode, save_results=args.save_results, test_timesteps=args.test_timesteps)
+    base_config = Config(data_mode=args.data_mode, save_results=args.save_results, test_timesteps=args.test_timesteps, clear_results=args.clear_results)
     _config_instance = base_config  # Store for signal handler
     
     # Parse bus systems to test
@@ -601,6 +603,38 @@ def main():
                 model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
             )
             
+            # Generate uncertainty visualizations
+            if base_config.SAVE_RESULTS and base_config.DATA_MODE == 'test':
+                try:
+                    print(f"\n[Uncertainty] Generating uncertainty visualizations for {model_name}...")
+                    # Get predictions with uncertainty data
+                    _, uncertainty_data = evaluate_model_with_uncertainty(
+                        model_to_eval, test_loader_best, device, best_config, _normalizer, is_sequential
+                    )
+                    
+                    # Generate and save uncertainty graphs in model-specific folder
+                    case_name = f"case{num_buses}"
+                    model_output_dir = os.path.join(
+                        base_config.CURRENT_RUN_DIR, 
+                        f"{num_buses}bus", 
+                        "models", 
+                        model_name
+                    )
+                    os.makedirs(model_output_dir, exist_ok=True)
+                    
+                    generate_uncertainty_visualizations(
+                        predictions=uncertainty_data['predictions'],
+                        targets=uncertainty_data['targets'],
+                        renewable_fractions=uncertainty_data['renewable_fractions'],
+                        case_name=case_name,
+                        output_dir=model_output_dir,
+                        model_name=model_name
+                    )
+                except Exception as e:
+                    print(f"  Warning: Could not generate uncertainty visualizations: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
             # Calculate final test performance metric for comparison
             if is_physics_informed:
                 # Use MSE as the primary metric, but track MOOPF score separately
@@ -677,6 +711,37 @@ def main():
                     create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
                 except Exception as e:
                     print(f"  Warning: Could not create convergence plots: {e}")
+            
+            # Copy best model's uncertainty graphs to bus system level
+            if base_config.DATA_MODE == 'test' and all_results:
+                try:
+                    # Find best model for this bus system
+                    bus_results = [r for r in all_results if r['num_buses'] == num_buses and r['final_test_score'] != float('inf')]
+                    if bus_results:
+                        best_bus_result = min(bus_results, key=lambda x: x['final_test_score'])
+                        best_bus_model_name = best_bus_result['model_name']
+                        
+                        # Source: model's uncertainty graphs
+                        model_uncertainty_dir = os.path.join(
+                            base_config.CURRENT_RUN_DIR,
+                            f"{num_buses}bus",
+                            "models",
+                            best_bus_model_name
+                        )
+                        
+                        # Destination: bus system level
+                        bus_system_dir = os.path.join(base_config.CURRENT_RUN_DIR, f"{num_buses}bus")
+                        
+                        # Copy uncertainty graphs if they exist
+                        import shutil
+                        for uncertainty_file in ['uncertainty_spatial_comparison.png', 'uncertainty_temporal_comparison.png']:
+                            src = os.path.join(model_uncertainty_dir, uncertainty_file)
+                            dst = os.path.join(bus_system_dir, uncertainty_file)
+                            if os.path.exists(src):
+                                shutil.copy2(src, dst)
+                                print(f"[Uncertainty] Copied {uncertainty_file} from best model ({best_bus_model_name}) to {num_buses}bus folder")
+                except Exception as e:
+                    print(f"  Warning: Could not copy best model's uncertainty graphs: {e}")
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()

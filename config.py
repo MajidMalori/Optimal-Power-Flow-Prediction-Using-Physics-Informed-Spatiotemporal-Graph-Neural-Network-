@@ -21,7 +21,7 @@ class Config:
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 5
+    NUM_EPOCHS = 1
     EARLY_STOPPING_PATIENCE = 25
     TRAIN_SPLIT = 0.7
     VAL_SPLIT = 0.15
@@ -231,10 +231,20 @@ class Config:
     # INITIALIZATION
     # =============================================================================
 
-    def __init__(self, data_mode='train', save_results=True, test_timesteps=100):
+    def __init__(self, data_mode='train', save_results=True, test_timesteps=100, clear_results=False):
         """Initializes directories and sets up experimental run structure."""
         # Set save_results flag
         self.SAVE_RESULTS = save_results
+        
+        # Clear experimental results folder if requested
+        if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
+            import shutil
+            try:
+                print(f"\n[Clear Results] Deleting experimental_results folder...")
+                shutil.rmtree(self.EXPERIMENTAL_RESULTS_DIR)
+                print(f"[Clear Results] ✓ Successfully deleted: {self.EXPERIMENTAL_RESULTS_DIR}")
+            except Exception as e:
+                print(f"[Clear Results] ✗ Warning: Could not delete experimental_results folder: {e}")
         
         # Update test timesteps if provided
         if data_mode == 'test' and test_timesteps != self.DATA_MODE_TIMESTEPS['test']:

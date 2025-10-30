@@ -15,6 +15,7 @@ from datetime import datetime
 # SECTION 1: CONFIGURATION
 # =============================================================================
 CONFIG = {
+    "random_seed": 42,  # For reproducibility - set to None for non-deterministic behavior
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
     "time_steps": 10000,  # Will be overridden by command-line argument if provided
     "output_dir": "./data", # Base directory - mode-specific subdirectory will be appended
@@ -487,6 +488,16 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
 # =============================================================================
 if __name__ == "__main__":
     import sys
+    import random
+    
+    # Set random seeds for reproducibility
+    if CONFIG["random_seed"] is not None:
+        print(f"\nSetting random seed: {CONFIG['random_seed']} (for reproducibility)")
+        np.random.seed(CONFIG["random_seed"])
+        random.seed(CONFIG["random_seed"])
+        # Note: pandapower uses numpy's random state internally, so np.random.seed() covers it
+    else:
+        print("\nWARNING: No random seed set - results will not be reproducible!")
     
     # Parse command-line arguments for data mode and timesteps
     data_mode = 'train'  # Default

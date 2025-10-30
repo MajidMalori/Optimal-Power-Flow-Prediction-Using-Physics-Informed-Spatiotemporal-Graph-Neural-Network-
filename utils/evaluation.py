@@ -71,6 +71,80 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
 
 
+def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.utils.data.DataLoader, 
+                                   device: torch.device, config: Any, normalizer: Any, 
+                                   is_sequential: bool) -> Tuple[Dict[str, float], Dict]:
+    """
+    Evaluates the model and returns both metrics and raw data for uncertainty analysis.
+    
+    Returns:
+        metrics: Dictionary of performance metrics
+        uncertainty_data: Dictionary containing:
+            - 'predictions': numpy array [n_samples, n_buses, n_features]
+            - 'targets': numpy array [n_samples, n_buses, n_features]
+            - 'renewable_fractions': numpy array [n_samples]
+    """
+    model.eval()
+    all_outputs, all_targets = [], []
+    all_ybus = []
+    all_renewable_fractions = []
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            features = batch['features'].to(device)
+            targets = batch['targets'].to(device)
+            adj = batch['adjacency'].to(device)
+            ybus = batch['ybus_matrix'].to(device)
+            renewable_fraction = batch['renewable_fraction']  # Get renewable fraction
+
+            # Handle sequential vs non-sequential models
+            if is_sequential and features.dim() == 3:
+                features_input = features[:, -1, :]
+            else:
+                features_input = features
+            
+            outputs = model(features_input, adj)
+
+            all_outputs.append(outputs)
+            all_targets.append(targets)
+            all_ybus.append(ybus)
+            all_renewable_fractions.append(renewable_fraction)
+
+    all_outputs_tensor = torch.cat(all_outputs, dim=0)
+    all_targets_tensor = torch.cat(all_targets, dim=0)
+    all_ybus_tensor = torch.cat(all_ybus, dim=0)
+    all_renewable_fractions_tensor = torch.cat(all_renewable_fractions, dim=0)
+
+    # Get num_buses dynamically from config
+    if hasattr(config, 'NUM_BUSES'):
+        num_buses = config.NUM_BUSES
+        if isinstance(num_buses, list):
+            num_buses = num_buses[0]
+    else:
+        raise ValueError("Config must specify NUM_BUSES")
+    
+    # Handle shape consistency
+    if all_outputs_tensor.dim() == 2:
+        batch_size = all_outputs_tensor.shape[0]
+        num_features = 10
+        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+    
+    outputs_denorm = normalizer.denormalize(all_outputs_tensor)
+    targets_denorm = normalizer.denormalize(all_targets_tensor)
+
+    # Compute metrics
+    metrics = compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
+    
+    # Prepare uncertainty data
+    uncertainty_data = {
+        'predictions': outputs_denorm.cpu().numpy(),
+        'targets': targets_denorm.cpu().numpy(),
+        'renewable_fractions': all_renewable_fractions_tensor.cpu().numpy()
+    }
+    
+    return metrics, uncertainty_data
+
+
 def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, 
                               config: object, normalizer: Any) -> Dict[str, float]:
     """Computes metrics on normalized data (same scale as training) for MoSOA optimization."""
