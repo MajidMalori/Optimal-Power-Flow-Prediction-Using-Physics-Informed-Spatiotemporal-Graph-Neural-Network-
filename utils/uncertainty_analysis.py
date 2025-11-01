@@ -80,13 +80,16 @@ def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray,
     errors = v_pred - v_true  # [n_samples, n_buses]
     
     # Get unique renewable fractions
-    unique_fractions = np.unique(renewable_fractions)
+    # IMPORTANT: Round to 1 decimal place to avoid floating point precision issues
+    # This ensures keys like 0.2 don't become 0.19999999 or 0.20000001
+    renewable_fractions_rounded = np.round(renewable_fractions, decimals=1)
+    unique_fractions = np.unique(renewable_fractions_rounded)
     
     uncertainty_data = {}
     
     for frac in unique_fractions:
-        # Get indices for this fraction
-        mask = renewable_fractions == frac
+        # Get indices for this fraction (using rounded values for stable comparison)
+        mask = renewable_fractions_rounded == frac
         frac_errors = errors[mask]  # [n_frac_samples, n_buses]
         
         # Spatial uncertainty: std across time for each bus
@@ -95,7 +98,8 @@ def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray,
         # Temporal uncertainty: mean absolute error across buses for each timestep
         temporal_uncertainty = np.mean(np.abs(frac_errors), axis=1)  # [n_frac_samples]
         
-        uncertainty_data[float(frac)] = {
+        # Use rounded float as key to match expected_fractions exactly
+        uncertainty_data[round(float(frac), 1)] = {
             'spatial': spatial_uncertainty,
             'temporal': temporal_uncertainty,
             'mean_spatial': np.mean(spatial_uncertainty),
@@ -124,42 +128,57 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
     fig = plt.figure(figsize=(18, 12))
     gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
     
-    # Sort renewable fractions
-    fractions = sorted(uncertainty_data.keys())
+    # FIXED: Expect all 6 standard renewable fractions
+    expected_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    available_fractions = set(uncertainty_data.keys())
     
-    # Color map limits (use global min/max for consistent color scale)
-    all_spatial = [uncertainty_data[f]['spatial'] for f in fractions]
-    vmin = min(s.min() for s in all_spatial)
-    vmax = max(s.max() for s in all_spatial)
+    # Color map limits (use global min/max for consistent color scale across available data)
+    if available_fractions:
+        all_spatial = [uncertainty_data[f]['spatial'] for f in available_fractions]
+        vmin = min(s.min() for s in all_spatial)
+        vmax = max(s.max() for s in all_spatial)
+    else:
+        vmin, vmax = 0, 0.001
     
-    for idx, frac in enumerate(fractions):
+    for idx, frac in enumerate(expected_fractions):
         row = idx // 3
         col = idx % 3
         ax = fig.add_subplot(gs[row, col])
         
-        spatial_unc = uncertainty_data[frac]['spatial']
+        if frac in uncertainty_data:
+            # Data available - plot it
+            spatial_unc = uncertainty_data[frac]['spatial']
+            
+            # Draw network
+            nx.draw_networkx_edges(G, pos, ax=ax, alpha=0.3, width=2, edge_color='gray')
+            
+            # Draw nodes colored by uncertainty
+            nodes = nx.draw_networkx_nodes(
+                G, pos, ax=ax,
+                node_color=spatial_unc,
+                node_size=500,
+                cmap='YlOrRd',
+                vmin=vmin,
+                vmax=vmax,
+                edgecolors='black',
+                linewidths=1.5
+            )
+            
+            # Add node labels
+            nx.draw_networkx_labels(G, pos, ax=ax, font_size=8, font_weight='bold')
+            
+            # Title
+            ax.set_title(f'{int(frac*100)}% Renewables\n(Mean σ: {uncertainty_data[frac]["mean_spatial"]:.4f} p.u.)',
+                        fontsize=12, fontweight='bold')
+        else:
+            # Data missing - show placeholder (shouldn't happen with stratified split)
+            ax.text(0.5, 0.5, f'{int(frac*100)}% Renewables\n(No data available)', 
+                   transform=ax.transAxes, ha='center', va='center',
+                   fontsize=12, fontweight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.7))
+            ax.set_title(f'{int(frac*100)}% Renewables', fontsize=12, fontweight='bold')
+            print(f"[Uncertainty] WARNING: No data for {int(frac*100)}% renewables - check data generation")
         
-        # Draw network
-        nx.draw_networkx_edges(G, pos, ax=ax, alpha=0.3, width=2, edge_color='gray')
-        
-        # Draw nodes colored by uncertainty
-        nodes = nx.draw_networkx_nodes(
-            G, pos, ax=ax,
-            node_color=spatial_unc,
-            node_size=500,
-            cmap='YlOrRd',
-            vmin=vmin,
-            vmax=vmax,
-            edgecolors='black',
-            linewidths=1.5
-        )
-        
-        # Add node labels
-        nx.draw_networkx_labels(G, pos, ax=ax, font_size=8, font_weight='bold')
-        
-        # Title
-        ax.set_title(f'{int(frac*100)}% Renewables\n(Mean σ: {uncertainty_data[frac]["mean_spatial"]:.4f} p.u.)',
-                    fontsize=12, fontweight='bold')
         ax.axis('off')
     
     # Add colorbar
@@ -184,7 +203,7 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
 def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
                                    output_path: str, model_name: str = "", config=None):
     """
-    Generate temporal uncertainty comparison with 6 curves overlaid.
+    Generate temporal uncertainty comparison with curves for available renewable fractions.
     
     Args:
         uncertainty_data: Dictionary with uncertainty metrics per renewable fraction
@@ -195,8 +214,32 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     """
     fig, ax = plt.subplots(figsize=(14, 8))
     
-    # Sort renewable fractions
+    # FIXED: Use only available fractions, handle missing gracefully
     fractions = sorted(uncertainty_data.keys())
+    
+    if not fractions:
+        # No data available at all
+        ax.text(0.5, 0.5, 'No uncertainty data available in test set', 
+               transform=ax.transAxes, ha='center', va='center',
+               fontsize=14, fontweight='bold')
+        ax.set_xlabel('Timestep', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Mean System Uncertainty σ_t (p.u.)', fontsize=14, fontweight='bold')
+        ax.set_title(f'Temporal Uncertainty - {case_name.upper()} - {model_name}', 
+                    fontsize=16, fontweight='bold', pad=20)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[Uncertainty] WARNING: No test data for temporal comparison: {output_path}")
+        return
+    
+    # Continue with available fractions
+    expected_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    missing_fractions = [f for f in expected_fractions if f not in fractions]
+    
+    # Warn about missing fractions (shouldn't happen with stratified split, but check anyway)
+    if missing_fractions:
+        missing_pct = [int(f*100) for f in missing_fractions]
+        print(f"[Uncertainty] INFO: Test set missing renewable fractions: {missing_pct}% (reduced data or edge case)")
     
     # Color map for different renewable fractions
     colors = plt.cm.viridis(np.linspace(0, 1, len(fractions)))
@@ -209,26 +252,32 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         temporal_unc = uncertainty_data[frac]['temporal']
         n_points = len(temporal_unc)
         
-        if use_time_series and n_points == hours_per_day:
-            # TIME-SERIES MODE with exactly 24 samples: X-axis shows hours (0-23)
-            # This means each sample represents one hour of the day
-            hours = np.arange(n_points)
-            x_values = hours
+        if use_time_series:
+            # TIME-SERIES MODE: Map timesteps to hours of day (modulo 24)
+            # This shows the daily cycle pattern regardless of number of samples
+            x_values = np.arange(n_points) % hours_per_day
+            # Sort by hour of day for cleaner visualization
+            sort_idx = np.argsort(x_values)
+            x_values_sorted = x_values[sort_idx]
+            temporal_unc_sorted = temporal_unc[sort_idx]
+            
+            ax.plot(x_values_sorted, temporal_unc_sorted, 
+                   label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
+                   color=color, linewidth=2, alpha=0.8, marker='o', markersize=3)
         else:
-            # MONTE CARLO MODE or non-24-hour data: X-axis shows timesteps
+            # MONTE CARLO MODE: X-axis shows timesteps
             x_values = np.arange(n_points)
-        
-        # Plot with label
-        ax.plot(x_values, temporal_unc, 
-               label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
-               color=color, linewidth=2, alpha=0.8, marker='o', markersize=4)
+            ax.plot(x_values, temporal_unc, 
+                   label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
+                   color=color, linewidth=2, alpha=0.8, marker='o', markersize=4)
     
     # Labels and title
-    if use_time_series and len(temporal_unc) == hours_per_day:
+    if use_time_series:
         ax.set_xlabel('Hour of Day', fontsize=14, fontweight='bold')
         # Set x-axis to show 0-23 hours
         ax.set_xlim(-0.5, hours_per_day - 0.5)
         ax.set_xticks(np.arange(0, hours_per_day, 3))  # Show every 3 hours
+        ax.set_xticklabels([f'{h}:00' for h in range(0, hours_per_day, 3)])  # Format as times
     else:
         ax.set_xlabel('Timestep', fontsize=14, fontweight='bold')
     
@@ -237,8 +286,8 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     title = f'Temporal Uncertainty Curve - {case_name.upper()}'
     if model_name:
         title += f' - {model_name}'
-    if use_time_series and len(temporal_unc) == hours_per_day:
-        title += ' (Daily Cycle)'
+    if use_time_series:
+        title += ' (Daily Cycle Pattern)'
     ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
     
     # Legend
@@ -283,11 +332,11 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     os.makedirs(output_dir, exist_ok=True)
     
     # Generate spatial comparison grid
-    spatial_output = os.path.join(output_dir, 'uncertainty_spatial_comparison.png')
+    spatial_output = os.path.join(output_dir, 'uncertainty_spatial.png')
     plot_spatial_comparison_grid(uncertainty_data, case_name, spatial_output, model_name)
     
     # Generate temporal comparison curves (hours if time-series mode)
-    temporal_output = os.path.join(output_dir, 'uncertainty_temporal_comparison.png')
+    temporal_output = os.path.join(output_dir, 'uncertainty_temporal.png')
     plot_temporal_comparison_curves(uncertainty_data, case_name, temporal_output, model_name, config)
     
     return uncertainty_data

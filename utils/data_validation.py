@@ -548,69 +548,25 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
             if frac in all_data[num_buses]:
                 stats = all_data[num_buses][frac]
                 has_cont_fail = len(stats['failed_with_contingency']) > 0
-                icon = "WARNING" if has_cont_fail else "OK"
+                icon = "⚠" if has_cont_fail else "✓"
                 rate = stats['success_rate']
                 
-                # Compact display with fixed width
-                if stats['failed'] > 0:
-                    nf = len(stats['failed_no_contingency'])
-                    cf = len(stats['failed_with_contingency'])
-                    if cf > 0:
-                        cell = f"{icon}{rate:5.1f}% {nf}N{cf}C"
-                    else:
-                        cell = f"{icon}{rate:5.1f}% {nf}N"
-                else:
-                    cell = f"{icon}{rate:5.1f}%"
+                # Simple display showing just icon and success rate
+                cell = f"{icon} {rate:5.1f}%"
                 
-                # Pad to fixed width (accounting for emoji width issues, just right-pad with spaces)
+                # Pad to fixed width
                 row += f"| {cell:<{col_width-3}} "
             else:
                 row += f"| {'---':<{col_width-3}} "
         print(row)
     
-    print("\nSummary:")
-    print("  N = Normal failures (no contingency), C = Contingency failures")
-    
-    # Count contingency-specific failures across all scenarios
-    total_contingency_failures = 0
-    total_normal_failures = 0
-    total_contingency_timesteps = 0
-    
-    # Re-scan all convergence reports for detailed counts
-    for num_buses in bus_systems:
-        case_name = f"case{num_buses}"
-        for frac in renewable_fractions:
-            pattern = f"{case_name}_convergence_report_frac{frac:.1f}_*.json"
-            report_files = glob.glob(os.path.join(data_dir, pattern))
-            if report_files:
-                with open(sorted(report_files)[-1], 'r') as f:
-                    stats = json.load(f)
-                total_contingency_failures += len(stats['failed_with_contingency'])
-                total_normal_failures += len(stats['failed_no_contingency'])
-                total_contingency_timesteps += len(stats['failed_with_contingency']) + len([t for t in range(stats['total_timesteps']) if t not in stats['failed_no_contingency'] and t not in stats['failed_with_contingency']])
-    
+    # Calculate summary statistics
     total_timesteps = total_successful + total_failed
     overall_rate = (total_successful / total_timesteps * 100) if total_timesteps > 0 else 0
-    contingency_success_rate = ((total_contingency_timesteps - total_contingency_failures) / total_contingency_timesteps * 100) if total_contingency_timesteps > 0 else 100
     
-    # Count fallback usage across all scenarios
-    total_fallback_used = 0
-    for num_buses in bus_systems:
-        case_name = f"case{num_buses}"
-        for frac in renewable_fractions:
-            pattern = f"{case_name}_convergence_report_frac{frac:.1f}_*.json"
-            report_files = glob.glob(os.path.join(data_dir, pattern))
-            if report_files:
-                with open(sorted(report_files)[-1], 'r') as f:
-                    stats = json.load(f)
-                total_fallback_used += stats.get('fallback_used', 0)
-    
-    print(f"  • Overall: {overall_rate:.1f}% ({total_successful}/{total_timesteps}) | Normal fail: {total_normal_failures}N Contingency fail: {total_contingency_failures}C")
-    print(f"  • Critical: {contingency_success_rate:.1f}% contingency success")
-    if total_fallback_used > 0:
-        print(f"  • Fallback: {total_fallback_used} timesteps used previous successful data")
+    print(f"\nOverall convergence: {overall_rate:.1f}% ({total_successful}/{total_timesteps} timesteps)")
     if scenarios_with_failures:
-        print(f"  • WARNING: {len(scenarios_with_failures)} scenario(s) with contingency failures")
+        print(f"Note: {len(scenarios_with_failures)} scenario(s) with contingency failures")
     print("="*80)
 
 def force_clean_all_data(config) -> bool:

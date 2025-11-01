@@ -7,6 +7,16 @@ from tqdm import tqdm
 from typing import Dict, List, Tuple, Callable, Any
 
 
+def _format_value(val: float) -> str:
+    """Format a value to 6-7 significant figures for concise display."""
+    if isinstance(val, (np.integer, int)):
+        return str(int(val))
+    elif abs(val) < 0.01 or abs(val) > 1000:
+        return f"{val:.5g}"  # Scientific notation for very small/large
+    else:
+        return f"{val:.6g}"  # 6 significant figures
+
+
 def _init_positions(num_agents: int, dim: int, upper_bound: np.ndarray, lower_bound: np.ndarray) -> np.ndarray:
     """Initialize positions for optimization agents within bounds."""
     if isinstance(upper_bound, (int, float)): 
@@ -21,7 +31,7 @@ def _init_positions(num_agents: int, dim: int, upper_bound: np.ndarray, lower_bo
 
 
 def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarray, upper_bound: np.ndarray,
-                   dim: int, objective_func: Callable) -> Tuple[float, np.ndarray, List[float], List[Dict]]:
+                   dim: int, objective_func: Callable, param_keys: List[str] = None) -> Tuple[float, np.ndarray, List[float], List[Dict]]:
     """
     Modified Seagull Optimization Algorithm (MoSOA) for hyperparameter optimization.
     
@@ -32,6 +42,7 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         upper_bound: Upper bounds for parameters
         dim: Dimension of parameter space
         objective_func: Function to minimize
+        param_keys: Optional list of parameter names for display
         
     Returns:
         Tuple of (best_score, best_position, convergence_history, iteration_details)
@@ -54,8 +65,7 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
     fc_min, fc_max = 0.0, 2.0
     
     # --- 2. Main Optimization Loop ---
-    pbar = tqdm(range(max_iterations), desc="MoSOA Progress")
-    for l in pbar:
+    for l in range(max_iterations):
         # --- 2a. Fitness Evaluation and Global Best Update ---
         fitness_all = np.full(num_agents, np.inf)
         for i in range(num_agents):
@@ -105,7 +115,13 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         })
         
         convergence_curve.append(best_score)
-        pbar.set_description(f"MoSOA Iteration {l+1}/{max_iterations} | Best Score: {best_score:.6e}")
+        
+        # Format hyperparameters concisely for display
+        if param_keys:
+            params_str = ", ".join([f"{k}={_format_value(best_position[i])}" for i, k in enumerate(param_keys)])
+            print(f"MoSOA iter {l+1}/{max_iterations} | Score: {best_score:.6g} | {params_str}")
+        else:
+            print(f"MoSOA iter {l+1}/{max_iterations} | Score: {best_score:.6g}")
 
     return best_score, best_position, convergence_curve, iteration_details
 
@@ -234,6 +250,19 @@ def process_optimization_params(param_keys: List[str], param_values: np.ndarray)
             params[k] = int(round(params[k]))
     
     return params
+
+
+def format_params_concise(params: Dict[str, Any]) -> str:
+    """Format parameters dictionary concisely for display."""
+    formatted_parts = []
+    for k, v in params.items():
+        if isinstance(v, (int, np.integer)):
+            formatted_parts.append(f"{k}={v}")
+        elif isinstance(v, (float, np.floating)):
+            formatted_parts.append(f"{k}={_format_value(v)}")
+        else:
+            formatted_parts.append(f"{k}={v}")
+    return ", ".join(formatted_parts)
 
 
 def calculate_objective_score(metrics: Dict[str, float], config: Any, is_physics_informed: bool) -> float:

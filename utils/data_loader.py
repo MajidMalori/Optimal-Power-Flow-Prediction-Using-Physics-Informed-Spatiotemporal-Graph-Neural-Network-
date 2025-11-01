@@ -121,8 +121,12 @@ class PowerSystemDataset(Dataset):
         self.num_samples = len(features)
         
     def __len__(self):
-        # The last possible start_idx must leave room for one target time step after the sequence.
-        return self.num_samples - self.sequence_length
+        # For static models: all samples are available
+        # For sequential models: leave room for sequence + target
+        if self.is_static:
+            return self.num_samples
+        else:
+            return self.num_samples - self.sequence_length
 
     def __getitem__(self, idx):
         if self.is_static:
@@ -344,30 +348,63 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
         is_static, seq_len, is_time_series=use_time_series, hours_per_day=hours_per_day
     )
     dataset_size = len(dataset)
-    train_size = int(config.TRAIN_SPLIT * dataset_size)
-    val_size = int(config.VAL_SPLIT * dataset_size)
-    test_size = dataset_size - train_size - val_size
     
-    # For SEQUENTIAL models (time-series), use CONTIGUOUS splits (NO SHUFFLING)
-    # For NON-SEQUENTIAL models, use RANDOM splits (shuffling is fine)
-    if not is_static and use_time_series:
-        # SEQUENTIAL + TIME-SERIES: Contiguous splits to preserve temporal order
-        print("[Data] Using CONTIGUOUS splits (no shuffling) for time-series sequential models")
+    # For TIME-SERIES mode: Use STRATIFIED split by renewable fraction for ALL models
+    # This ensures ALL renewable fractions appear in train/val/test sets
+    if use_time_series:
+        model_type = "sequential" if not is_static else "static"
+        print(f"[Data] Using STRATIFIED split by renewable fraction ({model_type} model)")
         
-        # Create contiguous indices
-        train_indices = list(range(0, train_size))
-        val_indices = list(range(train_size, train_size + val_size))
-        test_indices = list(range(train_size + val_size, dataset_size))
+        # Group indices by renewable fraction
+        unique_fractions = np.unique(renewable_fractions)
+        train_indices, val_indices, test_indices = [], [], []
+        
+        for frac in unique_fractions:
+            # Get all sample indices for this renewable fraction
+            frac_mask = renewable_fractions == frac
+            frac_indices = np.where(frac_mask)[0]
+            
+            # Adjust for sequential models (some indices might be out of bounds)
+            # Only keep indices that are valid for the dataset
+            valid_frac_indices = [idx for idx in frac_indices if idx < dataset_size]
+            
+            if len(valid_frac_indices) == 0:
+                continue
+            
+            # Split THIS fraction's data into train/val/test
+            n_frac = len(valid_frac_indices)
+            n_train = int(config.TRAIN_SPLIT * n_frac)
+            n_val = int(config.VAL_SPLIT * n_frac)
+            
+            # Contiguous splits WITHIN each fraction (preserves temporal order)
+            frac_train = valid_frac_indices[:n_train]
+            frac_val = valid_frac_indices[n_train:n_train + n_val]
+            frac_test = valid_frac_indices[n_train + n_val:]
+            
+            train_indices.extend(frac_train)
+            val_indices.extend(frac_val)
+            test_indices.extend(frac_test)
+        
+        # Sort indices to maintain some temporal structure across fractions
+        train_indices = sorted(train_indices)
+        val_indices = sorted(val_indices)
+        test_indices = sorted(test_indices)
+        
+        print(f"[Data] Stratified split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+        print(f"[Data] Each split contains samples from ALL {len(unique_fractions)} renewable fractions")
         
         train_dataset = torch.utils.data.Subset(dataset, train_indices)
         val_dataset = torch.utils.data.Subset(dataset, val_indices)
         test_dataset = torch.utils.data.Subset(dataset, test_indices)
         
-        # NO SHUFFLING for sequential models
-        shuffle_train = False
+        # Sequential models: NO shuffling (order matters)
+        # Non-sequential models: CAN shuffle (order doesn't matter)
+        shuffle_train = is_static  # True for GCN/adaptiveGCN, False for LSTM/GRU
     else:
-        # NON-SEQUENTIAL or NON-TIME-SERIES: Random splits (can shuffle)
-        print("[Data] Using RANDOM splits (with shuffling) for non-sequential or Monte Carlo models")
+        # NON-TIME-SERIES (Monte Carlo mode): Random splits (can shuffle)
+        train_size = int(config.TRAIN_SPLIT * dataset_size)
+        val_size = int(config.VAL_SPLIT * dataset_size)
+        test_size = dataset_size - train_size - val_size
         
         train_dataset, val_dataset, test_dataset = random_split(
             dataset, [train_size, val_size, test_size],
@@ -403,5 +440,4 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)
     val_loader = DataLoader(val_dataset, **val_test_dataloader_kwargs)
     test_loader = DataLoader(test_dataset, **val_test_dataloader_kwargs)
-    print("[Data] DataLoaders created.")
     return train_loader, val_loader, test_loader

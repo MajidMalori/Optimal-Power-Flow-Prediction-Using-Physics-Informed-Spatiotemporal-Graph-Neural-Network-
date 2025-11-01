@@ -22,7 +22,23 @@ class Args:
     
     # === DATA CONFIGURATION ===
     data_mode = 'test'  # Options: 'train' or 'test'
-    test_timesteps = 20  # Number of timesteps for test mode (100 for quick debug, 1000 for thorough testing)
+    test_timesteps = 1080  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
+    
+    # ┌──────────────────────────────────────────────────────────────────────────┐
+    # │ TIMESTEP REFERENCE TABLE (60/20/20 split with complete 24-hour cycles)  │
+    # ├────────────────┬───────────┬──────┬───────────┬──────────┬──────────────┤
+    # │ Purpose        │ Timesteps │ Days │ Train     │ Val      │ Test         │
+    # ├────────────────┼───────────┼──────┼───────────┼──────────┼──────────────┤
+    # │ Quick test     │    960    │  40  │ 24 days   │  8 days  │  8 days      │
+    # │ Recommended    │   1080    │  45  │ 27 days   │  9 days  │  9 days  ← ✓ │
+    # │ Thorough test  │   1200    │  50  │ 30 days   │ 10 days  │ 10 days      │
+    # │ Light train    │   9000    │ 375  │ 225 days  │ 75 days  │ 75 days      │
+    # │ Recommended    │  10080    │ 420  │ 252 days  │ 84 days  │ 84 days  ← ✓ │
+    # │ Heavy train    │  12000    │ 500  │ 300 days  │ 100 days │ 100 days     │
+    # └────────────────┴───────────┴──────┴───────────┴──────────┴──────────────┘
+    # NOTE: All values ensure complete 24-hour day cycles in train/val/test splits.
+    #       Timesteps must be multiples of 120 (5 days × 24 hours) for 60/20/20 split.
+    #       Use calculate_timesteps.py to compute custom configurations.
     
     # Data generation mode
     use_time_series = True  # True: Time-Series (realistic daily cycles), False: Monte Carlo (random scenarios)
@@ -31,7 +47,7 @@ class Args:
     
     # === RESULTS SAVING CONFIGURATION ===
     save_results = True  # False: No files saved (console output only), True: Save all results
-    clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
+    clear_results = False  # True: Delete experimental_results folder before running, False: Keep old results
     
     # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
     use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)
@@ -438,11 +454,11 @@ class Config:
 
     def get_convergence_plot_path(self, num_buses: int, model_name: str) -> str:
         """Returns the convergence plot path for a specific model."""
-        return os.path.join(self.get_model_eval_dir(num_buses, model_name), "convergence.png")
+        return os.path.join(self.get_model_eval_dir(num_buses, model_name), "mosoa_conv.png")
 
     def get_training_history_path(self, num_buses: int, model_name: str) -> str:
         """Returns the training history plot path for a specific model."""
-        return os.path.join(self.get_model_eval_dir(num_buses, model_name), "training_history.png")
+        return os.path.join(self.get_model_eval_dir(num_buses, model_name), "train_hist.png")
 
     def get_summary_path(self, num_buses: int, model_name: str) -> str:
         """Returns the summary CSV path for a specific model."""

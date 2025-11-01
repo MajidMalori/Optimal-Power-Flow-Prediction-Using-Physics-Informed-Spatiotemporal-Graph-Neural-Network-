@@ -211,7 +211,7 @@ def plot_all_renewable_impacts(renewable_impact_data: pd.DataFrame, config: Any,
 
 def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config: Any, 
                                     num_buses: int, model_name: str):
-    """Plot all renewable impact metrics for a physics-informed model."""
+    """Plot all renewable impact metrics for a physics-informed model in a single 2x2 grid."""
     if renewable_impact_data.empty:
         print(f"ℹ  No renewable impact data to plot for {model_name}")
         return
@@ -219,25 +219,68 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
     # Update metrics dictionary to match column names in renewable_impact_data
     metrics = {
         'normalized_carbon_emissions': 'Carbon Emissions',
-        'voltage_deviation': 'Voltage Deviation',          # Changed from normalized_voltage_deviation
-        'power_loss': 'Power Loss',                        # Changed from normalized_power_loss
-        'power_flow': 'Power Flow'                         # NEW: Added power flow metric
+        'voltage_deviation': 'Voltage Deviation',
+        'power_loss': 'Power Loss',
+        'power_flow': 'Power Flow'
     }
     
-    for metric, label in metrics.items():
+    # Create 2x2 subplot grid
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+    
+    x_col = 'renewable_fraction'
+    
+    for idx, (metric, label) in enumerate(metrics.items()):
+        ax = axes[idx]
+        
         try:
-            plot_renewable_impact(
-                renewable_impact_data,
-                metric_name=metric,
-                y_label=label,
-                title=f'Impact of Renewable Fraction on {label}',
-                config=config,
-                num_buses=num_buses,
-                model_name=model_name
-            )
+            if metric not in renewable_impact_data.columns:
+                # If metric not available, show placeholder
+                ax.text(0.5, 0.5, f'{label}\nnot available', 
+                       transform=ax.transAxes, ha='center', va='center',
+                       fontsize=12, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray"))
+                ax.set_title(f'{label}', fontsize=13, fontweight='bold')
+                ax.axis('off')
+                continue
+            
+            x = renewable_impact_data[x_col]
+            y = renewable_impact_data[metric]
+            
+            # Scatter plot
+            ax.scatter(x, y, alpha=0.6, s=50, label='Test Scenario', color='steelblue')
+            
+            # Fit trendline
+            z = np.polyfit(x, y, 1)
+            p = np.poly1d(z)
+            ax.plot(x.sort_values(), p(x.sort_values()), "r--", linewidth=2.5, 
+                   label=f'Trend: y={z[0]:.4g}x + {z[1]:.4g}')
+            
+            ax.set_title(f'{label}', fontsize=13, fontweight='bold')
+            ax.set_xlabel('Renewable Energy Fraction', fontsize=11)
+            ax.set_ylabel(label, fontsize=11)
+            ax.legend(fontsize=9, loc='best')
+            ax.grid(True, alpha=0.3)
+            
         except KeyError as e:
-            print(f"Warning: Could not plot {metric} due to missing column: {e}")
-            continue
+            # If metric not available, show placeholder
+            ax.text(0.5, 0.5, f'{label}\nnot available', 
+                   transform=ax.transAxes, ha='center', va='center',
+                   fontsize=12, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray"))
+            ax.set_title(f'{label}', fontsize=13, fontweight='bold')
+            ax.axis('off')
+    
+    # Overall title
+    fig.suptitle(f'Renewable Impact Analysis - {model_name}', fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+    
+    # Save combined plot directly in model folder (not in renewable_impacts subfolder)
+    model_dir = config.get_model_eval_dir(num_buses, model_name)
+    os.makedirs(model_dir, exist_ok=True)
+    save_path = os.path.join(model_dir, 'ri_combined.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Note: No longer creating individual plots or renewable_impacts folder
 
 
 def create_model_comparison_plot(all_results: list, save_path: str = None):
@@ -423,9 +466,9 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
         
         plt.tight_layout()
         
-        # Save the plot - clean metric name for filename
-        clean_metric_name = metric.replace('normalized_', '')
-        save_path = os.path.join(bus_dir, f"renewable_impact_{clean_metric_name}.png")
+        # Save the plot - concise filename
+        clean_metric_name = metric.replace('normalized_', '').replace('_', '')[:6]  # Short: carbon, voltag, powerl, powerf
+        save_path = os.path.join(bus_dir, f"ri_{clean_metric_name}.png")
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -473,7 +516,7 @@ def _create_comparative_convergence_plot_impl(all_convergence_data: Dict[str, li
     plt.yscale('log')  # Log scale often helps with convergence visualization
     
     # Save the comparison plot
-    save_path = os.path.join(bus_dir, "convergence_comparison.png")
+    save_path = os.path.join(bus_dir, "convergence.png")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
     

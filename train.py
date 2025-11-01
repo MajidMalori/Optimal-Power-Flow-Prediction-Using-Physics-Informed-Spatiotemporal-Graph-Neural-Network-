@@ -36,14 +36,8 @@ def clear_gpu_memory():
 
 def log_memory_usage(stage_name):
     """Log memory usage at different stages"""
-    if torch.cuda.is_available():
-        memory_info = check_gpu_memory()
-        print(f"[Memory] {stage_name}: {memory_info['allocated'] / 1024**3:.2f} GB allocated, "
-              f"{memory_info['free'] / 1024**3:.2f} GB free")
-    else:
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        print(f"[Memory] {stage_name}: {memory_mb:.1f} MB RAM used")
+    # Memory logging disabled
+    pass
 
 def get_adaptive_batch_size(num_buses, base_batch_size=32):
     """Get adaptive batch size based on system size"""
@@ -142,7 +136,7 @@ from utils.data_loader import load_power_system_data, create_data_loaders
 from utils.metrics import PowerSystemLoss
 from utils.data_validation import validate_data_before_training
 from utils.optimization import (mosoa_optimizer, trial_based_search, setup_hyperparameter_bounds, create_model_kwargs, 
-                               generate_run_name, process_optimization_params, 
+                               generate_run_name, process_optimization_params, format_params_concise,
                                calculate_objective_score)
 from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_model_with_uncertainty,
                              evaluate_moopf_objectives, evaluate_moopf_objectives_normalized, 
@@ -371,10 +365,7 @@ def main():
                     # Clear GPU memory before starting
                     clear_gpu_memory()
                     
-                    # Check memory before model creation
-                    if torch.cuda.is_available():
-                        memory_info = check_gpu_memory()
-                        print(f"GPU memory before model creation: {memory_info['allocated'] / 1024**3:.2f} GB allocated, {memory_info['free'] / 1024**3:.2f} GB free")
+                    # Check memory before model creation (monitoring disabled)
                     
                     # Use adaptive batch size based on system size
                     run_config.BATCH_SIZE = get_adaptive_batch_size(num_buses, run_config.BATCH_SIZE)
@@ -422,10 +413,6 @@ def main():
                             model = model_class_map[model_name](**model_kwargs).to(device)
                         else:
                             raise e
-                    
-                    if torch.cuda.is_available():
-                        memory_info = check_gpu_memory()
-                        print(f"GPU memory after model creation: {memory_info['allocated'] / 1024**3:.2f} GB allocated, {memory_info['free'] / 1024**3:.2f} GB free")
                     
                     # Use appropriate loss function based on whether model is physics-informed
                     criterion = PowerSystemLoss(
@@ -498,7 +485,8 @@ def main():
                 best_score, best_position, history, iteration_details = mosoa_optimizer(
                     mosoa_params['num_seagulls'], 
                     mosoa_params['max_iterations'], 
-                    lower_bounds, upper_bounds, dim, objective_function
+                    lower_bounds, upper_bounds, dim, objective_function,
+                    param_keys=param_keys
                 )
             else:
                 print(f"Optimizing with trial-based search: {args.num_trials} trials")
@@ -514,8 +502,8 @@ def main():
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
 
-            print(f"\nBest: {best_params} | Score: {best_score:.6f}")
-            print("\n" + "="*80)  # Add clear separator after MoSOA completion
+            print(f"\nBest: {format_params_concise(best_params)} | Score: {best_score:.6g}")
+            print("="*80)  # Add clear separator after MoSOA completion
 
             if not model_specific_results: 
                 print(f"No successful runs for {model_name}.")
@@ -717,7 +705,7 @@ def main():
                         
                         # Copy uncertainty graphs if they exist
                         import shutil
-                        for uncertainty_file in ['uncertainty_spatial_comparison.png', 'uncertainty_temporal_comparison.png']:
+                        for uncertainty_file in ['uncertainty_spatial.png', 'uncertainty_temporal.png']:
                             src = os.path.join(model_uncertainty_dir, uncertainty_file)
                             dst = os.path.join(bus_system_dir, uncertainty_file)
                             if os.path.exists(src):

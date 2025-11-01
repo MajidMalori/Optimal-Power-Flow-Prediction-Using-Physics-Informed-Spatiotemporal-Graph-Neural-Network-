@@ -515,44 +515,83 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
     # Save model checkpoint
     torch.save(best_model.state_dict(), config.get_model_checkpoint_path(num_buses, model_name))
     
-    # Save MOOPF results (or MSE results for non-physics models)
-    results_filename = "moopf_results.csv" if is_physics_informed else "mse_results.csv"
+    # Save detailed per-sample MOOPF/MSE results (optional, for detailed analysis)
+    results_filename = "moopf_detailed.csv" if is_physics_informed else "mse_detailed.csv"
     results_path = os.path.join(model_dir, results_filename)
     moopf_results.to_csv(results_path, index=False)
     
-    # Save iteration-wise optimization results if available
-    if iteration_details is not None and param_keys is not None:
-        iteration_results_df = create_iteration_wise_results(iteration_details, param_keys, config, model_name)
-        iteration_path = os.path.join(model_dir, "iteration_wise_results.csv")
-        iteration_results_df.to_csv(iteration_path, index=False)
+    # Create consolidated model results CSV (clean, 2 lines only)
+    from datetime import datetime
     
-    # Save summary with filtered data based on model type
-    if is_physics_informed:
-        # Physics models: Save all metrics
-        summary_data = best_run.copy()
+    clean_results = {
+        # Identification
+        'model_name': model_name,
+        'bus_system': num_buses,
+        'run_timestamp': datetime.now().strftime('%Y%m%d_%H%M%S'),
+        
+        # Hyperparameters (best found)
+        'hidden_dim': best_run.get('HIDDEN_DIM', None),
+        'gc_layers': best_run.get('NUM_GC_LAYERS', None),
+        'sequence_length': best_run.get('SEQUENCE_LENGTH', None),
+        'rnn_layers': best_run.get('RNN_LAYERS', None),
+        'embedding_dim': best_run.get('EMBEDDING_DIM', None),
+        'lambda_p': best_run.get('LAMBDA_P', None) if is_physics_informed else None,
+        'lambda_v': best_run.get('LAMBDA_V', None) if is_physics_informed else None,
+        'phi': best_run.get('PHI', None),
+        
+        # Training performance
+        'train_mse': best_run.get('training_mse', best_run.get('mse', None)),
+        'train_rmse': best_run.get('rmse', None),
+        'epochs_trained': len(training_history.get('train_mse', [])) if training_history else None,
+        
+        # Test performance
+        'test_mse': best_run.get('val_metrics', {}).get('mse', None) if 'val_metrics' in best_run else best_run.get('mse', None),
+        'test_rmse': best_run.get('val_metrics', {}).get('rmse', None) if 'val_metrics' in best_run else None,
+        
+        # Physics metrics (PI models only)
+        'power_violation': best_run.get('power_violation', None) if is_physics_informed else None,
+        'voltage_violation': best_run.get('voltage_violation', None) if is_physics_informed else None,
+    }
+    
+    # Add MOOPF objectives if physics-informed
+    if is_physics_informed and not moopf_results.empty:
+        clean_results.update({
+            'avg_power_loss': moopf_results['normalized_power_loss'].mean() if 'normalized_power_loss' in moopf_results.columns else None,
+            'avg_voltage_dev': moopf_results['normalized_voltage_deviation'].mean() if 'normalized_voltage_deviation' in moopf_results.columns else None,
+            'avg_power_flow': moopf_results['normalized_power_flow'].mean() if 'normalized_power_flow' in moopf_results.columns else None,
+            'avg_carbon_emissions': moopf_results['raw_carbon_emissions_tCO2'].mean() if 'raw_carbon_emissions_tCO2' in moopf_results.columns else None,
+            'moopf_score': moopf_results['moopf_score'].mean() if 'moopf_score' in moopf_results.columns else None,
+        })
     else:
-        # Non-physics models: Remove physics-related metrics
-        summary_data = best_run.copy()
-        # Remove physics metrics from top level
-        physics_metrics = ['power_violation', 'voltage_violation']
-        for metric in physics_metrics:
-            summary_data.pop(metric, None)
-        
-        # Clean validation metrics if they exist
-        if 'val_metrics' in summary_data and isinstance(summary_data['val_metrics'], dict):
-            val_metrics_clean = {k: v for k, v in summary_data['val_metrics'].items() 
-                               if k not in physics_metrics}
-            summary_data['val_metrics'] = val_metrics_clean
-        
-        # Clean training history if it exists
-        if 'training_history' in summary_data and isinstance(summary_data['training_history'], dict):
-            history_clean = summary_data['training_history'].copy()
-            for metric in ['train_power_violation', 'val_power_violation', 
-                          'train_voltage_violation', 'val_voltage_violation']:
-                history_clean.pop(metric, None)
-            summary_data['training_history'] = history_clean
+        clean_results.update({
+            'avg_power_loss': None,
+            'avg_voltage_dev': None,
+            'avg_power_flow': None,
+            'avg_carbon_emissions': None,
+            'moopf_score': None,
+        })
     
-    pd.DataFrame([summary_data]).to_csv(config.get_summary_path(num_buses, model_name), index=False)
+    # Add optimization info
+    if iteration_details:
+        clean_results.update({
+            'optimization_method': 'MoSOA',
+            'num_iterations': len(iteration_details),
+            'num_seagulls': iteration_details[0].get('num_valid_evaluations', None) if iteration_details else None,
+            'best_objective_score': best_run.get('total_loss', None),
+            'optimization_time_sec': None,  # Could add if tracked
+        })
+    else:
+        clean_results.update({
+            'optimization_method': 'Trial',
+            'num_iterations': None,
+            'num_seagulls': None,
+            'best_objective_score': best_run.get('total_loss', None),
+            'optimization_time_sec': None,
+        })
+    
+    # Save clean consolidated CSV (2 lines: header + data)
+    results_csv_path = os.path.join(model_dir, "model_results.csv")
+    pd.DataFrame([clean_results]).to_csv(results_csv_path, index=False)
     
     # Plot training history (available for all models)
     try:
@@ -698,19 +737,22 @@ def print_model_summary(best_run: Dict[str, Any], moopf_results: pd.DataFrame,
     print(f" Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
     # FIXED: Use normalized MSE from training history instead of denormalized test MSE
     training_mse = best_run.get('training_mse', best_run.get('mse', 'N/A'))
-    print(f" Training Performance: MSE = {training_mse:.6f}")
+    print(f" Training Performance: MSE = {training_mse:.6g}")
     
     if is_physics_informed:
-        print(f" Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6f}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6f}")
+        print(f" Physics Violations: Power = {best_run.get('power_violation', 'N/A'):.6g}, Voltage = {best_run.get('voltage_violation', 'N/A'):.6g}")
         print("\n--- MOOPF Evaluation Results ---")
-        print(moopf_results.mean().to_dict())
+        # Format metrics concisely
+        metrics = moopf_results.mean().to_dict()
+        formatted_metrics = {k: f"{v:.6g}" for k, v in metrics.items()}
+        print(formatted_metrics)
     else:
-        print(f" Final Test MSE: {final_test_score:.6f}")
+        print(f" Final Test MSE: {final_test_score:.6g}")
         print("\n--- MSE Evaluation Results ---")
         # Only show relevant metrics for non-physics models
         relevant_metrics = {
-            'mse_score': final_test_score,
-            'rmse_score': (final_test_score) ** 0.5,
+            'mse_score': f"{final_test_score:.6g}",
+            'rmse_score': f"{(final_test_score) ** 0.5:.6g}",
             'samples_evaluated': len(moopf_results)
         }
         print(relevant_metrics)

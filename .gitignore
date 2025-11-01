@@ -57,7 +57,7 @@ debug*.txt
 *.ipynb
 *.rar
 
-test.py
+MOSOA.py
 
 
 # Runs directory (automatically created by some frameworks)

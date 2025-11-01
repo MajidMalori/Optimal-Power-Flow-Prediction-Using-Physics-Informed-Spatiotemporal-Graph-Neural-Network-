@@ -18,7 +18,7 @@ from datetime import datetime
 CONFIG = {
     "random_seed": 42,  # For reproducibility - set to None for non-deterministic behavior
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
-    "time_steps": 10000,  # Will be overridden by command-line argument if provided
+    "time_steps": 10080,  # Default: 420 days (10080 hours) - will be overridden by command-line argument if provided
     "output_dir": "./data", # Base directory - mode-specific subdirectory will be appended
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
     "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
@@ -36,6 +36,10 @@ CONFIG = {
     "use_time_series": True,  # True: Generate realistic daily cycles, False: Random scenarios (Monte Carlo)
     "hours_per_day": 24,  # Number of hours in a day
     "num_days": None,  # Will be calculated from time_steps and hours_per_day
+    
+    # Weather-driven renewable variability (NEW FIX for realistic uncertainty)
+    "use_weather_driven_renewables": True,  # True: Weather-based variability (realistic), False: Deterministic time-of-day patterns (legacy)
+    "seed": 42,  # Random seed for weather simulation (reproducibility)
 }
 
 # =============================================================================
@@ -90,23 +94,23 @@ def get_daily_load_profile(hour: int, season: str = 'summer') -> float:
     return base_load * variation
 
 
-def get_solar_generation_profile(hour: int, day_of_year: int = 180) -> float:
+def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_state: str = None) -> float:
     """
-    Returns realistic hourly solar generation multiplier (0.0-1.0).
+    Returns realistic hourly solar generation multiplier (0.0-1.0) with weather-driven variability.
     
     Args:
         hour: Hour of day (0-23)
         day_of_year: Day of year (1-365, affects sun strength and day length)
+        weather_state: 'clear', 'partly_cloudy', 'cloudy', 'storm' (if None, randomly chosen)
     
     Returns:
-        Solar generation multiplier (0 = night, 1 = peak solar)
+        Solar generation multiplier (0 = night/storm, 1 = peak clear solar)
     """
-    # Solar only during daylight hours (roughly 6 AM to 6 PM)
+    # Solar only during daylight hours (roughly 5 AM to 7 PM)
     if hour < 5 or hour > 19:
         return 0.0  # Night time
     
-    # Solar follows a bell curve peaking at noon
-    # Convert hour to solar angle (peak at hour 12)
+    # Solar follows a bell curve peaking at noon (geometric/astronomical component)
     hour_from_noon = abs(hour - 12)
     
     if hour_from_noon > 7:
@@ -117,52 +121,218 @@ def get_solar_generation_profile(hour: int, day_of_year: int = 180) -> float:
     solar_angle = (hour - 12) * (np.pi / 14)  # Map to -pi/2 to pi/2
     base_solar = max(0, np.cos(solar_angle))  # 0 at edges, 1 at noon
     
-    # Add cloud cover variation (random 0.7-1.0)
-    cloud_factor = np.random.uniform(0.7, 1.0)
-    
     # Season factor (summer stronger, winter weaker)
     season_factor = 0.85 + 0.15 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
+    
+    # WEATHER-DRIVEN VARIABILITY (replaces fixed 0.7-1.0 range)
+    # This is the KEY FIX for realistic renewable uncertainty
+    if weather_state is None:
+        # If no weather state provided, randomly choose (backwards compatible)
+        weather_state = np.random.choice(['clear', 'partly_cloudy', 'cloudy', 'storm'], 
+                                        p=[0.3, 0.4, 0.25, 0.05])
+    
+    # Weather impact on solar generation (much wider range than before!)
+    if weather_state == 'clear':
+        cloud_factor = np.random.uniform(0.90, 1.0)  # Near full sun
+    elif weather_state == 'partly_cloudy':
+        cloud_factor = np.random.uniform(0.35, 0.85)  # Highly variable (clouds moving)
+    elif weather_state == 'cloudy':
+        cloud_factor = np.random.uniform(0.08, 0.35)  # Low but not zero (diffuse light)
+    else:  # storm
+        cloud_factor = np.random.uniform(0.0, 0.08)   # Near zero (dark clouds)
     
     return base_solar * cloud_factor * season_factor
 
 
-def get_wind_generation_profile(hour: int, day: int = 0) -> float:
+def get_wind_generation_profile(hour: int, day: int = 0, weather_state: str = None) -> float:
     """
-    Returns realistic hourly wind generation multiplier (0.0-1.0).
+    Returns realistic hourly wind generation multiplier (0.0-1.0) with weather-driven variability.
     
     Args:
         hour: Hour of day (0-23)
-        day: Day number (for day-to-day variation)
+        day: Day number (for day-to-day persistence)
+        weather_state: 'calm', 'breezy', 'windy', 'storm' (if None, randomly chosen with persistence)
     
     Returns:
-        Wind generation multiplier
+        Wind generation multiplier (0 = calm, 1 = maximum wind output)
     """
-    # Wind has less predictable daily pattern but tends to be:
-    # - Higher at night (cooler temperatures)
-    # - Lower during midday (solar heating reduces wind)
+    # WEATHER-DRIVEN MODEL (replaces fixed time-of-day patterns)
+    # Wind is primarily weather-driven, NOT time-driven
     
-    # Base diurnal pattern (higher at night)
-    if 0 <= hour < 6:
-        base_wind = 0.75  # High nighttime wind
-    elif 6 <= hour < 12:
-        base_wind = 0.50  # Morning transition
-    elif 12 <= hour < 18:
-        base_wind = 0.40  # Lower daytime wind
-    else:  # 18-24
-        base_wind = 0.65  # Evening pickup
+    if weather_state is None:
+        # If no weather state provided, randomly choose (backwards compatible)
+        # Use day seed for day-to-day persistence (weather doesn't change every hour)
+        day_seed = np.random.RandomState(day)
+        weather_state = day_seed.choice(['calm', 'breezy', 'windy', 'storm'], 
+                                       p=[0.15, 0.45, 0.30, 0.10])
     
-    # Add significant random variation (wind is variable)
-    # Day-to-day variation
-    day_seed = np.random.RandomState(day)
-    daily_factor = day_seed.uniform(0.6, 1.4)
+    # Weather impact on wind generation (MUCH wider range than before!)
+    if weather_state == 'calm':
+        base_wind = np.random.uniform(0.0, 0.20)      # Very low wind
+    elif weather_state == 'breezy':
+        base_wind = np.random.uniform(0.20, 0.55)     # Moderate wind
+    elif weather_state == 'windy':
+        base_wind = np.random.uniform(0.55, 0.90)     # High wind
+    else:  # storm
+        base_wind = np.random.uniform(0.85, 1.0)      # Maximum output (before cutoff)
     
-    # Hourly variation
-    hourly_variation = np.random.uniform(0.7, 1.3)
+    # Small thermal diurnal effect (realistic but minor compared to weather)
+    # Daytime: slight increase due to convective winds
+    # Night: slight decrease due to boundary layer stabilization
+    thermal_factor = 1.0 + 0.08 * np.sin(2 * np.pi * (hour - 6) / 24)
     
-    wind = base_wind * daily_factor * hourly_variation
+    # Hourly micro-variation (gusts, local effects)
+    micro_variation = np.random.uniform(0.85, 1.15)
     
-    # Clip to valid range
+    wind = base_wind * thermal_factor * micro_variation
+    
+    # Clip to valid range (turbines cut out at very high winds)
     return np.clip(wind, 0.0, 1.0)
+
+
+def simulate_weather_sequence(timesteps: int, hours_per_day: int = 24, seed: int = None) -> list:
+    """
+    Simulate realistic weather patterns using Markov chain with persistence.
+    Weather states persist for several hours (realistic weather patterns).
+    
+    Args:
+        timesteps: Total number of timesteps to simulate
+        hours_per_day: Number of hours per day (for diurnal effects)
+        seed: Random seed for reproducibility
+    
+    Returns:
+        List of weather state strings for each timestep
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Weather states for solar (cloud cover)
+    solar_states = ['clear', 'partly_cloudy', 'cloudy', 'storm']
+    
+    # Weather states for wind (wind speed)
+    wind_states = ['calm', 'breezy', 'windy', 'storm']
+    
+    # Transition probability matrix for solar weather (weather persists!)
+    # Rows = current state, Columns = next state
+    solar_transitions = {
+        'clear':         {'clear': 0.65, 'partly_cloudy': 0.30, 'cloudy': 0.05, 'storm': 0.0},
+        'partly_cloudy': {'clear': 0.25, 'partly_cloudy': 0.45, 'cloudy': 0.25, 'storm': 0.05},
+        'cloudy':        {'clear': 0.10, 'partly_cloudy': 0.30, 'cloudy': 0.50, 'storm': 0.10},
+        'storm':         {'clear': 0.0,  'partly_cloudy': 0.10, 'cloudy': 0.40, 'storm': 0.50}
+    }
+    
+    # Transition probability matrix for wind weather
+    wind_transitions = {
+        'calm':   {'calm': 0.60, 'breezy': 0.30, 'windy': 0.08, 'storm': 0.02},
+        'breezy': {'calm': 0.20, 'breezy': 0.50, 'windy': 0.25, 'storm': 0.05},
+        'windy':  {'calm': 0.05, 'breezy': 0.30, 'windy': 0.50, 'storm': 0.15},
+        'storm':  {'calm': 0.02, 'breezy': 0.10, 'windy': 0.40, 'storm': 0.48}
+    }
+    
+    # Initialize sequences
+    solar_sequence = []
+    wind_sequence = []
+    
+    # Start with typical conditions
+    current_solar = 'partly_cloudy'
+    current_wind = 'breezy'
+    
+    for t in range(timesteps):
+        # Store current states
+        solar_sequence.append(current_solar)
+        wind_sequence.append(current_wind)
+        
+        # Transition to next state (hourly changes, but with persistence)
+        solar_probs = solar_transitions[current_solar]
+        current_solar = np.random.choice(
+            list(solar_probs.keys()),
+            p=list(solar_probs.values())
+        )
+        
+        wind_probs = wind_transitions[current_wind]
+        current_wind = np.random.choice(
+            list(wind_probs.keys()),
+            p=list(wind_probs.values())
+        )
+    
+    # Return both sequences as tuples
+    return [(solar_sequence[i], wind_sequence[i]) for i in range(timesteps)]
+
+
+def calculate_renewable_reactive_power(p_mw: float, bus_idx: int, net: pp.pandapowerNet, 
+                                       use_voltage_control: bool = True) -> float:
+    """
+    Calculate reactive power for renewable generators based on IEEE 1547 volt-var control.
+    Modern inverters adjust reactive power to support voltage regulation.
+    
+    Args:
+        p_mw: Active power generation [MW]
+        bus_idx: Bus index where generator is connected
+        net: Pandapower network object
+        use_voltage_control: If True, use voltage-dependent control; else use fixed power factor
+    
+    Returns:
+        q_mvar: Reactive power [Mvar]
+    """
+    # If no active power, no reactive power capability
+    if p_mw < 1e-6:
+        return 0.0
+    
+    # Inverter reactive power capability (typically ±0.33 * P for modern inverters)
+    # This corresponds to power factor range of 0.95 leading to 0.95 lagging
+    max_q_capability = 0.33 * p_mw
+    
+    if use_voltage_control and hasattr(net, 'res_bus') and not net.res_bus.empty:
+        # Voltage-dependent reactive power (volt-var control per IEEE 1547-2018)
+        # This is how modern grid-tied inverters actually operate
+        
+        try:
+            # Get voltage at generator bus from previous power flow
+            v_pu = net.res_bus.loc[bus_idx, 'vm_pu']
+            
+            # IEEE 1547 volt-var curve (simplified):
+            # - V > 1.05 pu: Absorb Q (lower voltage)
+            # - V < 0.95 pu: Inject Q (raise voltage)
+            # - 0.95 < V < 1.05 pu: Proportional control
+            
+            # Deadband: ±0.02 pu around nominal (no Q injection in normal range)
+            v_deadband_low = 0.98
+            v_deadband_high = 1.02
+            
+            if v_pu < v_deadband_low:
+                # Low voltage: Inject reactive power (support voltage)
+                # Linear ramp: Max Q at V=0.95, zero Q at V=0.98
+                q_factor = min(1.0, (v_deadband_low - v_pu) / 0.03)
+                q_mvar = q_factor * max_q_capability  # Positive Q (inject)
+            elif v_pu > v_deadband_high:
+                # High voltage: Absorb reactive power (reduce voltage)
+                # Linear ramp: Max Q at V=1.05, zero Q at V=1.02
+                q_factor = min(1.0, (v_pu - v_deadband_high) / 0.03)
+                q_mvar = -q_factor * max_q_capability  # Negative Q (absorb)
+            else:
+                # Normal voltage range: No reactive power support needed
+                q_mvar = 0.0
+            
+            # Apply small random variation (control is not perfect)
+            q_mvar *= np.random.uniform(0.95, 1.05)
+            
+        except (KeyError, AttributeError):
+            # Fallback: If voltage not available, use fixed power factor
+            # This happens on first timestep before any power flow results exist
+            power_factor = 0.98  # Slightly lagging (typical for inverters)
+            q_mvar = p_mw * np.tan(np.arccos(power_factor))
+    
+    else:
+        # Fixed power factor mode (fallback or first timestep)
+        # Use 0.98 power factor (slightly lagging, typical for inverters)
+        power_factor = 0.98
+        q_mvar = p_mw * np.tan(np.arccos(power_factor))
+        
+        # Add small random variation to avoid all generators having identical Q
+        q_mvar *= np.random.uniform(0.95, 1.05)
+    
+    # Clip to inverter capability limits
+    return np.clip(q_mvar, -max_q_capability, max_q_capability)
 
 
 def load_network(case_name: str) -> pp.pandapowerNet:
@@ -361,6 +531,22 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     
     max_total_renewable_mw = (len(solar_gens) * max_individual_solar_mw + len(wind_gens) * max_individual_wind_mw) or 1.0
     print(f"Max total renewable capacity: {max_total_renewable_mw:.2f} MW")
+    
+    # WEATHER-DRIVEN RENEWABLE GENERATION
+    # Generate weather sequence for entire simulation (realistic persistence)
+    use_weather_driven = config.get('use_weather_driven_renewables', True)  # Default: ON
+    weather_sequence = None
+    
+    if use_weather_driven and config.get('use_time_series', False):
+        print("Simulating weather-driven renewable variability...")
+        weather_sequence = simulate_weather_sequence(
+            timesteps=time_steps,
+            hours_per_day=config.get('hours_per_day', 24),
+            seed=config.get('seed', None)
+        )
+        print(f"   Weather simulation complete: {len(weather_sequence)} timesteps")
+    else:
+        print("Using legacy deterministic renewable patterns (weather_driven=False)")
         
     dropped_line_idx = None
     has_contingency = False  # Track if current timestep has contingency
@@ -399,17 +585,42 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
             net.load.q_mvar = base_load_q * load_multiplier
             
             # Apply realistic renewable generation profiles
+            # Weather-driven if available, otherwise deterministic
+            solar_weather = None
+            wind_weather = None
+            if weather_sequence is not None:
+                solar_weather, wind_weather = weather_sequence[t]
+            
             current_total_renewable_p_mw = 0
             if 'type' in net.sgen.columns and not net.sgen.empty:
                 for i, sgen in net.sgen.iterrows():
                     p_gen = 0
                     if sgen.type == 'solar':
-                        solar_profile = get_solar_generation_profile(current_hour, day_of_year=180 + current_day % 180)
+                        solar_profile = get_solar_generation_profile(
+                            current_hour, 
+                            day_of_year=180 + current_day % 180,
+                            weather_state=solar_weather  # Weather-driven!
+                        )
                         p_gen = solar_profile * max_individual_solar_mw
                     elif sgen.type == 'wind':
-                        wind_profile = get_wind_generation_profile(current_hour, day=current_day)
+                        wind_profile = get_wind_generation_profile(
+                            current_hour, 
+                            day=current_day,
+                            weather_state=wind_weather  # Weather-driven!
+                        )
                         p_gen = wind_profile * max_individual_wind_mw
+                    
+                    # Set active power
                     net.sgen.at[i, 'p_mw'] = p_gen
+                    
+                    # Calculate reactive power (volt-var control per IEEE 1547)
+                    # Modern inverters adjust Q based on voltage to support grid
+                    q_gen = calculate_renewable_reactive_power(
+                        p_gen, sgen.bus, net, 
+                        t > 0  # Use voltage control after first timestep
+                    )
+                    net.sgen.at[i, 'q_mvar'] = q_gen
+                    
                     current_total_renewable_p_mw += p_gen
         else:
             # MONTE CARLO MODE: Random scenarios (original approach)
@@ -670,8 +881,10 @@ if __name__ == "__main__":
             sys.exit(1)
     
     # Set mode-specific defaults if timesteps not provided
+    # Use values that result in COMPLETE 24-hour days for 60/20/20 split
+    # Total days must be divisible by 5 for clean splits
     if timesteps is None:
-        timesteps = 10000 if data_mode == 'train' else 100
+        timesteps = 10080 if data_mode == 'train' else 1080  # 420 days (train) or 45 days (test)
     
     CONFIG['time_steps'] = timesteps
     
