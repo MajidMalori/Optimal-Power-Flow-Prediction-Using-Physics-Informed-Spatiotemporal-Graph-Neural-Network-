@@ -635,7 +635,17 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                         p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
                     elif sgen.type == 'wind':
                         p_gen = np.random.uniform(0, max_individual_wind_mw)
+                    
+                    # Set active power
                     net.sgen.at[i, 'p_mw'] = p_gen
+                    
+                    # Calculate reactive power (same as time-series mode)
+                    q_gen = calculate_renewable_reactive_power(
+                        p_gen, sgen.bus, net, 
+                        t > 0  # Use voltage control after first timestep
+                    )
+                    net.sgen.at[i, 'q_mvar'] = q_gen
+                    
                     current_total_renewable_p_mw += p_gen
         
         try:
