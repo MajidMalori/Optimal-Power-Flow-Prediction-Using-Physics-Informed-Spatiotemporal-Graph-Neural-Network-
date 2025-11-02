@@ -16,13 +16,13 @@ class Args:
     """
     # === MODEL & SYSTEM CONFIGURATION ===
     test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+    bus_systems = '57,118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
     models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
     seed = 42
     
     # === DATA CONFIGURATION ===
     data_mode = 'test'  # Options: 'train' or 'test'
-    test_timesteps = 1080  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
+    test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
     
     # ┌──────────────────────────────────────────────────────────────────────────┐
     # │ TIMESTEP REFERENCE TABLE (60/20/20 split with complete 24-hour cycles)  │
@@ -47,7 +47,7 @@ class Args:
     
     # === RESULTS SAVING CONFIGURATION ===
     save_results = True  # False: No files saved (console output only), True: Save all results
-    clear_results = False  # True: Delete experimental_results folder before running, False: Keep old results
+    clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
     
     # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
     use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)

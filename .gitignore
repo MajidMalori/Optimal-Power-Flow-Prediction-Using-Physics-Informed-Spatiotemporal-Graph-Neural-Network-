@@ -41,7 +41,9 @@ analyze_convergence.py
 *.gif
 *.svg
 *.bmp
-*.tiff
+*.
+*.txt
+*.cursor
 
 # Text files (info/debug files, but keep requirements)
 info*.txt

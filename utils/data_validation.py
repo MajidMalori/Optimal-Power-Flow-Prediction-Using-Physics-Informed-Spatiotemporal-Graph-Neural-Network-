@@ -633,14 +633,15 @@ def force_clean_all_data(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
+def validate_data_before_training(config, bus_systems_to_show=None, run_integrity_analysis=True) -> bool:
     """
     Main function to validate data exists and generate if needed.
-    Always displays convergence analysis after validation.
+    All analysis (including convergence) is done by data integrity module.
     
     Args:
         config: Configuration object
-        bus_systems_to_show: List of bus systems to show in convergence analysis
+        bus_systems_to_show: List of bus systems for data integrity analysis
+        run_integrity_analysis: If True, run comprehensive data integrity analysis (default: True)
         
     Returns:
         bool: True if data is ready for training, False otherwise
@@ -652,8 +653,35 @@ def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
     success = generate_data_if_missing(config)
     
     if success:
-        # Show convergence analysis for specific bus systems only
-        display_convergence_analysis(config, bus_systems_to_show)
+        # Run comprehensive data integrity analysis (includes convergence display)
+        if run_integrity_analysis:
+            print("\n" + "="*80)
+            print("RUNNING COMPREHENSIVE DATA INTEGRITY ANALYSIS")
+            print("="*80)
+            
+            try:
+                from utils.data_integrity import analyze_data_integrity
+                
+                # Determine output directory (experimental_results/data_integrity)
+                output_dir = os.path.join(config.EXPERIMENTAL_RESULTS_DIR, "data_integrity")
+                
+                # Run analysis for bus systems being tested
+                if bus_systems_to_show:
+                    cases = [f"case{bus}" for bus in bus_systems_to_show]
+                else:
+                    cases = None  # Auto-detect all
+                
+                analyze_data_integrity(config.DATA_DIR, output_dir, cases)
+                
+                print(f"\n✓ Data integrity analysis complete!")
+                print(f"  Reports saved to: {output_dir}")
+                
+            except Exception as e:
+                print(f"\n⚠ Warning: Data integrity analysis failed: {e}")
+                import traceback
+                traceback.print_exc()
+                print("  Continuing with training...")
+        
         print("\nReady for training!")
     else:
         print("\nData validation failed!")

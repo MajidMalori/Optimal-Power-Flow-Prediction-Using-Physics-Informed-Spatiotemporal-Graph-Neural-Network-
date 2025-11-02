@@ -3,6 +3,12 @@
 import os
 import traceback
 import json
+import warnings
+
+# Suppress numba/pandapower warnings
+warnings.filterwarnings('ignore', message='.*numba.*')
+warnings.filterwarnings('ignore', category=FutureWarning)
+
 import pandapower as pp
 import pandapower.networks as pn
 import pandapower.topology as top
@@ -504,7 +510,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     contingency_timesteps = []  # Timesteps where contingencies occurred
     contingency_ybus_list = []  # Ybus matrices for contingency timesteps
     
-    # Convergence tracking for detailed reporting
+    # Enhanced convergence tracking for detailed reporting
     convergence_stats = {
         'total_timesteps': time_steps,
         'successful': 0,
@@ -512,7 +518,25 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         'failed_no_contingency': [],  # Failed with normal topology
         'failed_with_contingency': [],  # Failed with contingency topology
         'contingency_line_details': {},  # Details about which lines caused failures
-        'successful_timesteps': []  # Track which timesteps were successful
+        'successful_timesteps': [],  # Track which timesteps were successful
+        
+        # NEW: Resolution tracking
+        'resolution_methods': {
+            'strict_normal': 0,         # Converged with strict settings (normal topology)
+            'strict_contingency': 0,    # Converged with strict settings (contingency topology)
+            'relaxed_contingency': 0,   # Had to relax settings during contingency
+            'restored_line': 0,         # Had to restore contingency line
+        },
+        'timestep_resolution': {},  # Per-timestep resolution method
+        
+        # NEW: Contingency statistics
+        'contingencies_attempted': 0,     # Total contingencies tried
+        'contingencies_successful': 0,    # Successfully handled
+        'contingencies_failed': 0,        # Failed even after restoration (NEW!)
+        'contingencies_resolved_strict': 0,   # Handled with strict settings
+        'contingencies_resolved_relaxed': 0,  # Required relaxed settings
+        'contingencies_restored': 0,      # Too severe, had to restore line
+        'critical_lines': {},             # Lines that frequently cause failures
     }
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
@@ -524,13 +548,47 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     solar_gens = net.sgen[net.sgen.type == 'solar'] if 'type' in net.sgen.columns else pd.DataFrame()
     wind_gens = net.sgen[net.sgen.type == 'wind'] if 'type' in net.sgen.columns else pd.DataFrame()
     
-    # Scale renewable capacity to be proportional to system load
-    # This ensures renewable fraction can realistically range from 0% to 100%
-    max_individual_solar_mw = config['max_solar_mw'] * total_system_load_mw
-    max_individual_wind_mw = config['max_wind_mw'] * total_system_load_mw
+    # FIXED CAPACITY SCALING (prevents generation-load imbalance)
+    # Key insight: Total renewable capacity should be sized to serve peak load, not per-generator
+    # At 100% renewable fraction, total capacity should be ~80-90% of peak load (realistic with diversity)
     
-    max_total_renewable_mw = (len(solar_gens) * max_individual_solar_mw + len(wind_gens) * max_individual_wind_mw) or 1.0
-    print(f"Max total renewable capacity: {max_total_renewable_mw:.2f} MW")
+    num_solar = len(solar_gens)
+    num_wind = len(wind_gens)
+    num_total_renewable = num_solar + num_wind
+    
+    if num_total_renewable > 0:
+        # Maximum instantaneous renewable generation should be ~85% of peak load
+        # This accounts for: (1) grid stability requirements, (2) spinning reserve, (3) realistic dispatch
+        max_total_renewable_mw = total_system_load_mw * 0.85
+        
+        # Distribute capacity across generators
+        # Solar/wind ratio: ~60/40 split (typical renewable portfolio)
+        solar_fraction = num_solar / num_total_renewable if num_total_renewable > 0 else 0.5
+        wind_fraction = num_wind / num_total_renewable if num_total_renewable > 0 else 0.5
+        
+        # Individual generator capacity sized so total matches target
+        # Solar capacity factor: ~20-25% (accounting for weather, night, etc.)
+        # Wind capacity factor: ~30-35% (more consistent but still variable)
+        # Inverter sizing: Must handle peak generation (capacity factor ~0.25 for solar, 0.35 for wind)
+        
+        if num_solar > 0:
+            max_individual_solar_mw = (max_total_renewable_mw * solar_fraction * 0.25) / num_solar
+        else:
+            max_individual_solar_mw = 0
+            
+        if num_wind > 0:
+            max_individual_wind_mw = (max_total_renewable_mw * wind_fraction * 0.35) / num_wind
+        else:
+            max_individual_wind_mw = 0
+        
+        print(f"  Renewable generators: {num_solar} solar + {num_wind} wind")
+        print(f"  Max individual capacity: Solar={max_individual_solar_mw:.3f} MW, Wind={max_individual_wind_mw:.3f} MW")
+        print(f"  Max total renewable capacity: {max_total_renewable_mw:.2f} MW ({max_total_renewable_mw/total_system_load_mw*100:.1f}% of peak load)")
+    else:
+        max_individual_solar_mw = 0
+        max_individual_wind_mw = 0
+        max_total_renewable_mw = 1.0  # Avoid division by zero
+        print("  No renewable generators configured")
     
     # WEATHER-DRIVEN RENEWABLE GENERATION
     # Generate weather sequence for entire simulation (realistic persistence)
@@ -562,6 +620,8 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         if np.random.random() < config['contingency_rate']:
             dropped_line_idx = apply_n1_contingency(net)
             has_contingency = (dropped_line_idx is not None)
+            if has_contingency:
+                convergence_stats['contingencies_attempted'] += 1
 
         # ALWAYS calculate adjacency matrix for current topology (even if power flow fails)
         # This ensures data integrity - adjacency reflects actual network state
@@ -648,34 +708,102 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                     
                     current_total_renewable_p_mw += p_gen
         
+        # === EFFICIENT GUARANTEED CONVERGENCE STRATEGY ===
+        # Try contingency first, only fall back if needed
+        # This avoids unnecessary power flow calculations
+        
+        convergence_successful = False
+        resolution_method = None
+        
+        # Try power flow with current topology (contingency or normal)
         try:
-            # Run the power flow calculation
             pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+            convergence_successful = True
             convergence_stats['successful'] += 1
             convergence_stats['successful_timesteps'].append(t)
-        except pp.LoadflowNotConverged:
-            # Track convergence failure
-            convergence_stats['failed'] += 1
             
+            # Track resolution method
             if has_contingency:
-                # Failed with contingency - record details
-                convergence_stats['failed_with_contingency'].append(t)
-                if dropped_line_idx is not None:
-                    line_info = {
-                        'timestep': t,
-                        'line_id': int(dropped_line_idx),
-                        'from_bus': int(net.line.loc[dropped_line_idx, 'from_bus']),
-                        'to_bus': int(net.line.loc[dropped_line_idx, 'to_bus'])
-                    }
-                    convergence_stats['contingency_line_details'][str(t)] = line_info
+                resolution_method = 'strict_contingency'
+                convergence_stats['resolution_methods']['strict_contingency'] += 1
+                convergence_stats['contingencies_successful'] += 1
+                convergence_stats['contingencies_resolved_strict'] += 1
             else:
-                # Failed without contingency - normal topology issue
-                convergence_stats['failed_no_contingency'].append(t)
+                resolution_method = 'strict_normal'
+                convergence_stats['resolution_methods']['strict_normal'] += 1
             
-            # Skip failed timesteps entirely - don't store any data for them
-            # This prevents NaN values and maintains data quality
-            print(f"  WARNING: Timestep {t} failed, skipping timestep entirely")
-            continue
+        except pp.LoadflowNotConverged:
+            # CONTINGENCY FALLBACK: If failed during contingency, try relaxed settings
+            if has_contingency and dropped_line_idx is not None:
+                # Track critical line
+                line_key = f"line_{dropped_line_idx}"
+                if line_key not in convergence_stats['critical_lines']:
+                    convergence_stats['critical_lines'][line_key] = {
+                        'line_id': int(dropped_line_idx),
+                        'failure_count': 0,
+                        'resolution_methods': {'relaxed': 0, 'restored': 0}
+                    }
+                convergence_stats['critical_lines'][line_key]['failure_count'] += 1
+                
+                try:
+                    # Relaxed settings for contingency (realistic - grid under stress)
+                    pp.runpp(net, numba=False, enforce_q_lims=False, algorithm='nr', 
+                            tolerance_mva=1e-6, max_iteration=20)
+                    convergence_successful = True
+                    convergence_stats['successful'] += 1
+                    convergence_stats['successful_timesteps'].append(t)
+                    
+                    # Track resolution method
+                    resolution_method = 'relaxed_contingency'
+                    convergence_stats['resolution_methods']['relaxed_contingency'] += 1
+                    convergence_stats['contingencies_successful'] += 1
+                    convergence_stats['contingencies_resolved_relaxed'] += 1
+                    convergence_stats['critical_lines'][line_key]['resolution_methods']['relaxed'] += 1
+                    
+                except pp.LoadflowNotConverged:
+                    # Contingency too severe - restore line and run without contingency
+                    restore_contingency(net, dropped_line_idx)
+                    dropped_line_idx = None
+                    has_contingency = False
+                    convergence_stats['critical_lines'][line_key]['resolution_methods']['restored'] += 1
+                    
+                    try:
+                        # Retry with normal topology
+                        pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+                        convergence_successful = True
+                        convergence_stats['successful'] += 1
+                        convergence_stats['successful_timesteps'].append(t)
+                        
+                        # Track resolution method
+                        resolution_method = 'restored_line'
+                        convergence_stats['resolution_methods']['restored_line'] += 1
+                        convergence_stats['contingencies_restored'] += 1
+                        
+                    except pp.LoadflowNotConverged:
+                        # Even normal topology failed! This is a fundamental problem
+                        # This should NEVER happen with proper capacity scaling
+                        convergence_stats['failed'] += 1
+                        convergence_stats['failed_no_contingency'].append(t)
+                        convergence_stats['contingencies_failed'] += 1
+                        resolution_method = 'failed_completely'
+                        
+                        print(f"  ERROR: Timestep {t} failed completely (even normal topology!)")
+                        print(f"         This indicates a problem with load/generation balance")
+                        print(f"         Total load: {net.load.p_mw.sum():.1f} MW, Total renewable: {current_total_renewable_p_mw:.1f} MW")
+                        
+                        # Skip this timestep - but this should be extremely rare!
+                        continue
+            else:
+                # Failed without contingency - this shouldn't happen with fixed capacity
+                convergence_stats['failed'] += 1
+                convergence_stats['failed_no_contingency'].append(t)
+                resolution_method = 'failed'
+                print(f"  WARNING: Timestep {t} failed (no contingency), skipping")
+                continue
+        
+        # Store resolution method for this timestep
+        if resolution_method:
+            convergence_stats['timestep_resolution'][str(t)] = resolution_method
         
         # --- START DATA AGGREGATION (CONSISTENT 0 to N-1 ORDERING) ---
         
