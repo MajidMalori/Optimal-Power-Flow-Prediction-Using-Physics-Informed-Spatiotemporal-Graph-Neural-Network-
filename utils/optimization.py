@@ -158,13 +158,21 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
         sequence_range = model_config.SEQUENCE_LENGTH_RANGE if is_sequential else None
         rnn_layers_range = model_config.RNN_LAYERS_RANGE if is_sequential else None
     
+    # Use adaptive NUM_GC_LAYERS range based on system size
+    gc_layers_range = (model_config.get_num_gc_layers_range(num_buses)
+                      if hasattr(model_config, 'get_num_gc_layers_range')
+                      else model_config.NUM_GC_LAYERS_RANGE)
+    
     param_bounds = {
         'HIDDEN_DIM': hidden_range, 
-        'NUM_GC_LAYERS': model_config.NUM_GC_LAYERS_RANGE
+        'NUM_GC_LAYERS': gc_layers_range
     }
     
-    # Add physics-informed parameters
-    if is_physics_informed: 
+    # Add LAMBDA_P and LAMBDA_V as hyperparameters ONLY if using fixed lambdas
+    # Controlled by config.USE_ADAPTIVE_LAMBDA:
+    #   True  -> Adaptive lambda calculates weights dynamically (no tuning needed)
+    #   False -> MoSOA tunes LAMBDA_P and LAMBDA_V as hyperparameters
+    if is_physics_informed and not getattr(model_config, 'USE_ADAPTIVE_LAMBDA', True):
         param_bounds['LAMBDA_P'] = (1.0, 50.0)
         param_bounds['LAMBDA_V'] = (1.0, 50.0)
     
@@ -176,9 +184,13 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
         })
     
     # Add adaptive graph parameters
-    if uses_adaptive_graph: 
+    if uses_adaptive_graph:
+        # Use adaptive EMBEDDING_DIM range based on system size
+        embedding_range = (model_config.get_embedding_dim_range(num_buses)
+                          if hasattr(model_config, 'get_embedding_dim_range')
+                          else model_config.EMBEDDING_DIM_RANGE)
         param_bounds.update({
-            'EMBEDDING_DIM': model_config.EMBEDDING_DIM_RANGE, 
+            'EMBEDDING_DIM': embedding_range, 
             'PHI': model_config.PHI_RANGE
         })
     

@@ -66,6 +66,18 @@ class BaseTrainer(ABC):
             self.history['val_mse'].append(val_metrics['mse'])
             self.history['val_power_violation'].append(val_metrics['power_violation'])
             self.history['val_voltage_violation'].append(val_metrics['voltage_violation'])
+            
+            # Print adaptive lambda values (average of train and val) if available
+            train_lambda_p = train_metrics.get('adaptive_lambda_p')
+            train_lambda_v = train_metrics.get('adaptive_lambda_v')
+            val_lambda_p = val_metrics.get('adaptive_lambda_p')
+            val_lambda_v = val_metrics.get('adaptive_lambda_v')
+            
+            if train_lambda_p is not None and val_lambda_p is not None:
+                # Average train and val lambdas
+                avg_lambda_p = (train_lambda_p + val_lambda_p) / 2
+                avg_lambda_v = (train_lambda_v + val_lambda_v) / 2
+                print(f"  Adaptive λ_p: {avg_lambda_p:.7f} | λ_v: {avg_lambda_v:.7f}")
 
             # # Display epoch summary only for physics-informed models
             # if hasattr(self, 'is_physics_informed') and self.is_physics_informed:

@@ -352,8 +352,9 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     # For TIME-SERIES mode: Use STRATIFIED split by renewable fraction for ALL models
     # This ensures ALL renewable fractions appear in train/val/test sets
     if use_time_series:
-        model_type = "sequential" if not is_static else "static"
-        print(f"[Data] Using STRATIFIED split by renewable fraction ({model_type} model)")
+        # Silent - no need to print split strategy every time
+        # model_type = "sequential" if not is_static else "static"
+        # print(f"[Data] Using STRATIFIED split by renewable fraction ({model_type} model)")
         
         # Group indices by renewable fraction
         unique_fractions = np.unique(renewable_fractions)
@@ -390,8 +391,9 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
         val_indices = sorted(val_indices)
         test_indices = sorted(test_indices)
         
-        print(f"[Data] Stratified split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
-        print(f"[Data] Each split contains samples from ALL {len(unique_fractions)} renewable fractions")
+        # Silent - split info is not critical for every iteration
+        # print(f"[Data] Stratified split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
+        # print(f"[Data] Each split contains samples from ALL {len(unique_fractions)} renewable fractions")
         
         train_dataset = torch.utils.data.Subset(dataset, train_indices)
         val_dataset = torch.utils.data.Subset(dataset, val_indices)

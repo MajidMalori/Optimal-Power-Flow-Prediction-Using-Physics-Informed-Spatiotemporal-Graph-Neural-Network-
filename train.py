@@ -243,10 +243,20 @@ def main():
     print(f"Bus Systems: {bus_systems_to_test}")
     print("="*80)
     
-    # STEP 2: Validate data before training
-    if not validate_data_before_training(base_config, bus_systems_to_test):
-        print("Data validation failed. Exiting training.")
-        return
+    # STEP 2: Validate data before training (optional - can be skipped for faster startup)
+    if args.validate_data:
+        print("\n[Data Validation] Running data integrity checks...")
+        if not validate_data_before_training(base_config, bus_systems_to_test):
+            print("Data validation failed. Exiting training.")
+            return
+    else:
+        print("\n[Data Validation] Skipped (validate_data=False). Assuming data is correct.")
+        # Still display convergence analysis even if validation is skipped
+        from utils.data_validation import display_convergence_analysis
+        try:
+            display_convergence_analysis(base_config, bus_systems_to_test)
+        except Exception as e:
+            print(f"Warning: Could not display convergence analysis: {e}")
     
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -576,8 +586,7 @@ def main():
             # Generate uncertainty visualizations
             if base_config.SAVE_RESULTS and base_config.DATA_MODE == 'test':
                 try:
-                    print(f"\n[Uncertainty] Generating uncertainty visualizations for {model_name}...")
-                    # Get predictions with uncertainty data
+                    # Get predictions with uncertainty data (silent generation)
                     _, uncertainty_data = evaluate_model_with_uncertainty(
                         model_to_eval, test_loader_best, device, best_config, _normalizer, is_sequential
                     )
@@ -705,12 +714,15 @@ def main():
                         
                         # Copy uncertainty graphs if they exist
                         import shutil
+                        copied_count = 0
                         for uncertainty_file in ['uncertainty_spatial.png', 'uncertainty_temporal.png']:
                             src = os.path.join(model_uncertainty_dir, uncertainty_file)
                             dst = os.path.join(bus_system_dir, uncertainty_file)
                             if os.path.exists(src):
                                 shutil.copy2(src, dst)
-                                print(f"[Uncertainty] Copied {uncertainty_file} from best model ({best_bus_model_name}) to {num_buses}bus folder")
+                                copied_count += 1
+                        if copied_count > 0:
+                            print(f"[Uncertainty] Copied {copied_count} plots from best model ({best_bus_model_name}) to {num_buses}bus folder")
                 except Exception as e:
                     print(f"  Warning: Could not copy best model's uncertainty graphs: {e}")
         

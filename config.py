@@ -15,14 +15,19 @@ class Args:
     ⚙️ QUICK ACCESS - Modify these for your experiments
     """
     # === MODEL & SYSTEM CONFIGURATION ===
-    test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = '57,118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-    models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
+    test_config = 'physics_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+    bus_systems = '118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+    models_to_train = 'AdaptivePIGCN'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
     seed = 42
     
     # === DATA CONFIGURATION ===
     data_mode = 'test'  # Options: 'train' or 'test'
     test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
+    
+    # Data validation configuration
+    validate_data = False  # True: Run data integrity checks before training, False: Skip validation (faster)
+    # Set to True after generating new data to verify correctness
+    # Set to False for subsequent runs to save time (data doesn't change unless regenerated)
     
     # ┌──────────────────────────────────────────────────────────────────────────┐
     # │ TIMESTEP REFERENCE TABLE (60/20/20 split with complete 24-hour cycles)  │
@@ -44,6 +49,24 @@ class Args:
     use_time_series = True  # True: Time-Series (realistic daily cycles), False: Monte Carlo (random scenarios)
     hours_per_day = 24      # Number of hours in a day for time-series mode
     sequence_length = 5     # Sequence length for LSTM/GRU models (past N hours to predict current)
+    
+    # === MODEL CAPACITY CONFIGURATION ===
+    # Control model size per bus system for experimentation
+    # Options: 'normal' (conservative), 'medium' (balanced), 'large' (maximum capacity)
+    #
+    # Capacity Presets:
+    # ┌─────────┬────────────────────┬──────────────────────┬─────────────────────┐
+    # │ System  │ normal             │ medium               │ large               │
+    # ├─────────┼────────────────────┼──────────────────────┼─────────────────────┤
+    # │ 33-bus  │ H:32-64, GC:1-5    │ H:64, GC:5, E:32     │ H:96, GC:6, E:48    │
+    # │ 57-bus  │ H:32-64, GC:1-5    │ H:64, GC:5, E:32     │ H:96, GC:6, E:48    │
+    # │ 118-bus │ H:32-64, GC:1-5    │ H:96, GC:6, E:48     │ H:128, GC:8, E:64   │
+    # └─────────┴────────────────────┴──────────────────────┴─────────────────────┘
+    # H=Hidden_dim, GC=GC_layers, E=Embedding_dim
+    #
+    CAPACITY_33_BUS = 'normal'   # 33-bus: normal is sufficient
+    CAPACITY_57_BUS = 'normal'   # 57-bus: normal is sufficient  
+    CAPACITY_118_BUS = 'large'  # 118-bus: testing medium (96) vs large (128)
     
     # === RESULTS SAVING CONFIGURATION ===
     save_results = True  # False: No files saved (console output only), True: Save all results
@@ -87,14 +110,16 @@ class Config:
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 1
-    EARLY_STOPPING_PATIENCE = 25
+    NUM_EPOCHS = 200  # Testing medium vs large capacity (set to 200 for full training)
+    EARLY_STOPPING_PATIENCE = 75  # Increased to prevent premature stopping on 118-bus
     TRAIN_SPLIT = 0.6  # Changed to 0.6 for time-series (was 0.7)
     VAL_SPLIT = 0.2    # Changed to 0.2 for time-series (was 0.15)
     
+    # Mixed precision training (speeds up training but may reduce precision slightly)
+    USE_MIXED_PRECISION = False  # True: Use float16 (faster), False: Use float32 (more accurate)
+    # Set to False for 33-bus or if you need maximum precision
+    
     # --- Time-Series Configuration (Set during __init__ from Args) ---
-    # USE_TIME_SERIES, HOURS_PER_DAY, and SEQUENCE_LENGTH are set dynamically in __init__()
-    # Modify Args.use_time_series, Args.hours_per_day, Args.sequence_length at the top of this file instead
     
     # --- Multi-Objective Optimization Weights (normalized to sum to 1.0) ---
     MOOPF_WEIGHT_LOSS = 1/3
@@ -108,7 +133,14 @@ class Config:
     # S_BASE_MVA is determined dynamically based on system type in metrics.py
     # Case33: 10 MVA, Case57/118: 100 MVA
     
-    # --- Loss Function Weights ---
+    USE_ADAPTIVE_LAMBDA = True  # True: adaptive (Option 1), False: fixed + MoSOA tuning (Option 2)
+    
+    # Adaptive Lambda Configuration (only used if USE_ADAPTIVE_LAMBDA=True)
+    TARGET_POWER_CONTRIBUTION = 0.02  # Power violation should contribute ~5% of total loss
+    TARGET_VOLTAGE_CONTRIBUTION = 0.02  # Voltage violation should contribute ~5% of total loss
+    
+    # Fixed Lambda Configuration (only used if USE_ADAPTIVE_LAMBDA=False)
+    # Initial values - MoSOA will tune these in range (1.0, 50.0) during optimization
     LAMBDA_P = 10.0  # Weight for power balance violation
     LAMBDA_V = 10.0  # Weight for voltage limit violation
     
@@ -148,13 +180,104 @@ class Config:
         
         @staticmethod
         def get_hidden_dim_range(num_buses):
-            """Scale hidden dimensions based on system size - more conservative to prevent OOM"""
+            """
+            Get hidden dimension range based on system size and capacity setting.
+            Capacity levels: 'normal' (conservative), 'medium' (balanced), 'large' (maximum)
+            """
+            # Capacity presets for each bus system
+            capacity_settings = {
+                33: {
+                    'normal': (32, 64),
+                    'medium': (64, 64),
+                    'large': (96, 96)
+                },
+                57: {
+                    'normal': (32, 64),
+                    'medium': (64, 64),
+                    'large': (96, 96)
+                },
+                118: {
+                    'normal': (32, 64),
+                    'medium': (96, 96),
+                    'large': (128, 128)
+                }
+            }
+            
+            # Get capacity setting from Args
             if num_buses <= 33:
-                return (32, 64)      # Smaller systems - reduced max
+                capacity = Args.CAPACITY_33_BUS
             elif num_buses <= 57:
-                return (32, 64)      # Medium systems - more conservative
+                capacity = Args.CAPACITY_57_BUS
             else:
-                return (32, 64)      # Large systems - very conservative to prevent OOM
+                capacity = Args.CAPACITY_118_BUS
+            
+            return capacity_settings[num_buses][capacity]
+        
+        @staticmethod
+        def get_num_gc_layers_range(num_buses):
+            """
+            Get GC layers range based on system size and capacity setting.
+            """
+            capacity_settings = {
+                33: {
+                    'normal': (1, 5),
+                    'medium': (5, 5),
+                    'large': (6, 6)
+                },
+                57: {
+                    'normal': (1, 5),
+                    'medium': (5, 5),
+                    'large': (6, 6)
+                },
+                118: {
+                    'normal': (1, 5),
+                    'medium': (6, 6),
+                    'large': (8, 8)
+                }
+            }
+            
+            # Get capacity setting from Args
+            if num_buses <= 33:
+                capacity = Args.CAPACITY_33_BUS
+            elif num_buses <= 57:
+                capacity = Args.CAPACITY_57_BUS
+            else:
+                capacity = Args.CAPACITY_118_BUS
+            
+            return capacity_settings[num_buses][capacity]
+        
+        @staticmethod
+        def get_embedding_dim_range(num_buses):
+            """
+            Get embedding dimension range based on system size and capacity setting.
+            """
+            capacity_settings = {
+                33: {
+                    'normal': (8, 32),
+                    'medium': (32, 32),
+                    'large': (48, 48)
+                },
+                57: {
+                    'normal': (8, 32),
+                    'medium': (32, 32),
+                    'large': (48, 48)
+                },
+                118: {
+                    'normal': (8, 32),
+                    'medium': (48, 48),
+                    'large': (64, 64)
+                }
+            }
+            
+            # Get capacity setting from Args
+            if num_buses <= 33:
+                capacity = Args.CAPACITY_33_BUS
+            elif num_buses <= 57:
+                capacity = Args.CAPACITY_57_BUS
+            else:
+                capacity = Args.CAPACITY_118_BUS
+            
+            return capacity_settings[num_buses][capacity]
         
         @staticmethod
         def get_recommended_model(num_buses):
@@ -201,8 +324,9 @@ class Config:
     GCNConfig = _ModelConfig()
     
     AdaptivePIGCNConfig = _ModelConfig()
-    AdaptivePIGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)
+    AdaptivePIGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)  # Will be overridden for 118-bus
     AdaptivePIGCNConfig.PHI_RANGE = (0.0, 1.0)
+    AdaptivePIGCNConfig.NUM_GC_LAYERS_RANGE = (1, 6)  # Slightly more layers for 118-bus
     
     adaptiveGCNConfig = _ModelConfig()
     adaptiveGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)
@@ -273,11 +397,10 @@ class Config:
     
     @property
     def LATEST_RUN_DIR(self):
-        """Get the latest run directory (symlink/copy target)."""
-        if self._CURRENT_RUN_TIMESTAMP:
-            return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, f'latest_run_{self._CURRENT_RUN_TIMESTAMP}')
-        else:
-            return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run')
+        """Get the latest run directory (deprecated - use latest_run_info.txt instead)."""
+        # This property is kept for backward compatibility but should not be used
+        # The latest run is tracked via latest_run_info.txt pointer file
+        return self.CURRENT_RUN_DIR
     
     @property
     def EVALUATION_DIR(self):
@@ -475,39 +598,32 @@ class Config:
         print(f"Starting new run: run_{self._CURRENT_RUN_TIMESTAMP}")
 
     def _update_latest_run_link(self):
-        """Update the latest_run directory to point to current run."""
+        """Update the latest_run_info.txt pointer file to track current run."""
         import shutil
         
-        # Only clean up if the experimental_results directory exists
+        # Clean up old duplicate directories if they exist (migration from old system)
         if os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
-            # Clean up old latest_run_* directories (only directories, not files)
             try:
                 for item in os.listdir(self.EXPERIMENTAL_RESULTS_DIR):
+                    # Remove old latest_run_* duplicate directories
                     if item.startswith('latest_run_') and os.path.isdir(os.path.join(self.EXPERIMENTAL_RESULTS_DIR, item)):
                         old_dir = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, item)
                         shutil.rmtree(old_dir)
+                    # Remove old generic latest_run directory
+                    elif item == 'latest_run' and os.path.isdir(os.path.join(self.EXPERIMENTAL_RESULTS_DIR, item)):
+                        old_dir = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, item)
+                        shutil.rmtree(old_dir)
             except (OSError, FileNotFoundError, PermissionError):
-                # Directory might not exist or be accessible, that's okay
-                pass
-            
-            # Remove generic latest_run if it exists (backward compatibility)
-            generic_latest = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run')
-            if os.path.exists(generic_latest) and os.path.isdir(generic_latest):
-                try:
-                    shutil.rmtree(generic_latest)
-                except (OSError, PermissionError):
-                    # Might be in use, that's okay
-                    pass
+                pass  # If cleanup fails, continue anyway
         
-        # Create latest_run_info.txt with current run info
+        # Create/update latest_run_info.txt pointer file
         latest_info_file = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run_info.txt')
         try:
             with open(latest_info_file, 'w') as f:
                 f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\n")
-                f.write(f"Latest run directory: latest_run_{self._CURRENT_RUN_TIMESTAMP}\n")
+                f.write(f"Directory: {self.CURRENT_RUN_DIR}\n")
                 f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         except (OSError, PermissionError):
-            # If we can't write the info file, that's okay - not critical
             pass
     
     def _create_run_metadata(self):
@@ -550,14 +666,10 @@ class Config:
         if not self.SAVE_RESULTS:
             return
         
-        import shutil
         import json
         import csv
         
-        # Copy current run to latest_run
-        if os.path.exists(self.LATEST_RUN_DIR):
-            shutil.rmtree(self.LATEST_RUN_DIR)
-        shutil.copytree(self.CURRENT_RUN_DIR, self.LATEST_RUN_DIR)
+        # No duplication - the pointer file (latest_run_info.txt) already tracks latest run
         
         # Update run metadata with completion info
         metadata_file = os.path.join(self.CURRENT_RUN_DIR, 'run_metadata.json')
@@ -571,11 +683,6 @@ class Config:
                 metadata['results_summary'] = run_summary
             
             with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
-            # Also save to latest_run
-            latest_metadata_file = os.path.join(self.LATEST_RUN_DIR, 'run_metadata.json')
-            with open(latest_metadata_file, 'w') as f:
                 json.dump(metadata, f, indent=2)
         
         # Log to experiment tracking CSV
@@ -599,7 +706,6 @@ class Config:
             writer.writerow(log_entry)
         
         print(f"Run finalized: {self.CURRENT_RUN_DIR}")
-        print(f"Latest run updated: {self.LATEST_RUN_DIR}")
         print(f"Experiment logged to: {experiment_log}")
     
     def get_run_info(self):
@@ -608,6 +714,5 @@ class Config:
             'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}',
             'timestamp': self._CURRENT_RUN_TIMESTAMP,
             'current_run_dir': self.CURRENT_RUN_DIR,
-            'latest_run_dir': self.LATEST_RUN_DIR,
             'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }

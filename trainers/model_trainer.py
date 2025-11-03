@@ -1,7 +1,9 @@
 # In trainers/model_trainer.py
 
 import torch
+import numpy as np
 from tqdm import tqdm
+from collections import OrderedDict
 from .base_trainer import BaseTrainer
 from torch_geometric.utils import to_dense_adj
 import gc
@@ -17,8 +19,9 @@ class PowerSystemTrainer(BaseTrainer):
         super().__init__(model, criterion, optimizer, config, device)
         self.is_physics_informed = is_physics_informed
         
-        # Initialize mixed precision scaler for GPU training
-        self.scaler = GradScaler() if torch.cuda.is_available() else None
+        # Initialize mixed precision scaler for GPU training (only if enabled in config)
+        use_mixed_precision = getattr(config, 'USE_MIXED_PRECISION', True)
+        self.scaler = GradScaler() if (torch.cuda.is_available() and use_mixed_precision) else None
     
     def _get_gradient_accumulation_steps(self):
         """Calculate gradient accumulation steps based on system size to reduce memory usage"""
@@ -35,6 +38,10 @@ class PowerSystemTrainer(BaseTrainer):
         # --- START CORRECTION: Initialize trackers for each loss component ---
         epoch_losses = {'total_loss': 0, 'mse': 0, 'power_violation': 0, 'voltage_violation': 0}
         # --- END CORRECTION ---
+        
+        # Track adaptive lambdas for monitoring
+        adaptive_lambdas_p = []
+        adaptive_lambdas_v = []
         
         # Calculate gradient accumulation steps based on system size
         accumulation_steps = self._get_gradient_accumulation_steps()
@@ -94,16 +101,34 @@ class PowerSystemTrainer(BaseTrainer):
             epoch_losses['mse'] += loss_dict['mse'].item()
             epoch_losses['power_violation'] += loss_dict['power_violation'].item()
             epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
+            
+            # Track adaptive lambdas if available
+            if hasattr(self.criterion, '_adaptive_lambda_p'):
+                adaptive_lambdas_p.append(self.criterion._adaptive_lambda_p)
+            if hasattr(self.criterion, '_adaptive_lambda_v'):
+                adaptive_lambdas_v.append(self.criterion._adaptive_lambda_v)
 
-            # Update progress bar with running averages
+            # Update progress bar with running averages (7 decimal places for small values)
             if self.is_physics_informed:
-                pbar.set_postfix(
-                    mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}",
-                    p_viol=f"{epoch_losses['power_violation']/(batch_idx+1):.4f}",
-                    v_viol=f"{epoch_losses['voltage_violation']/(batch_idx+1):.4f}"
-                )
+                # Calculate current average lambda for display (if available)
+                current_lambda_p = adaptive_lambdas_p[-1] if adaptive_lambdas_p else self.criterion.lambda_p
+                current_lambda_v = adaptive_lambdas_v[-1] if adaptive_lambdas_v else self.criterion.lambda_v
+                
+                # Display WEIGHTED violations so math adds up: total = mse + weighted_p + weighted_v
+                avg_p_viol = epoch_losses['power_violation']/(batch_idx+1)
+                avg_v_viol = epoch_losses['voltage_violation']/(batch_idx+1)
+                weighted_p = current_lambda_p * avg_p_viol
+                weighted_v = current_lambda_v * avg_v_viol
+                
+                # Use OrderedDict to ensure display order: total, mse, weighted_p, weighted_v
+                pbar.set_postfix(OrderedDict([
+                    ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
+                    ('mse', f"{epoch_losses['mse']/(batch_idx+1):.7f}"),
+                    ('λp×Pviol', f"{weighted_p:.7f}"),
+                    ('λv×Vviol', f"{weighted_v:.7f}")
+                ]))
             else:
-                pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}")
+                pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")
             
             # Periodic memory cleanup for large systems (reduced frequency)
             if batch_idx % 100 == 0 and self.config.NUM_BUSES >= 57:
@@ -114,11 +139,18 @@ class PowerSystemTrainer(BaseTrainer):
 
         # --- START CORRECTION: Return the average of all loss components ---
         num_batches = len(train_loader)
+        
+        # Calculate average lambdas for this epoch (to be printed later)
+        avg_lambda_p = np.mean(adaptive_lambdas_p) if adaptive_lambdas_p else None
+        avg_lambda_v = np.mean(adaptive_lambdas_v) if adaptive_lambdas_v else None
+        
         return {
             'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
             'power_violation': epoch_losses['power_violation'] / num_batches,
-            'voltage_violation': epoch_losses['voltage_violation'] / num_batches
+            'voltage_violation': epoch_losses['voltage_violation'] / num_batches,
+            'adaptive_lambda_p': avg_lambda_p,
+            'adaptive_lambda_v': avg_lambda_v
         }
         # --- END CORRECTION ---
 
@@ -127,6 +159,11 @@ class PowerSystemTrainer(BaseTrainer):
         # --- START CORRECTION: Initialize trackers for each loss component ---
         epoch_losses = {'total_loss': 0, 'mse': 0, 'power_violation': 0, 'voltage_violation': 0}
         # --- END CORRECTION ---
+        
+        # Track adaptive lambdas for monitoring
+        adaptive_lambdas_p = []
+        adaptive_lambdas_v = []
+        
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
         with torch.no_grad():
@@ -163,23 +200,48 @@ class PowerSystemTrainer(BaseTrainer):
                 epoch_losses['mse'] += loss_dict['mse'].item()
                 epoch_losses['power_violation'] += loss_dict['power_violation'].item()
                 epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
+                
+                # Track adaptive lambdas if available
+                if hasattr(self.criterion, '_adaptive_lambda_p'):
+                    adaptive_lambdas_p.append(self.criterion._adaptive_lambda_p)
+                if hasattr(self.criterion, '_adaptive_lambda_v'):
+                    adaptive_lambdas_v.append(self.criterion._adaptive_lambda_v)
 
-                # Update progress bar with running averages
+                # Update progress bar with running averages (7 decimal places for small values)
                 if self.is_physics_informed:
-                    pbar.set_postfix(
-                        mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}",
-                        p_viol=f"{epoch_losses['power_violation']/(batch_idx+1):.4f}",
-                        v_viol=f"{epoch_losses['voltage_violation']/(batch_idx+1):.4f}"
-                    )
+                    # Calculate current average lambda for display (if available)
+                    current_lambda_p = adaptive_lambdas_p[-1] if adaptive_lambdas_p else self.criterion.lambda_p
+                    current_lambda_v = adaptive_lambdas_v[-1] if adaptive_lambdas_v else self.criterion.lambda_v
+                    
+                    # Display WEIGHTED violations so math adds up: total = mse + weighted_p + weighted_v
+                    avg_p_viol = epoch_losses['power_violation']/(batch_idx+1)
+                    avg_v_viol = epoch_losses['voltage_violation']/(batch_idx+1)
+                    weighted_p = current_lambda_p * avg_p_viol
+                    weighted_v = current_lambda_v * avg_v_viol
+                    
+                    # Use OrderedDict to ensure display order: total, mse, weighted_p, weighted_v
+                    pbar.set_postfix(OrderedDict([
+                        ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
+                        ('mse', f"{epoch_losses['mse']/(batch_idx+1):.7f}"),
+                        ('λp×Pviol', f"{weighted_p:.7f}"),
+                        ('λv×Vviol', f"{weighted_v:.7f}")
+                    ]))
                 else:
-                    pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.4f}")
+                    pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")
         
         # --- START CORRECTION: Return the average of all loss components ---
         num_batches = len(val_loader)
+        
+        # Calculate average lambdas for this epoch (to be printed later)
+        avg_lambda_p = np.mean(adaptive_lambdas_p) if adaptive_lambdas_p else None
+        avg_lambda_v = np.mean(adaptive_lambdas_v) if adaptive_lambdas_v else None
+        
         return {
             'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
             'power_violation': epoch_losses['power_violation'] / num_batches,
-            'voltage_violation': epoch_losses['voltage_violation'] / num_batches
+            'voltage_violation': epoch_losses['voltage_violation'] / num_batches,
+            'adaptive_lambda_p': avg_lambda_p,
+            'adaptive_lambda_v': avg_lambda_v
         }
         # --- END CORRECTION ---

@@ -197,7 +197,7 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
     # Save
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"[Uncertainty] Saved spatial comparison: {output_path}")
+    # Consolidated output - printed once at the end
 
 
 def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
@@ -302,7 +302,7 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     # Save
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"[Uncertainty] Saved temporal comparison: {output_path}")
+    # Consolidated output - printed once at the end
 
 
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
@@ -323,9 +323,7 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     Returns:
         uncertainty_data: Dictionary with all calculated metrics
     """
-    print(f"\n[Uncertainty] Generating uncertainty visualizations for {case_name} - {model_name}...")
-    
-    # Calculate uncertainty metrics
+    # Calculate uncertainty metrics (silent - will print summary at end)
     uncertainty_data = calculate_uncertainty_metrics(predictions, targets, renewable_fractions)
     
     # Create output directory if it doesn't exist
@@ -338,6 +336,9 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     # Generate temporal comparison curves (hours if time-series mode)
     temporal_output = os.path.join(output_dir, 'uncertainty_temporal.png')
     plot_temporal_comparison_curves(uncertainty_data, case_name, temporal_output, model_name, config)
+    
+    # Print consolidated message
+    print(f"[Uncertainty] Saved all plots for {model_name}")
     
     return uncertainty_data
 

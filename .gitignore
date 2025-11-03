@@ -20,6 +20,7 @@ data/case*
 # Explicitly exclude time coefficient files in root data folder
 data/*time_energy_coeffs.txt
 data/*time_carbon_coeffs.txt
+other_ref/
 
 # Test and debug scripts
 test_*.py

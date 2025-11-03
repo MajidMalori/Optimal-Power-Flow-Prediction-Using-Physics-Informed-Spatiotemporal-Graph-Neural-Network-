@@ -65,6 +65,10 @@ class PowerSystemLoss(nn.Module):
     This version correctly handles per-sample Ybus matrices and time-varying coefficients,
     making it suitable for datasets with mixed scenarios (e.g., different renewable
     fractions or N-1 contingencies).
+    
+    Supports both fixed and adaptive lambda weighting:
+    - Fixed: Use config.LAMBDA_P and config.LAMBDA_V
+    - Adaptive: Automatically scale lambdas so physics terms contribute target percentage
     """
     def __init__(self, config: object, normalizer, is_gcn: bool = False):
         super().__init__()
@@ -72,7 +76,16 @@ class PowerSystemLoss(nn.Module):
         self.normalizer = normalizer
         self.is_physics_informed = not is_gcn
         self.mse_loss_fn = nn.MSELoss()
-
+        
+        # Adaptive lambda configuration
+        self.use_adaptive_lambda = getattr(config, 'USE_ADAPTIVE_LAMBDA', True)
+        self.target_power_contribution = getattr(config, 'TARGET_POWER_CONTRIBUTION', 0.05)  # Power should be ~5% of total loss
+        self.target_voltage_contribution = getattr(config, 'TARGET_VOLTAGE_CONTRIBUTION', 0.05)  # Voltage should be ~5% of total loss
+        
+        # Epsilon for numerical stability (prevents division by zero)
+        self.epsilon = 1e-6
+        
+        # Fixed lambdas (only used if USE_ADAPTIVE_LAMBDA=False)
         self.lambda_p = getattr(config, 'LAMBDA_P', 10.0)
         self.lambda_v = getattr(config, 'LAMBDA_V', 10.0)
         
@@ -159,10 +172,29 @@ class PowerSystemLoss(nn.Module):
         power_penalty = torch.mean(power_violation_per_sample)
         voltage_penalty = torch.mean(voltage_violation_per_sample)
         
-        # --- START CORRECTION: Apply individual lambdas to each penalty ---
-        # Combine data loss and physics loss with their independent weights
-        total_loss = data_loss + (self.lambda_p * power_penalty) + (self.lambda_v * voltage_penalty)
-        # --- END CORRECTION ---
+        # Combine losses with adaptive or fixed lambdas
+        if self.use_adaptive_lambda:
+            # Adaptive lambdas: Each physics term contributes its target percentage independently
+            # This automatically scales with system size and training progress
+            
+            # Calculate adaptive lambda for power violations
+            # Target: power_penalty should contribute ~5% of total loss
+            adaptive_lambda_p = (self.target_power_contribution * data_loss) / (power_penalty + self.epsilon)
+            
+            # Calculate adaptive lambda for voltage violations
+            # Target: voltage_penalty should contribute ~5% of total loss
+            adaptive_lambda_v = (self.target_voltage_contribution * data_loss) / (voltage_penalty + self.epsilon)
+            
+            # Combine losses
+            total_loss = data_loss + adaptive_lambda_p * power_penalty + adaptive_lambda_v * voltage_penalty
+            
+            # Store adaptive lambdas for monitoring/logging
+            self._adaptive_lambda_p = adaptive_lambda_p.item()
+            self._adaptive_lambda_v = adaptive_lambda_v.item()
+            
+        else:
+            # Fixed lambdas (original approach)
+            total_loss = data_loss + self.lambda_p * power_penalty + self.lambda_v * voltage_penalty
             
         # Return a dictionary for detailed logging
         return {
@@ -479,32 +511,45 @@ class PowerSystemLoss(nn.Module):
         renewable_fraction: torch.Tensor = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Computes carbon emissions using component-based approach:
-        f3 = Σ(Pext_t + Pconv_t) * Cm / Ef
+        Computes carbon emissions using component-based approach.
+        
+        Physical Sign Convention (PandaPower):
+        - p_ext > 0: System IMPORTS from grid (grid supplies power) → Count as carbon if grid has fossil fuels
+        - p_ext < 0: System EXPORTS to grid (grid receives power) → NOT our carbon responsibility
+        - p_conv: Always positive (conventional generation) → Always carbon-emitting
+        - p_ren: Always positive (renewable generation) → Zero carbon
+        
+        Formula:
+            Carbon-emitting generation = p_conv + max(0, p_ext)
+            f3 = (p_conv + max(0, p_ext)) * Cm / Ef
         
         Where:
-        - Pext_t: External grid generation (p_ext_grid)
-        - Pconv_t: Conventional generation (p_conventional) 
-        - Pren_t: Renewable generation (p_renewable) - carbon-free
-        - Cm: Carbon emissions per unit electricity (time_carbon_coeff)
+        - p_conv: Conventional generation (coal, gas, nuclear)
+        - p_ext: External grid power (only count imports, not exports)
+        - Cm: Carbon intensity coefficient (time_carbon_coeff)
         - Ef: Energy utilization coefficient (time_energy_coeff)
-        
-        This approach directly uses the separated generation components
-        instead of calculating renewable fractions.
         """
         # Extract separated generation components from 10-feature state
         # Format: [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         
-        p_ext_mw = predicted_state_physical[..., 4]                               # External grid (can be + or -)
-        total_conv_gen = torch.sum(predicted_state_physical[..., 6], dim=-1)      # p_conventional (MW)
-        total_renewable_gen = torch.sum(predicted_state_physical[..., 8], dim=-1)  # p_renewable (MW) - carbon-free
+        p_ext_mw = predicted_state_physical[..., 4]     # External grid power (can be positive or negative)
+        p_conv_mw = predicted_state_physical[..., 6]    # Conventional generation (always positive)
+        p_ren_mw = predicted_state_physical[..., 8]     # Renewable generation (always positive)
         
-        # CORRECTED: Carbon-emitting generation includes:
-        # 1. Conventional generation (always positive)
-        # 2. Power DRAWN from grid (positive p_ext only, using ReLU)
-        # Use relu to only count when power is drawn FROM grid, not when pushing TO grid
-        carbon_emitting_grid_power = torch.sum(F.relu(p_ext_mw), dim=-1)  # Only positive p_ext
-        total_carbon_emitting_gen = total_conv_gen + carbon_emitting_grid_power
+        # Carbon-emitting sources:
+        # 1. Conventional generation (coal, gas, nuclear) - always counts
+        total_conv_gen = torch.sum(p_conv_mw, dim=-1)
+        
+        # 2. Grid import power ONLY (positive p_ext means drawing from grid)
+        # F.relu() zeros out negative values (exports don't count as our carbon)
+        # This matches PandaPower sign convention: positive = import, negative = export
+        grid_import_power = torch.sum(F.relu(p_ext_mw), dim=-1)
+        
+        # Total carbon-emitting generation
+        total_carbon_emitting_gen = total_conv_gen + grid_import_power
+        
+        # Total renewable generation (zero carbon)
+        total_renewable_gen = torch.sum(p_ren_mw, dim=-1)
         
         # Ensure coefficients are correctly shaped for broadcasting
         carbon_intensity = time_carbon_coeff.squeeze(-1) if time_carbon_coeff.dim() > 1 else time_carbon_coeff  # Cm
