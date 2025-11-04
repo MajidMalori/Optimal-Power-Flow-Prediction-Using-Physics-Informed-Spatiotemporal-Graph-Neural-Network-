@@ -60,24 +60,35 @@ def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, D
 
 
 def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray, 
-                                  renewable_fractions: np.ndarray) -> Dict:
+                                  renewable_fractions: np.ndarray, bus_types: np.ndarray = None) -> Dict:
     """
     Calculate uncertainty metrics for each renewable fraction.
     
+    OPF Mode: Predictions are bus-type dependent unknowns:
+    - PQ buses: [V, θ] (voltage magnitude, angle)
+    - PV buses: [Q, θ] (reactive power, angle)
+    - Slack buses: [P, Q] (active power, reactive power)
+    
     Args:
-        predictions: Shape [n_samples, n_buses, n_features]
-        targets: Shape [n_samples, n_buses, n_features]
+        predictions: Shape [n_samples, n_buses, 2] - OPF unknowns
+        targets: Shape [n_samples, n_buses, 2] - True OPF unknowns
         renewable_fractions: Shape [n_samples] - renewable fraction for each sample
+        bus_types: Shape [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack] (optional)
     
     Returns:
         Dictionary containing uncertainty metrics for each renewable fraction
     """
-    # Extract voltage magnitude (feature 0)
-    v_pred = predictions[:, :, 0]  # [n_samples, n_buses]
-    v_true = targets[:, :, 0]
+    # OPF Mode: Use both features (unknowns vary by bus type)
+    # For simplicity, compute uncertainty as combined error across both features
+    # This captures uncertainty in the predicted unknowns regardless of bus type
     
-    # Calculate errors
-    errors = v_pred - v_true  # [n_samples, n_buses]
+    # Calculate per-feature errors
+    errors_feat0 = predictions[:, :, 0] - targets[:, :, 0]  # [n_samples, n_buses]
+    errors_feat1 = predictions[:, :, 1] - targets[:, :, 1]  # [n_samples, n_buses]
+    
+    # Combined error magnitude (Euclidean norm per bus)
+    # This captures total prediction error regardless of which unknowns are being predicted
+    errors_combined = np.sqrt(errors_feat0**2 + errors_feat1**2)  # [n_samples, n_buses]
     
     # Get unique renewable fractions
     # IMPORTANT: Round to 1 decimal place to avoid floating point precision issues
@@ -90,13 +101,15 @@ def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray,
     for frac in unique_fractions:
         # Get indices for this fraction (using rounded values for stable comparison)
         mask = renewable_fractions_rounded == frac
-        frac_errors = errors[mask]  # [n_frac_samples, n_buses]
+        frac_errors = errors_combined[mask]  # [n_frac_samples, n_buses]
         
         # Spatial uncertainty: std across time for each bus
+        # This measures how much prediction error varies over time at each bus location
         spatial_uncertainty = np.std(frac_errors, axis=0)  # [n_buses]
         
-        # Temporal uncertainty: mean absolute error across buses for each timestep
-        temporal_uncertainty = np.mean(np.abs(frac_errors), axis=1)  # [n_frac_samples]
+        # Temporal uncertainty: mean error across buses for each timestep
+        # This measures system-wide prediction error at each time point
+        temporal_uncertainty = np.mean(frac_errors, axis=1)  # [n_frac_samples]
         
         # Use rounded float as key to match expected_fractions exactly
         uncertainty_data[round(float(frac), 1)] = {
@@ -293,24 +306,27 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
 
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
                                        renewable_fractions: np.ndarray, case_name: str,
-                                       output_dir: str, model_name: str = "", config=None):
+                                       output_dir: str, model_name: str = "", config=None,
+                                       bus_types: np.ndarray = None):
     """
     Main function to generate all uncertainty visualizations.
     
     Args:
-        predictions: Model predictions [n_samples, n_buses, n_features]
-        targets: True values [n_samples, n_buses, n_features]
+        predictions: Model predictions [n_samples, n_buses, 2] - OPF unknowns
+        targets: True values [n_samples, n_buses, 2] - OPF unknowns
         renewable_fractions: Renewable fraction for each sample [n_samples]
         case_name: Test case name (e.g., "case33")
         output_dir: Directory to save outputs
         model_name: Optional model name for titles and filenames
         config: Optional config object for time-series mode detection
+        bus_types: Optional [n_samples, n_buses] bus type array for OPF mode
     
     Returns:
         uncertainty_data: Dictionary with all calculated metrics
     """
-    # Calculate uncertainty metrics (silent - will print summary at end)
-    uncertainty_data = calculate_uncertainty_metrics(predictions, targets, renewable_fractions)
+    # Calculate uncertainty metrics using both features (OPF mode)
+    # Uses Euclidean norm of errors across both features to capture uncertainty in predicted unknowns
+    uncertainty_data = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types)
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)

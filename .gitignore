@@ -52,6 +52,7 @@ analyze_convergence.py
 info*.txt
 *_info.txt
 debug*.txt
+check*.py
 
 # Markdown files (except README.md)
 *.md

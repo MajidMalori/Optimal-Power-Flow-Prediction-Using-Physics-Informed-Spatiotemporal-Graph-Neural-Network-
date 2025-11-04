@@ -9,10 +9,9 @@ class GCN(BaseModel):
                  hidden_dim: int = 64,
                  num_gc_layers: int = 3,
                  num_buses: int = 118,
-                 dropout: float = 0.1,
-                 use_twin_heads: bool = False):
+                 dropout: float = 0.1):
         """
-        Simple GCN for pure state estimation.
+        Simple GCN for OPF prediction.
         
         Args:
             feature_dim: Number of input features (10 measurements)
@@ -20,7 +19,6 @@ class GCN(BaseModel):
             num_gc_layers: Number of graph convolution layers
             num_buses: Number of buses in the system
             dropout: Dropout rate
-            use_twin_heads: If True, use separate networks for VM and VA (ETH Zurich style)
         """
         # Pure state estimation: only predict voltage [vm, va]
         output_features_per_bus = 2
@@ -31,8 +29,6 @@ class GCN(BaseModel):
             num_gc_layers=num_gc_layers, num_buses=num_buses, dropout=dropout
         )
         
-        self.use_twin_heads = use_twin_heads
-        
         self.gc_layers = nn.ModuleList([
             VoltageGraphLayer(feature_dim if i == 0 else hidden_dim, hidden_dim)
             for i in range(num_gc_layers)
@@ -40,14 +36,10 @@ class GCN(BaseModel):
         
         self.dropout_layer = nn.Dropout(dropout)
         
-        # Output Layers
-        if use_twin_heads:
-            # ETH Zurich Twin Heads: Separate networks for magnitude and phase
-            self.mag_output_layer = nn.Linear(hidden_dim, 1)  # Voltage magnitude head
-            self.pha_output_layer = nn.Linear(hidden_dim, 1)  # Voltage angle head
-        else:
-            # Single head: Combined output [batch, buses, 2]
-            self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)  # Only 2 features: [vm_pu, va_rad]
+        # Output Layer
+        # Single head: Combined output [batch, buses, 2]
+        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
+        self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)  # 2 features per bus
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor):
         """
@@ -58,10 +50,8 @@ class GCN(BaseModel):
             adj: Adjacency matrix
             
         Returns:
-            If use_twin_heads=False:
-                torch.Tensor: Predicted voltages [batch_size, num_buses, 2]
-            If use_twin_heads=True:
-                Tuple[torch.Tensor, torch.Tensor]: (x_mag, x_pha) where each is [batch, buses]
+            torch.Tensor: Predicted unknowns [batch_size, num_buses, 2]
+                         OPF mode: bus-type dependent (PQ: V,θ | PV: Q,θ | Slack: P,Q)
         """
         batch_size, num_nodes, _ = x.shape
         
@@ -69,13 +59,7 @@ class GCN(BaseModel):
             x = torch.relu(gc_layer(x, adj))
             x = self.dropout_layer(x)
         
-        if self.use_twin_heads:
-            # ETH Zurich Twin Heads: Separate outputs for magnitude and phase
-            x_mag = self.mag_output_layer(x).squeeze(-1)  # [batch, buses]
-            x_pha = self.pha_output_layer(x).squeeze(-1)  # [batch, buses]
-            return x_mag, x_pha
-        else:
-            # Single head: Combined output
-            out = self.output_layer(x)  # [batch_size, num_buses, 2]
-            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-            return out
+        # Single head: Combined output
+        out = self.output_layer(x)  # [batch_size, num_buses, 2]
+        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+        return out

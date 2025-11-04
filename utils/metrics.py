@@ -164,7 +164,8 @@ class PowerSystemLoss(nn.Module):
         # Ensure outputs and targets have the same shape
         if outputs_norm.dim() != targets_norm.dim():
             if outputs_norm.dim() == 2 and targets_norm.dim() == 3:
-                 outputs_norm = outputs_norm.view(targets_norm.shape)
+                # Reshape flattened 2D output [batch, buses*features] to 3D [batch, buses, features]
+                outputs_norm = outputs_norm.view(targets_norm.shape)
             else:
                  raise ValueError(f"Shape mismatch: outputs {outputs_norm.shape}, targets {targets_norm.shape}")
         
@@ -287,6 +288,15 @@ class PowerSystemLoss(nn.Module):
                   f"({negative_vm_fraction*100:.1f}%), VM range: [{min_vm:.4f}, {max_vm:.4f}]")
         
         # Denormalize measured power (NEW: use measurements instead of predictions)
+        # Handle sequential models: features can be [batch, seq_len, buses, 10] or [batch, buses, 10]
+        if measurements_norm.dim() == 4:
+            # Sequential model: use last timestep [batch, seq_len, buses, 10] -> [batch, buses, 10]
+            measurements_norm = measurements_norm[:, -1, :, :]  # Take last timestep
+        elif measurements_norm.dim() != 3:
+            raise ValueError(
+                f"measurements_norm must be 3D [batch, buses, 10] or 4D [batch, seq_len, buses, 10], "
+                f"but got shape {measurements_norm.shape}"
+            )
         measurements_denorm = self.normalizer.denormalize(measurements_norm)  # [batch, buses, 10]
         
         # Calculate physics penalties using PREDICTED voltages + MEASURED power

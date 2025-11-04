@@ -12,7 +12,7 @@ class ResnetPIGCLSTM(BaseModel):
     and expand it internally, following the provided design guide.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float,
-                 embedding_dim: int = 16, phi: float = 0.5, use_twin_heads: bool = False, **kwargs):
+                 embedding_dim: int = 16, phi: float = 0.5, **kwargs):
         # Pure state estimation: output only voltage [vm, va]
         output_dim = 2  # Only voltage magnitude and angle
         super().__init__(feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim, num_gc_layers=num_gc_layers,
@@ -23,7 +23,6 @@ class ResnetPIGCLSTM(BaseModel):
 
         self.phi = phi
         self.embedding_dim = embedding_dim
-        self.use_twin_heads = use_twin_heads
         # Note: rnn_layers, num_buses, hidden_dim are stored in BaseModel
 
         # Learnable node embeddings to create an adaptive graph
@@ -49,14 +48,10 @@ class ResnetPIGCLSTM(BaseModel):
             self.lstm_projections.append(nn.Linear(lstm_hidden_size, flattened_size))  # Project back to original size
             self.lstm_layer_norms.append(nn.LayerNorm(flattened_size))
 
-        # Output Layers
-        if use_twin_heads:
-            # ETH Zurich Twin Heads: Separate networks for magnitude and phase
-            self.mag_output_layer = nn.Linear(self.hidden_dim, 1)  # Voltage magnitude head
-            self.pha_output_layer = nn.Linear(self.hidden_dim, 1)  # Voltage angle head
-        else:
-            # Single head: Combined output [batch, buses, 2]
-            self.output_transform = nn.Linear(self.hidden_dim, 2)  # Output: [vm_pu, va_rad]
+        # Output Layer
+        # Single head: Combined output [batch, buses, 2]
+        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
+        self.output_transform = nn.Linear(self.hidden_dim, 2)  # Output: 2 features per bus
         self.dropout_layer = nn.Dropout(self.dropout)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
@@ -117,14 +112,8 @@ class ResnetPIGCLSTM(BaseModel):
         last_step_per_node = last_step_output.view(batch_size, self.num_buses, self.hidden_dim)
         
         # Apply the final linear transformation.
-        if self.use_twin_heads:
-            # ETH Zurich Twin Heads: Separate outputs for magnitude and phase
-            x_mag = self.mag_output_layer(last_step_per_node).squeeze(-1)  # [batch, buses]
-            x_pha = self.pha_output_layer(last_step_per_node).squeeze(-1)  # [batch, buses]
-            return x_mag, x_pha
-        else:
-            # Single head: Combined output
-            final_output_per_node = self.output_transform(last_step_per_node)
-            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-            # Output shape: [batch_size, num_buses, 2] = [vm_pu, va_rad]
-            return final_output_per_node
+        # Single head: Combined output
+        final_output_per_node = self.output_transform(last_step_per_node)
+        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+        # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
+        return final_output_per_node

@@ -68,22 +68,17 @@ class PowerSystemTrainer(BaseTrainer):
             # Use mixed precision for forward pass
             if self.scaler is not None:
                 with autocast():
-                    outputs = self.model(features, adjacency_input)  # [batch, buses, 2] or (x_mag, x_pha) for twin heads
+                    outputs = self.model(features, adjacency_input)  # [batch, buses, 2]
                     
-                    # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
-                    use_twin_heads = getattr(self.config, 'USE_TWIN_HEADS', False)
-                    if use_twin_heads and isinstance(outputs, tuple):
-                        # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
-                        # Convert to combined format [batch, buses, 2] for loss function
-                        x_mag, x_pha = outputs
-                        # Stack to [batch, buses, 2] format
-                        outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
+                    # Get bus types from batch (OPF: bus-type-dependent unknowns)
+                    bus_types = batch.get('bus_types', None)  # [batch, buses] or None
                     
                     loss_dict = self.criterion(
-                        outputs,      # Predicted voltages [batch, buses, 2]
-                        targets,      # True voltages [batch, buses, 2]
+                        outputs,      # Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+                        targets,      # True unknowns [batch, buses, 2] (OPF: bus-type dependent)
                         features,     # Measured power (use as measurements)
-                        ybus
+                        ybus,
+                        bus_types=bus_types  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
                     )
                     total_loss = loss_dict['total_loss'] / accumulation_steps  # Scale loss for accumulation
 
@@ -97,16 +92,7 @@ class PowerSystemTrainer(BaseTrainer):
                     self.optimizer.zero_grad()
             else:
                 # CPU training without mixed precision
-                outputs = self.model(features, adjacency_input)  # [batch, buses, 2] or (x_mag, x_pha) for twin heads
-                
-                # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
-                use_twin_heads = getattr(self.config, 'USE_TWIN_HEADS', False)
-                if use_twin_heads and isinstance(outputs, tuple):
-                    # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
-                    # Convert to combined format [batch, buses, 2] for loss function
-                    x_mag, x_pha = outputs
-                    # Stack to [batch, buses, 2] format
-                    outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
+                outputs = self.model(features, adjacency_input)  # [batch, buses, 2]
                 
                 # DEBUG: Check output shape before passing to loss
                 if outputs.shape != targets.shape:
@@ -254,21 +240,17 @@ class PowerSystemTrainer(BaseTrainer):
                 else:
                     outputs = self.model(features, adjacency_input)
                 
-                # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
-                use_twin_heads = getattr(self.config, 'USE_TWIN_HEADS', False)
-                if use_twin_heads and isinstance(outputs, tuple):
-                    # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
-                    # Convert to combined format [batch, buses, 2] for loss function
-                    x_mag, x_pha = outputs
-                    # Stack to [batch, buses, 2] format
-                    outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
+                
+                # Get bus types from batch (OPF: bus-type-dependent unknowns)
+                bus_types = batch.get('bus_types', None)  # [batch, buses] or None
                 
                 # --- START CORRECTION: Process the dictionary of losses ---
                 loss_dict = self.criterion(
-                    outputs,      # Predicted voltages [batch, buses, 2]
-                    targets,      # True voltages [batch, buses, 2]
+                    outputs,      # Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+                    targets,      # True unknowns [batch, buses, 2] (OPF: bus-type dependent)
                     features,     # Measured power (use as measurements)
-                    ybus
+                    ybus,
+                    bus_types=bus_types  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
                 )
                 
                 # Update running totals for the epoch

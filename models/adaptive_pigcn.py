@@ -20,14 +20,13 @@ class StateGraphLayer(nn.Module):
 class AdaptivePIGCN(BaseModel):
     def __init__(self, feature_dim: int = 10, hidden_dim: int = 64,
                  num_gc_layers: int = 3, num_buses: int = 118, dropout: float = 0.3,
-                 embedding_dim: int = 16, phi: float = 0.5, use_twin_heads: bool = False):
+                 embedding_dim: int = 16, phi: float = 0.5):
         """
         Initializes the Adaptive Physics-Informed Graph Convolutional Network.
         
-        PURE STATE ESTIMATION:
-        - Input: feature_dim (10) = [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_partial, va_partial]
-        - Output (single head): [batch, buses, 2] = [vm_pu, va_rad]
-        - Output (twin heads): (x_mag, x_pha) = ([batch, buses], [batch, buses]) - separate tensors
+        OPF Mode:
+        - Input: feature_dim (10) = [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+        - Output: [batch, buses, 2] = bus-type dependent unknowns (PQ: V,θ | PV: Q,θ | Slack: P,Q)
         
         Args:
             feature_dim: Number of input features per node (measurements)
@@ -37,7 +36,6 @@ class AdaptivePIGCN(BaseModel):
             dropout: Dropout rate
             embedding_dim: Dimension for learned adjacency embeddings
             phi: Mixing coefficient between static and learned adjacency (0-1)
-            use_twin_heads: If True, use separate networks for VM and VA (ETH Zurich style)
         """
         # Input dimension (measurements)
         self.input_dim = feature_dim  # 10 features
@@ -55,7 +53,6 @@ class AdaptivePIGCN(BaseModel):
         self.phi = phi
         self.num_buses = num_buses
         self.feature_dim = feature_dim  # Legacy compatibility
-        self.use_twin_heads = use_twin_heads
 
         # --- Adaptive Graph Learning Components ---
         self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
@@ -76,20 +73,14 @@ class AdaptivePIGCN(BaseModel):
             nn.BatchNorm1d(hidden_dim) for _ in range(num_gc_layers)
         ])
 
-        # --- Output Layers ---
-        if use_twin_heads:
-            # ETH Zurich Twin Heads: Separate networks for magnitude and phase
-            # Each head outputs [batch, buses] - one value per bus
-            self.mag_output_layer = nn.Linear(hidden_dim, 1)  # Voltage magnitude head
-            self.pha_output_layer = nn.Linear(hidden_dim, 1)  # Voltage angle head
-        else:
-            # Single head: Combined output [batch, buses, 2]
-            # CRITICAL: Use local self.output_dim (2), NOT BaseModel's output_dim (num_buses*2)
-            output_features = 2  # Explicitly use 2, not self.output_dim which might be shadowed
-            self.output_layer = nn.Linear(hidden_dim, output_features)
-            # Verify the layer was created correctly
-            if self.output_layer.out_features != 2:
-                raise ValueError(f"Output layer created with wrong size: {self.output_layer.out_features}, expected 2")
+        # --- Output Layer ---
+        # Single head: Combined output [batch, buses, 2]
+        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
+        output_features = 2  # Explicitly use 2, not self.output_dim which might be shadowed
+        self.output_layer = nn.Linear(hidden_dim, output_features)
+        # Verify the layer was created correctly
+        if self.output_layer.out_features != 2:
+            raise ValueError(f"Output layer created with wrong size: {self.output_layer.out_features}, expected 2")
         
         self.dropout_layer = nn.Dropout(dropout)
 
@@ -104,13 +95,8 @@ class AdaptivePIGCN(BaseModel):
                                       Shape: [1, batch_size, num_buses, num_buses] or [batch_size, num_buses, num_buses]
 
         Returns:
-            If use_twin_heads=False:
-                torch.Tensor: Predicted voltage state. Shape: [batch_size, num_buses, 2]
-                             Features: [vm_pu, va_rad] - voltage magnitude and angle
-            If use_twin_heads=True:
-                Tuple[torch.Tensor, torch.Tensor]: (x_mag, x_pha)
-                    - x_mag: [batch_size, num_buses] - voltage magnitude per bus
-                    - x_pha: [batch_size, num_buses] - voltage angle per bus
+            torch.Tensor: Predicted unknowns. Shape: [batch_size, num_buses, 2]
+                         OPF mode: bus-type dependent (PQ: V,θ | PV: Q,θ | Slack: P,Q)
         """
         batch_size = x.size(0)
 
@@ -148,33 +134,20 @@ class AdaptivePIGCN(BaseModel):
             if i < len(self.gc_layers) - 1:
                 x = self.dropout_layer(x)
         
-        # --- 3. Output Layer(s) ---
-        if self.use_twin_heads:
-            # ETH Zurich Twin Heads: Separate outputs for magnitude and phase
-            # Each head outputs [batch, buses, 1], then squeeze to [batch, buses]
-            x_mag = self.mag_output_layer(x).squeeze(-1)  # [batch, buses]
-            x_pha = self.pha_output_layer(x).squeeze(-1)  # [batch, buses]
-            
-            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-            # - If model predicts negative vm_pu, physics loss will penalize it
-            # - This exposes the root cause instead of hiding it with ReLU
-            # - Voltage angle (va_rad) can be negative (angles are relative)
-            
-            return x_mag, x_pha
-        else:
-            # Single head: Combined output
-            x = self.output_layer(x)  # Should be [batch_size, num_buses, 2]
-            
-            # DEBUG: Check output shape
-            if x.shape[-1] != 2:
-                print(f"[DEBUG AdaptivePIGCN] Unexpected output shape: {x.shape}, expected last dim=2")
-                print(f"[DEBUG AdaptivePIGCN] output_layer: {self.output_layer}, output_dim={self.output_dim}")
-                print(f"[DEBUG AdaptivePIGCN] x before output_layer: {x.shape if hasattr(x, 'shape') else 'N/A'}")
-            
-            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-            # Output shape: [batch_size, num_buses, 2] = [vm_pu, va_rad]
-            # - If model predicts negative vm_pu, physics loss will penalize it
-            # - This exposes the root cause instead of hiding it with ReLU
-            # - Voltage angle (va_rad) can be negative (angles are relative)
-            
-            return x
+        # --- 3. Output Layer ---
+        # Single head: Combined output [batch, buses, 2]
+        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
+        x = self.output_layer(x)  # Should be [batch_size, num_buses, 2]
+        
+        # DEBUG: Check output shape
+        if x.shape[-1] != 2:
+            print(f"[DEBUG AdaptivePIGCN] Unexpected output shape: {x.shape}, expected last dim=2")
+            print(f"[DEBUG AdaptivePIGCN] output_layer: {self.output_layer}, output_dim={self.output_dim}")
+            print(f"[DEBUG AdaptivePIGCN] x before output_layer: {x.shape if hasattr(x, 'shape') else 'N/A'}")
+        
+        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+        # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
+        # - If model predicts invalid values, physics loss will penalize it
+        # - This exposes the root cause instead of hiding it with ReLU
+        
+        return x

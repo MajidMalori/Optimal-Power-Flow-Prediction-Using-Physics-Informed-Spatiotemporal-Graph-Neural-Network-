@@ -327,7 +327,6 @@ def main():
             print("ERROR: No valid models selected. Available models: PIGCLSTM, PIGCGRU, ResnetPIGCLSTM, ResnetPIGCGRU")
             return
 
-
     # === MAIN TRAINING EXECUTION ===
     print(f"\n TRAINING: {len(bus_systems_to_test)} bus systems {bus_systems_to_test}\n")
     
@@ -348,11 +347,13 @@ def main():
         try:
             data_tuple = load_power_system_data(base_config, case_name)
             _features, _adjacency, _ybus_matrices, _targets, _bus_types, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
+            
+            bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:
             print(f"[CRITICAL ERROR] {e}")
             continue
 
-        for model_name in models_to_test:
+        for model_name in bus_models_to_test:
             print(f"\n{'='*60}")
             print(f"{model_name} on {num_buses}-bus")
             print(f"{'='*60}")
@@ -407,8 +408,11 @@ def main():
                     train_loader, val_loader, test_loader = loaders
 
                     # Create model with optimized parameters
+                    # Detect OPF mode: check if bus_types exist (OPF) vs None (state estimation)
+                    is_opf_mode = (_bus_types is not None)
                     model_kwargs = create_model_kwargs(
-                        model_config, params, num_buses, is_sequential, uses_adaptive_graph
+                        model_config, params, num_buses, is_sequential, uses_adaptive_graph, 
+                        model_name=model_name, is_opf_mode=is_opf_mode
                     )
                     
                     # Check memory before model creation
@@ -558,8 +562,11 @@ def main():
             best_config.NUM_BUSES = num_buses
 
             # Create model kwargs for best model
+            # Detect OPF mode: check if bus_types exist (OPF) vs None (state estimation)
+            is_opf_mode = (_bus_types is not None)
             model_kwargs_best = create_model_kwargs(
-                model_config, best_params, num_buses, is_sequential, uses_adaptive_graph
+                model_config, best_params, num_buses, is_sequential, uses_adaptive_graph, 
+                model_name=model_name, is_opf_mode=is_opf_mode
             )
 
             # Create data loaders for best model
@@ -626,7 +633,8 @@ def main():
                         case_name=case_name,
                         output_dir=model_output_dir,
                         model_name=model_name,
-                        config=best_config  # Pass config for time-series mode detection
+                        config=best_config,  # Pass config for time-series mode detection
+                        bus_types=uncertainty_data.get('bus_types', None)  # Pass bus_types for OPF mode
                     )
                 except Exception as e:
                     print(f"  Warning: Could not generate uncertainty visualizations: {e}")

@@ -10,7 +10,7 @@ class PIGCLSTM(BaseModel):
     into a sequential LSTM framework to capture spatio-temporal dynamics.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float, 
-                 embedding_dim: int = 16, phi: float = 0.5, use_twin_heads: bool = False, **kwargs):
+                 embedding_dim: int = 16, phi: float = 0.5, **kwargs):
         """
         Args:
             feature_dim (int): The number of input features for each node.
@@ -35,7 +35,6 @@ class PIGCLSTM(BaseModel):
 
         self.phi = phi
         self.embedding_dim = embedding_dim
-        self.use_twin_heads = use_twin_heads
 
         # --- Start: Components from adaptiveGCN ---
         # Learnable node embeddings to create the latent graph structure.
@@ -87,14 +86,10 @@ class PIGCLSTM(BaseModel):
             self.lstm_projection = None
             print(f"PIGCLSTM: Using full LSTM size {lstm_hidden_size} for {num_buses}-bus system")
         
-        # Output Layers
-        if use_twin_heads:
-            # ETH Zurich Twin Heads: Separate networks for magnitude and phase
-            self.mag_output_layer = nn.Linear(hidden_dim, 1)  # Voltage magnitude head
-            self.pha_output_layer = nn.Linear(hidden_dim, 1)  # Voltage angle head
-        else:
-            # Single head: Combined output [batch, buses, 2]
-            self.output_transform = nn.Linear(hidden_dim, 2)  # Output: [vm_pu, va_rad]
+        # Output Layer
+        # Single head: Combined output [batch, buses, 2]
+        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
+        self.output_transform = nn.Linear(hidden_dim, 2)  # Output: 2 features per bus
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
@@ -150,14 +145,8 @@ class PIGCLSTM(BaseModel):
             last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
         
         # 7. Apply the final transformation to get the desired output shape.
-        if self.use_twin_heads:
-            # ETH Zurich Twin Heads: Separate outputs for magnitude and phase
-            x_mag = self.mag_output_layer(last_step_per_node).squeeze(-1)  # [batch, buses]
-            x_pha = self.pha_output_layer(last_step_per_node).squeeze(-1)  # [batch, buses]
-            return x_mag, x_pha
-        else:
-            # Single head: Combined output
-            final_output_per_node = self.output_transform(last_step_per_node)
-            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-            # Output shape: [batch_size, num_buses, 2] = [vm_pu, va_rad]
-            return final_output_per_node
+        # Single head: Combined output
+        final_output_per_node = self.output_transform(last_step_per_node)
+        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+        # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
+        return final_output_per_node

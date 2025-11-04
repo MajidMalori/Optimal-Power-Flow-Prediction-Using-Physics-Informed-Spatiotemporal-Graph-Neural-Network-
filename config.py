@@ -15,9 +15,9 @@ class Args:
     ⚙️ QUICK ACCESS - Modify these for your experiments
     """
     # === MODEL & SYSTEM CONFIGURATION ===
-    test_config = 'physics_only'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = '118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-    models_to_train = 'AdaptivePIGCN'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
+    test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+    models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
     seed = 42
     
     # === DATA CONFIGURATION ===
@@ -65,7 +65,7 @@ class Args:
     #
     CAPACITY_33_BUS = 'normal'   # 33-bus: normal is sufficient
     CAPACITY_57_BUS = 'normal'   # 57-bus: normal is sufficient  
-    CAPACITY_118_BUS = 'large'  # 118-bus: testing medium (96) vs large (128)
+    CAPACITY_118_BUS = 'normal'  # 118-bus: testing medium (96) vs large (128)
     
     # === RESULTS SAVING CONFIGURATION ===
     save_results = True  # False: No files saved (console output only), True: Save all results
@@ -109,7 +109,7 @@ class Config:
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 200  # Testing medium vs large capacity (set to 200 for full training)
+    NUM_EPOCHS = 1  # Testing medium vs large capacity (set to 200 for full training)
     EARLY_STOPPING_PATIENCE = 75  # Increased to prevent premature stopping on 118-bus
     TRAIN_SPLIT = 0.6  # Changed to 0.6 for time-series (was 0.7)
     VAL_SPLIT = 0.2    # Changed to 0.2 for time-series (was 0.15)
@@ -140,12 +140,6 @@ class Config:
     # Paper: "Multi-Task Learning Using Uncertainty to Weigh Losses"
     # No configuration needed - always uses learnable uncertainty weighting
 
-    # ETH Zurich Technique 1: Twin Heads Architecture
-    # When True: Separate neural networks for voltage magnitude and angle (like ETH Zurich)
-    #   - Forward returns: x_mag, x_pha (two separate tensors [batch, buses])
-    #   - Each head learns independently
-    # When False: Single head outputs combined [batch, buses, 2]
-    USE_TWIN_HEADS = False  # Disabled by default (can enable for ETH Zurich-style architecture)
     
     # ETH Zurich Technique 4: Separate VM/VA backward passes
     # WARNING: Experimental feature - may affect training stability
@@ -665,8 +659,8 @@ class Config:
                 'num_epochs': self.NUM_EPOCHS,
                 'batch_size': self.BATCH_SIZE,
                 's_base_mva': 'system_specific',  # Determined dynamically based on case type
-                'lambda_p': self.LAMBDA_P,
-                'lambda_v': self.LAMBDA_V
+                'loss_weighting': 'learnable_uncertainty',  # Kendall et al., CVPR 2018
+                'note': 'Loss weights (σ_data, σ_power, σ_voltage) learned automatically during training'
             },
             'directory_structure': {
                 'root': self.ROOT_DIR,

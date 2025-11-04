@@ -115,6 +115,11 @@ class PowerSystemNormalizer:
         Returns:
             Denormalized tensor of the same shape
         """
+        # Handle both torch tensors and numpy arrays
+        is_numpy = isinstance(data, np.ndarray)
+        if is_numpy:
+            data = torch.from_numpy(data).float()
+        
         if data.dim() != 3:
             raise ValueError(
                 f"denormalize expects a 3D tensor [batch_size, num_buses, num_features], "
@@ -146,6 +151,9 @@ class PowerSystemNormalizer:
         # Simple denormalization: x_original = x_normalized * std + mean
         denormalized_data = data * std_tensor + mean_tensor
         
+        # Return numpy if input was numpy, otherwise return tensor
+        if is_numpy:
+            return denormalized_data.numpy()
         return denormalized_data
 
 class PowerSystemDataset(Dataset):

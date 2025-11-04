@@ -44,13 +44,6 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
             
             outputs = model(features_input, adj)
             
-            # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
-            use_twin_heads = getattr(config, 'USE_TWIN_HEADS', False)
-            if use_twin_heads and isinstance(outputs, tuple):
-                # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
-                # Convert to combined format [batch, buses, 2] for evaluation
-                x_mag, x_pha = outputs
-                outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
 
             all_outputs.append(outputs)
             all_targets.append(targets)
@@ -109,6 +102,7 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
     all_outputs, all_targets = [], []
     all_ybus = []
     all_renewable_fractions = []
+    all_bus_types = []  # Collect bus_types for OPF mode
     
     with torch.no_grad():
         for batch in test_loader:
@@ -117,6 +111,7 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
             adj = batch['adjacency'].to(device)
             ybus = batch['ybus_matrix'].to(device)
             renewable_fraction = batch['renewable_fraction']  # Get renewable fraction
+            bus_types = batch.get('bus_types', None)  # Get bus_types if available (OPF mode)
 
             # Handle sequential vs non-sequential models
             if is_sequential and features.dim() == 3:
@@ -126,23 +121,19 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
             
             outputs = model(features_input, adj)
             
-            # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
-            use_twin_heads = getattr(config, 'USE_TWIN_HEADS', False)
-            if use_twin_heads and isinstance(outputs, tuple):
-                # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
-                # Convert to combined format [batch, buses, 2] for evaluation
-                x_mag, x_pha = outputs
-                outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
 
             all_outputs.append(outputs)
             all_targets.append(targets)
             all_ybus.append(ybus)
             all_renewable_fractions.append(renewable_fraction)
+            if bus_types is not None:
+                all_bus_types.append(bus_types)
 
     all_outputs_tensor = torch.cat(all_outputs, dim=0)
     all_targets_tensor = torch.cat(all_targets, dim=0)
     all_ybus_tensor = torch.cat(all_ybus, dim=0)
     all_renewable_fractions_tensor = torch.cat(all_renewable_fractions, dim=0)
+    all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None
 
     # Get num_buses dynamically from config
     if hasattr(config, 'NUM_BUSES'):
@@ -174,6 +165,10 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
         'targets': targets_denorm.cpu().numpy(),
         'renewable_fractions': all_renewable_fractions_tensor.cpu().numpy()
     }
+    
+    # Add bus_types if available (OPF mode)
+    if all_bus_types_tensor is not None:
+        uncertainty_data['bus_types'] = all_bus_types_tensor.cpu().numpy()
     
     return metrics, uncertainty_data
 
@@ -267,13 +262,6 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
             
             outputs = model(features_input, adj)
             
-            # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
-            use_twin_heads = getattr(config, 'USE_TWIN_HEADS', False)
-            if use_twin_heads and isinstance(outputs, tuple):
-                # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
-                # Convert to combined format [batch, buses, 2] for evaluation
-                x_mag, x_pha = outputs
-                outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
 
             all_outputs.append(outputs)
             all_targets.append(targets)
@@ -345,6 +333,10 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
             outputs_phys = normalizer.denormalize(outputs_norm)  # [batch, buses, 2] = [vm, va]
+            # Handle sequential models: features can be [batch, seq_len, buses, features]
+            if features.dim() == 4:
+                # Sequential model: use last timestep [batch, seq_len, buses, features] -> [batch, buses, features]
+                features = features[:, -1, :, :]  # Take last timestep
             features_phys = normalizer.denormalize(features)  # [batch, buses, 10] = [p_load, q_load, ...]
 
             if is_physics_informed:
@@ -436,12 +428,16 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
             # Handle shape consistency for different model types
             if outputs_norm.dim() == 2:
                 batch_size = outputs_norm.shape[0]
-                num_features = 10  # Updated for 10-feature approach
+                num_features = 2  # OPF mode: 2 unknowns per bus (varies by bus type)
                 outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
             
             # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
             outputs_phys = normalizer.denormalize(outputs_norm)  # [batch, buses, 2] = [vm, va]
+            # Handle sequential models: features can be [batch, seq_len, buses, features]
+            if features.dim() == 4:
+                # Sequential model: use last timestep [batch, seq_len, buses, features] -> [batch, buses, features]
+                features = features[:, -1, :, :]  # Take last timestep
             features_phys = normalizer.denormalize(features)  # [batch, buses, 10] = [p_load, q_load, ...]
 
             if is_physics_informed:

@@ -222,7 +222,8 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
 
 
 def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: int, 
-                       is_sequential: bool, uses_adaptive_graph: bool) -> Dict[str, Any]:
+                       is_sequential: bool, uses_adaptive_graph: bool, model_name: str = None,
+                       is_opf_mode: bool = True) -> Dict[str, Any]:
     """
     Create model keyword arguments from optimized parameters.
     
@@ -255,9 +256,7 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
             'phi': float(params['PHI'])
         })
     
-    # Add twin heads flag if configured (for AdaptivePIGCN and similar models)
-    use_twin_heads = getattr(model_config, 'USE_TWIN_HEADS', False)
-    model_kwargs['use_twin_heads'] = use_twin_heads
+    # Twin heads removed: Not compatible with OPF mode (different bus types have different unknowns)
     
     return model_kwargs
 

@@ -23,7 +23,9 @@ class adaptiveGCN(nn.Module):
         for _ in range(num_gc_layers - 1):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
 
-        num_output_features = 10 
+        # OPF Mode: Output 2 features per bus (unknowns vary by bus type)
+        # PQ buses: V, θ | PV buses: Q, θ | Slack buses: P, Q
+        num_output_features = 2
         self.output_layer = nn.Linear(hidden_dim, num_output_features)
 
     def forward(self, x, static_adj):
@@ -51,17 +53,12 @@ class adaptiveGCN(nn.Module):
             h = F.relu(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
 
-        output = self.output_layer(h)
+        output = self.output_layer(h)  # [batch_size, num_buses, 2]
         
-        # PHYSICAL CONSTRAINTS: Apply ReLU only to parameters that MUST be non-negative
-        # Based on physics: vm_pu, p_load, p_conv, p_ren must be positive
-        # Can be negative: va_rad, q_load, p_ext, q_ext, q_conv, q_ren (for reactive power control)
-        if output.shape[-1] >= 10:  # Ensure we have 10 features
-            output[..., 0] = torch.relu(output[..., 0])  # vm_pu ≥ 0 (voltage magnitude always positive)
-            output[..., 2] = torch.relu(output[..., 2])  # p_load ≥ 0 (loads consume power)
-            output[..., 6] = torch.relu(output[..., 6])  # p_conv ≥ 0 (generators produce power)
-            output[..., 8] = torch.relu(output[..., 8])  # p_ren ≥ 0 (renewables produce power)
-            # DO NOT apply ReLU to: va_rad [1], q_load [3], p_ext [4], q_ext [5], q_conv [7], q_ren [9]
-            # These can be negative for physical reasons (angles, reactive power, slack balancing)
+        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+        # OPF mode: Output shape [batch_size, num_buses, 2] = bus-type dependent unknowns
+        # - PQ buses: V (≥0), θ (any) | PV buses: Q (any), θ (any) | Slack buses: P (any), Q (any)
+        # - If model predicts invalid values, physics loss will penalize it
+        # - This exposes the root cause instead of hiding it with ReLU
         
-        return output.reshape(output.size(0), -1)
+        return output  # [batch_size, num_buses, 2]
