@@ -244,50 +244,36 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     # Color map for different renewable fractions
     colors = plt.cm.viridis(np.linspace(0, 1, len(fractions)))
     
-    # Determine if we should use hours or timesteps for x-axis
-    use_time_series = getattr(config, 'USE_TIME_SERIES', False) if config else False
+    # Always use time-series mode (hours of day on x-axis)
     hours_per_day = getattr(config, 'HOURS_PER_DAY', 24) if config else 24
     
     for frac, color in zip(fractions, colors):
         temporal_unc = uncertainty_data[frac]['temporal']
         n_points = len(temporal_unc)
         
-        if use_time_series:
-            # TIME-SERIES MODE: Map timesteps to hours of day (modulo 24)
-            # This shows the daily cycle pattern regardless of number of samples
-            x_values = np.arange(n_points) % hours_per_day
-            # Sort by hour of day for cleaner visualization
-            sort_idx = np.argsort(x_values)
-            x_values_sorted = x_values[sort_idx]
-            temporal_unc_sorted = temporal_unc[sort_idx]
-            
-            ax.plot(x_values_sorted, temporal_unc_sorted, 
-                   label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
-                   color=color, linewidth=2, alpha=0.8, marker='o', markersize=3)
-        else:
-            # MONTE CARLO MODE: X-axis shows timesteps
-            x_values = np.arange(n_points)
-            ax.plot(x_values, temporal_unc, 
-                   label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
-                   color=color, linewidth=2, alpha=0.8, marker='o', markersize=4)
+        # Map timesteps to hours of day (modulo 24) to show daily cycle pattern
+        x_values = np.arange(n_points) % hours_per_day
+        # Sort by hour of day for cleaner visualization
+        sort_idx = np.argsort(x_values)
+        x_values_sorted = x_values[sort_idx]
+        temporal_unc_sorted = temporal_unc[sort_idx]
+        
+        ax.plot(x_values_sorted, temporal_unc_sorted, 
+               label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
+               color=color, linewidth=2, alpha=0.8, marker='o', markersize=3)
     
-    # Labels and title
-    if use_time_series:
-        ax.set_xlabel('Hour of Day', fontsize=14, fontweight='bold')
-        # Set x-axis to show 0-23 hours
-        ax.set_xlim(-0.5, hours_per_day - 0.5)
-        ax.set_xticks(np.arange(0, hours_per_day, 3))  # Show every 3 hours
-        ax.set_xticklabels([f'{h}:00' for h in range(0, hours_per_day, 3)])  # Format as times
-    else:
-        ax.set_xlabel('Timestep', fontsize=14, fontweight='bold')
+    # Labels and title (always time-series format)
+    ax.set_xlabel('Hour of Day', fontsize=14, fontweight='bold')
+    # Set x-axis to show 0-23 hours
+    ax.set_xlim(-0.5, hours_per_day - 0.5)
+    ax.set_xticks(np.arange(0, hours_per_day, 3))  # Show every 3 hours
+    ax.set_xticklabels([f'{h}:00' for h in range(0, hours_per_day, 3)])  # Format as times
     
     ax.set_ylabel('Mean System Uncertainty σ_t (p.u.)', fontsize=14, fontweight='bold')
     
-    title = f'Temporal Uncertainty Curve - {case_name.upper()}'
+    title = f'Temporal Uncertainty Curve - {case_name.upper()} (Daily Cycle)'
     if model_name:
         title += f' - {model_name}'
-    if use_time_series:
-        title += ' (Daily Cycle Pattern)'
     ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
     
     # Legend

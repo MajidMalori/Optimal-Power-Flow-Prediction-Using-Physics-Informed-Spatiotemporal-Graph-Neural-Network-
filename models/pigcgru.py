@@ -10,7 +10,7 @@ class PIGCGRU(BaseModel):
     into a sequential GRU framework to capture spatio-temporal dynamics.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float, 
-                 embedding_dim: int = 16, phi: float = 0.5, **kwargs):
+                 embedding_dim: int = 16, phi: float = 0.5, use_twin_heads: bool = False, **kwargs):
         """
         Args:
             feature_dim (int): The number of input features for each node.
@@ -22,8 +22,8 @@ class PIGCGRU(BaseModel):
             embedding_dim (int): The dimensionality of the node embeddings for the adaptive matrix.
             phi (float): The interpolation coefficient for blending physical and learned graphs (0 <= phi <= 1).
         """
-        # The final output will have the same number of features as the input/target.
-        output_dim = feature_dim 
+        # Pure state estimation: output only voltage [vm, va]
+        output_dim = 2  # Only voltage magnitude and angle 
         super().__init__(
             feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim, 
             num_gc_layers=num_gc_layers, num_buses=num_buses, rnn_type='GRU', 
@@ -35,6 +35,7 @@ class PIGCGRU(BaseModel):
 
         self.phi = phi
         self.embedding_dim = embedding_dim
+        self.use_twin_heads = use_twin_heads
 
         # --- Start: Components from adaptiveGCN ---
         # Learnable node embeddings to create the latent graph structure.
@@ -76,8 +77,14 @@ class PIGCGRU(BaseModel):
         else:
             self.gru_projection = None
         
-        # Final layer to transform the GRU's output back to the desired feature dimension per node.
-        self.output_transform = nn.Linear(hidden_dim, feature_dim)
+        # Output Layers
+        if use_twin_heads:
+            # ETH Zurich Twin Heads: Separate networks for magnitude and phase
+            self.mag_output_layer = nn.Linear(hidden_dim, 1)  # Voltage magnitude head
+            self.pha_output_layer = nn.Linear(hidden_dim, 1)  # Voltage angle head
+        else:
+            # Single head: Combined output [batch, buses, 2]
+            self.output_transform = nn.Linear(hidden_dim, 2)  # Output: [vm_pu, va_rad]
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
@@ -133,18 +140,14 @@ class PIGCGRU(BaseModel):
             last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
         
         # 7. Apply the final transformation to get the desired output shape.
-        final_output_per_node = self.output_transform(last_step_per_node)
-        
-        # PHYSICAL CONSTRAINTS: Apply ReLU only to parameters that MUST be non-negative
-        # Based on physics: vm_pu, p_load, p_conv, p_ren must be positive
-        # Can be negative: va_rad, q_load, p_ext, q_ext, q_conv, q_ren (for reactive power control)
-        if final_output_per_node.shape[-1] >= 10:  # Ensure we have 10 features
-            final_output_per_node[..., 0] = torch.relu(final_output_per_node[..., 0])  # vm_pu ≥ 0 (voltage magnitude always positive)
-            final_output_per_node[..., 2] = torch.relu(final_output_per_node[..., 2])  # p_load ≥ 0 (loads consume power)
-            final_output_per_node[..., 6] = torch.relu(final_output_per_node[..., 6])  # p_conv ≥ 0 (generators produce power)
-            final_output_per_node[..., 8] = torch.relu(final_output_per_node[..., 8])  # p_ren ≥ 0 (renewables produce power)
-            # DO NOT apply ReLU to: va_rad [1], q_load [3], p_ext [4], q_ext [5], q_conv [7], q_ren [9]
-            # These can be negative for physical reasons (angles, reactive power, slack balancing)
-        
-        # Return the structured output [batch_size, num_nodes, feature_dim].
-        return final_output_per_node
+        if self.use_twin_heads:
+            # ETH Zurich Twin Heads: Separate outputs for magnitude and phase
+            x_mag = self.mag_output_layer(last_step_per_node).squeeze(-1)  # [batch, buses]
+            x_pha = self.pha_output_layer(last_step_per_node).squeeze(-1)  # [batch, buses]
+            return x_mag, x_pha
+        else:
+            # Single head: Combined output
+            final_output_per_node = self.output_transform(last_step_per_node)
+            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+            # Output shape: [batch_size, num_buses, 2] = [vm_pu, va_rad]
+            return final_output_per_node

@@ -50,90 +50,241 @@ def _plot_training_history_impl(history: Dict[str, list], model_name: str, confi
     """Internal implementation of plot_training_history."""
     
     if is_physics_informed:
-        # Physics-informed models: Show 4 plots with physics violations
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle(f'Training History for {model_name} (Physics-Informed)', fontsize=16)
+        # Check if learnable uncertainty tracking is available
+        has_learnable_uncertainty = ('sigma_data' in history and len(history['sigma_data']) > 0)
+        
+        if has_learnable_uncertainty:
+            # Expand to 4x2 grid (8 plots) to include learnable uncertainty evolution
+            fig, axes = plt.subplots(4, 2, figsize=(16, 18))
+            fig.suptitle(f'Training History for {model_name} (Physics-Informed + Learnable Uncertainty)', fontsize=16, fontweight='bold')
+        else:
+            # Original 3x2 grid (6 plots) for backward compatibility
+            fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+            fig.suptitle(f'Training History for {model_name} (Physics-Informed)', fontsize=16, fontweight='bold')
 
+        # Row 1: Total Loss + Combined MSE
         # Plot total loss
-        axes[0, 0].plot(history['train_total_loss'], label='Train')
-        axes[0, 0].plot(history['val_total_loss'], label='Validation')
-        axes[0, 0].set_title('Total Loss')
+        axes[0, 0].plot(history['train_total_loss'], label='Train', linewidth=2)
+        axes[0, 0].plot(history['val_total_loss'], label='Validation', linewidth=2)
+        axes[0, 0].set_title('Total Loss (MSE + Physics)', fontweight='bold')
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].legend()
-        axes[0, 0].grid(True)
+        axes[0, 0].grid(True, alpha=0.3)
         
-        # Plot MSE
-        axes[0, 1].plot(history['train_mse'], label='Train')
-        axes[0, 1].plot(history['val_mse'], label='Validation')
-        axes[0, 1].set_title('MSE Loss')
+        # Plot combined MSE
+        axes[0, 1].plot(history['train_mse'], label='Train', linewidth=2)
+        axes[0, 1].plot(history['val_mse'], label='Validation', linewidth=2)
+            axes[0, 1].set_title('Combined MSE (Var1 + Var2)', fontweight='bold')
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel('MSE')
         axes[0, 1].legend()
-        axes[0, 1].grid(True)
+        axes[0, 1].grid(True, alpha=0.3)
         
+        # Row 2: Variable Breakdown (OPF: bus-type dependent, State Estimation: VM/VA)
+        # Check if separate variable tracking is available
+        has_vm_va = ('val_mse_vm' in history and 'val_mse_va' in history and 
+                     len(history['val_mse_vm']) > 0 and len(history['val_mse_va']) > 0)
+        
+        if has_vm_va:
+            # Plot Variable 1 MSE (OPF: V for PQ, Q for PV, P for Slack | State Est: VM)
+            axes[1, 0].plot(history['train_mse_vm'], label='Train', linewidth=2, color='steelblue')
+            axes[1, 0].plot(history['val_mse_vm'], label='Validation', linewidth=2, color='coral')
+            axes[1, 0].set_title('Variable 1 MSE (OPF: V/Q/P | State Est: VM)', fontweight='bold')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('MSE (Var 1)')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # Plot Variable 2 MSE (OPF: θ for PQ/PV, Q for Slack | State Est: VA)
+            axes[1, 1].plot(history['train_mse_va'], label='Train', linewidth=2, color='green')
+            axes[1, 1].plot(history['val_mse_va'], label='Validation', linewidth=2, color='orange')
+            axes[1, 1].set_title('Variable 2 MSE (OPF: θ/Q | State Est: VA)', fontweight='bold')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('MSE (Var 2)')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True, alpha=0.3)
+        else:
+            # Fallback: Show learning rate or placeholder if VM/VA not available
+            if 'learning_rates' in history and len(history['learning_rates']) > 0:
+                axes[1, 0].plot(history['learning_rates'], linewidth=2, color='purple')
+                axes[1, 0].set_title('Learning Rate Schedule', fontweight='bold')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].set_ylabel('Learning Rate')
+                axes[1, 0].set_yscale('log')
+                axes[1, 0].grid(True, alpha=0.3)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'VM/VA tracking\nnot available', 
+                               ha='center', va='center', fontsize=12,
+                               bbox=dict(boxstyle='round', facecolor='lightgray'))
+                axes[1, 0].axis('off')
+            
+            # Second placeholder or training progress
+            axes[1, 1].text(0.5, 0.5, 'Enable ETH Zurich\nVM/VA tracking', 
+                           ha='center', va='center', fontsize=12,
+                           bbox=dict(boxstyle='round', facecolor='lightgray'))
+            axes[1, 1].axis('off')
+        
+        # Row 3: Physics Violations
         # Plot power violation
-        axes[1, 0].plot(history['train_power_violation'], label='Train')
-        axes[1, 0].plot(history['val_power_violation'], label='Validation')
-        axes[1, 0].set_title('Power Balance Violation')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Violation')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
+        axes[2, 0].plot(history['train_power_violation'], label='Train', linewidth=2, color='red')
+        axes[2, 0].plot(history['val_power_violation'], label='Validation', linewidth=2, color='darkred')
+        axes[2, 0].set_title('Power Balance Violation', fontweight='bold')
+        axes[2, 0].set_xlabel('Epoch')
+        axes[2, 0].set_ylabel('Violation')
+        axes[2, 0].legend()
+        axes[2, 0].grid(True, alpha=0.3)
         
         # Plot voltage violation
-        axes[1, 1].plot(history['train_voltage_violation'], label='Train')
-        axes[1, 1].plot(history['val_voltage_violation'], label='Validation')
-        axes[1, 1].set_title('Voltage Violation')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Violation')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
+        axes[2, 1].plot(history['train_voltage_violation'], label='Train', linewidth=2, color='blue')
+        axes[2, 1].plot(history['val_voltage_violation'], label='Validation', linewidth=2, color='darkblue')
+        axes[2, 1].set_title('Voltage Limit Violation', fontweight='bold')
+        axes[2, 1].set_xlabel('Epoch')
+        axes[2, 1].set_ylabel('Violation')
+        axes[2, 1].legend()
+        axes[2, 1].grid(True, alpha=0.3)
+        
+        # Row 4: Learnable Uncertainty Evolution (Kendall et al., CVPR 2018)
+        if has_learnable_uncertainty:
+            # Plot sigma values (uncertainty parameters)
+            axes[3, 0].plot(history['sigma_data'], label='σ_data', linewidth=2, color='purple')
+            axes[3, 0].plot(history['sigma_power'], label='σ_power', linewidth=2, color='red')
+            axes[3, 0].plot(history['sigma_voltage'], label='σ_voltage', linewidth=2, color='blue')
+            axes[3, 0].set_title('Learnable Uncertainty (σ) - Kendall et al., CVPR 2018', fontweight='bold')
+            axes[3, 0].set_xlabel('Epoch')
+            axes[3, 0].set_ylabel('σ (uncertainty)')
+            axes[3, 0].legend()
+            axes[3, 0].grid(True, alpha=0.3)
+            axes[3, 0].set_yscale('log')  # Log scale for better visualization
+            
+            # Plot effective lambdas (actual weights = 1/(2σ²))
+            axes[3, 1].plot(history['effective_lambda_p'], label='λ_p (power)', linewidth=2, color='darkred')
+            axes[3, 1].plot(history['effective_lambda_v'], label='λ_v (voltage)', linewidth=2, color='darkblue')
+            axes[3, 1].set_title('Effective Loss Weights (1/(2σ²))', fontweight='bold')
+            axes[3, 1].set_xlabel('Epoch')
+            axes[3, 1].set_ylabel('Effective Weight')
+            axes[3, 1].legend()
+            axes[3, 1].grid(True, alpha=0.3)
+            axes[3, 1].set_yscale('log')  # Log scale for better visualization
         
     else:
-        # Non-physics models: Show 4 plots with training metrics
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle(f'Training History for {model_name} (Non-Physics)', fontsize=16)
+        # ETH Zurich Enhancement: Non-physics models also get VM/VA breakdown
+        # Check if VM/VA tracking is available
+        has_vm_va = ('val_mse_vm' in history and 'val_mse_va' in history and 
+                     len(history['val_mse_vm']) > 0 and len(history['val_mse_va']) > 0)
+        
+        if has_vm_va:
+            # Use 3x2 grid to show VM/VA breakdown (same as physics-informed)
+            fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+            fig.suptitle(f'Training History for {model_name} (Non-Physics with ETH Zurich)', fontsize=16, fontweight='bold')
+            
+            # Row 1: MSE + RMSE
+            axes[0, 0].plot(history['train_mse'], label='Train', linewidth=2)
+            axes[0, 0].plot(history['val_mse'], label='Validation', linewidth=2)
+            axes[0, 0].set_title('Combined MSE (VM + VA)', fontweight='bold')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('MSE')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            train_rmse = [mse**0.5 for mse in history['train_mse']]
+            val_rmse = [mse**0.5 for mse in history['val_mse']]
+            axes[0, 1].plot(train_rmse, label='Train', linewidth=2)
+            axes[0, 1].plot(val_rmse, label='Validation', linewidth=2)
+            axes[0, 1].set_title('RMSE', fontweight='bold')
+            axes[0, 1].set_xlabel('Epoch')
+            axes[0, 1].set_ylabel('RMSE')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Row 2: Variable breakdown (OPF: bus-type dependent)
+            axes[1, 0].plot(history['train_mse_vm'], label='Train', linewidth=2, color='steelblue')
+            axes[1, 0].plot(history['val_mse_vm'], label='Validation', linewidth=2, color='coral')
+            axes[1, 0].set_title('Variable 1 MSE (OPF: V/Q/P)', fontweight='bold')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('MSE (Var 1)')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            axes[1, 1].plot(history['train_mse_va'], label='Train', linewidth=2, color='green')
+            axes[1, 1].plot(history['val_mse_va'], label='Validation', linewidth=2, color='orange')
+            axes[1, 1].set_title('Variable 2 MSE (OPF: θ/Q)', fontweight='bold')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('MSE (Var 2)')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            # Row 3: Learning Rate + Generalization Gap
+            if 'learning_rates' in history and len(history['learning_rates']) > 0:
+                axes[2, 0].plot(history['learning_rates'], linewidth=2, color='purple')
+                axes[2, 0].set_title('Learning Rate Schedule (ETH Zurich)', fontweight='bold')
+                axes[2, 0].set_xlabel('Epoch')
+                axes[2, 0].set_ylabel('Learning Rate')
+                axes[2, 0].set_yscale('log')
+                axes[2, 0].grid(True, alpha=0.3)
+            else:
+                epochs = list(range(1, len(history['train_mse']) + 1))
+                axes[2, 0].plot(epochs, history['train_mse'], alpha=0.7, label='Train MSE')
+                axes[2, 0].plot(epochs, history['val_mse'], alpha=0.7, label='Val MSE')
+                axes[2, 0].set_title('Loss Progression (Log Scale)', fontweight='bold')
+                axes[2, 0].set_xlabel('Epoch')
+                axes[2, 0].set_ylabel('Loss')
+                axes[2, 0].set_yscale('log')
+                axes[2, 0].legend()
+                axes[2, 0].grid(True, alpha=0.3)
+            
+            epochs = list(range(1, len(history['train_mse']) + 1))
+            train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
+            axes[2, 1].plot(epochs, train_val_gap, color='red', label='Train-Val Gap', linewidth=2)
+            axes[2, 1].set_title('Generalization Gap', fontweight='bold')
+            axes[2, 1].set_xlabel('Epoch')
+            axes[2, 1].set_ylabel('|Train MSE - Val MSE|')
+            axes[2, 1].legend()
+            axes[2, 1].grid(True, alpha=0.3)
+        else:
+            # Fallback: Original 2x2 grid for non-physics without VM/VA
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            fig.suptitle(f'Training History for {model_name} (Non-Physics)', fontsize=16)
 
-        # Plot MSE (main metric)
-        axes[0, 0].plot(history['train_mse'], label='Train', linewidth=2)
-        axes[0, 0].plot(history['val_mse'], label='Validation', linewidth=2)
-        axes[0, 0].set_title('MSE Loss (Primary Metric)')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('MSE')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
-        
-        # Plot RMSE (derived metric)
-        train_rmse = [mse**0.5 for mse in history['train_mse']]
-        val_rmse = [mse**0.5 for mse in history['val_mse']]
-        axes[0, 1].plot(train_rmse, label='Train')
-        axes[0, 1].plot(val_rmse, label='Validation')
-        axes[0, 1].set_title('RMSE')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('RMSE')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # Plot learning rate progression (if available) or loss smoothness
-        epochs = list(range(1, len(history['train_mse']) + 1))
-        axes[1, 0].plot(epochs, history['train_mse'], alpha=0.7, label='Train MSE')
-        axes[1, 0].plot(epochs, history['val_mse'], alpha=0.7, label='Val MSE')
-        axes[1, 0].set_title('Loss Progression')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Loss')
-        axes[1, 0].set_yscale('log')  # Log scale to better see convergence
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Plot training vs validation gap
-        train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
-        axes[1, 1].plot(epochs, train_val_gap, color='red', label='Train-Val Gap')
-        axes[1, 1].set_title('Generalization Gap (|Train - Val|)')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('MSE Difference')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
+            # Plot MSE (main metric)
+            axes[0, 0].plot(history['train_mse'], label='Train', linewidth=2)
+            axes[0, 0].plot(history['val_mse'], label='Validation', linewidth=2)
+            axes[0, 0].set_title('MSE Loss (Primary Metric)')
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('MSE')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True)
+            
+            # Plot RMSE (derived metric)
+            train_rmse = [mse**0.5 for mse in history['train_mse']]
+            val_rmse = [mse**0.5 for mse in history['val_mse']]
+            axes[0, 1].plot(train_rmse, label='Train')
+            axes[0, 1].plot(val_rmse, label='Validation')
+            axes[0, 1].set_title('RMSE')
+            axes[0, 1].set_xlabel('Epoch')
+            axes[0, 1].set_ylabel('RMSE')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True)
+            
+            # Plot learning rate progression (if available) or loss smoothness
+            epochs = list(range(1, len(history['train_mse']) + 1))
+            axes[1, 0].plot(epochs, history['train_mse'], alpha=0.7, label='Train MSE')
+            axes[1, 0].plot(epochs, history['val_mse'], alpha=0.7, label='Val MSE')
+            axes[1, 0].set_title('Loss Progression')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('Loss')
+            axes[1, 0].set_yscale('log')  # Log scale to better see convergence
+            axes[1, 0].legend()
+            axes[1, 0].grid(True)
+            
+            # Plot training vs validation gap
+            train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
+            axes[1, 1].plot(epochs, train_val_gap, color='red', label='Train-Val Gap')
+            axes[1, 1].set_title('Generalization Gap (|Train - Val|)')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('MSE Difference')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True)
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     

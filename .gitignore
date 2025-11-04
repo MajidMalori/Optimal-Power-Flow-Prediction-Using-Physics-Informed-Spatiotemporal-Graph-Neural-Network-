@@ -21,6 +21,8 @@ data/case*
 data/*time_energy_coeffs.txt
 data/*time_carbon_coeffs.txt
 other_ref/
+state_est_data/
+old_data/
 
 # Test and debug scripts
 test_*.py

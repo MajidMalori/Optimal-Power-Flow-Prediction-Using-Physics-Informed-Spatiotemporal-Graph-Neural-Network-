@@ -9,13 +9,29 @@ class GCN(BaseModel):
                  hidden_dim: int = 64,
                  num_gc_layers: int = 3,
                  num_buses: int = 118,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 use_twin_heads: bool = False):
+        """
+        Simple GCN for pure state estimation.
         
-        output_dim = num_buses * 10  # 10 features per bus
+        Args:
+            feature_dim: Number of input features (10 measurements)
+            hidden_dim: Hidden layer dimension
+            num_gc_layers: Number of graph convolution layers
+            num_buses: Number of buses in the system
+            dropout: Dropout rate
+            use_twin_heads: If True, use separate networks for VM and VA (ETH Zurich style)
+        """
+        # Pure state estimation: only predict voltage [vm, va]
+        output_features_per_bus = 2
+        output_dim = num_buses * output_features_per_bus
+        
         super().__init__(
             feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim,
             num_gc_layers=num_gc_layers, num_buses=num_buses, dropout=dropout
         )
+        
+        self.use_twin_heads = use_twin_heads
         
         self.gc_layers = nn.ModuleList([
             VoltageGraphLayer(feature_dim if i == 0 else hidden_dim, hidden_dim)
@@ -23,26 +39,43 @@ class GCN(BaseModel):
         ])
         
         self.dropout_layer = nn.Dropout(dropout)
-        self.output_layer = nn.Linear(hidden_dim, 10)  # All 10 features: V_mag, V_angle, P_load, Q_load, P_ext, Q_ext, P_conv, Q_conv, P_ren, Q_ren
+        
+        # Output Layers
+        if use_twin_heads:
+            # ETH Zurich Twin Heads: Separate networks for magnitude and phase
+            self.mag_output_layer = nn.Linear(hidden_dim, 1)  # Voltage magnitude head
+            self.pha_output_layer = nn.Linear(hidden_dim, 1)  # Voltage angle head
+        else:
+            # Single head: Combined output [batch, buses, 2]
+            self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)  # Only 2 features: [vm_pu, va_rad]
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, adj: torch.Tensor):
+        """
+        Forward pass.
+        
+        Args:
+            x: Input measurements [batch_size, num_buses, 10]
+            adj: Adjacency matrix
+            
+        Returns:
+            If use_twin_heads=False:
+                torch.Tensor: Predicted voltages [batch_size, num_buses, 2]
+            If use_twin_heads=True:
+                Tuple[torch.Tensor, torch.Tensor]: (x_mag, x_pha) where each is [batch, buses]
+        """
         batch_size, num_nodes, _ = x.shape
         
         for gc_layer in self.gc_layers:
             x = torch.relu(gc_layer(x, adj))
             x = self.dropout_layer(x)
         
-        out = self.output_layer(x)
-        
-        # PHYSICAL CONSTRAINTS: Apply ReLU only to parameters that MUST be non-negative
-        # Based on physics: vm_pu, p_load, p_conv, p_ren must be positive
-        # Can be negative: va_rad, q_load, p_ext, q_ext, q_conv, q_ren (for reactive power control)
-        if out.shape[-1] >= 10:  # Ensure we have 10 features
-            out[..., 0] = torch.relu(out[..., 0])  # vm_pu ≥ 0 (voltage magnitude always positive)
-            out[..., 2] = torch.relu(out[..., 2])  # p_load ≥ 0 (loads consume power)
-            out[..., 6] = torch.relu(out[..., 6])  # p_conv ≥ 0 (generators produce power)
-            out[..., 8] = torch.relu(out[..., 8])  # p_ren ≥ 0 (renewables produce power)
-            # DO NOT apply ReLU to: va_rad [1], q_load [3], p_ext [4], q_ext [5], q_conv [7], q_ren [9]
-            # These can be negative for physical reasons (angles, reactive power, slack balancing)
-        
-        return out.reshape(batch_size, -1)  # Flatten to [batch_size, num_buses * 10]
+        if self.use_twin_heads:
+            # ETH Zurich Twin Heads: Separate outputs for magnitude and phase
+            x_mag = self.mag_output_layer(x).squeeze(-1)  # [batch, buses]
+            x_pha = self.pha_output_layer(x).squeeze(-1)  # [batch, buses]
+            return x_mag, x_pha
+        else:
+            # Single head: Combined output
+            out = self.output_layer(x)  # [batch_size, num_buses, 2]
+            # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
+            return out

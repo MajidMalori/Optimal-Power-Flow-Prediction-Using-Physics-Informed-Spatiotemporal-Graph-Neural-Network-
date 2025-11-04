@@ -205,7 +205,6 @@ def main():
         save_results=args.save_results, 
         test_timesteps=args.test_timesteps, 
         clear_results=args.clear_results,
-        use_time_series=args.use_time_series,
         hours_per_day=args.hours_per_day,
         sequence_length=args.sequence_length
     )
@@ -251,8 +250,27 @@ def main():
             return
     else:
         print("\n[Data Validation] Skipped (validate_data=False). Assuming data is correct.")
+        
+        # Check if data actually exists, if not, generate it automatically
+        from utils.data_validation import generate_data_if_missing, display_convergence_analysis
+        import glob
+        
+        # Quick check: Do we have ANY data files?
+        data_exists = False
+        for bus_system in bus_systems_to_test:
+            pattern = os.path.join(base_config.DATA_DIR, f"case{bus_system}_features_frac*.npy")
+            if glob.glob(pattern):
+                data_exists = True
+                break
+        
+        if not data_exists:
+            print("\n[Auto-Generate] No data found. Generating data automatically...")
+            success = generate_data_if_missing(base_config)
+            if not success:
+                print("[Auto-Generate] Failed to generate data. Exiting training.")
+                return
+        
         # Still display convergence analysis even if validation is skipped
-        from utils.data_validation import display_convergence_analysis
         try:
             display_convergence_analysis(base_config, bus_systems_to_test)
         except Exception as e:
@@ -329,7 +347,7 @@ def main():
         base_config.CASE_NAME = case_name
         try:
             data_tuple = load_power_system_data(base_config, case_name)
-            _features, _adjacency, _ybus_matrices, _targets, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
+            _features, _adjacency, _ybus_matrices, _targets, _bus_types, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
         except FileNotFoundError as e:
             print(f"[CRITICAL ERROR] {e}")
             continue
@@ -382,9 +400,9 @@ def main():
                     log_memory_usage(f"Before loading {num_buses}-bus data")
                     
                     loaders = create_data_loaders(
-                        _features, _adjacency, _ybus_matrices, _targets, 
-                        _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                        is_static=(not is_sequential)
+                        _features, _adjacency, _ybus_matrices, _targets,
+                        _energy_coeffs, _carbon_coeffs, _renewable_fractions, base_config, is_static=(not is_sequential),
+                        bus_types=_bus_types
                     )
                     train_loader, val_loader, test_loader = loaders
 
@@ -417,7 +435,7 @@ def main():
                             loaders = create_data_loaders(
                                 _features, _adjacency, _ybus_matrices, _targets, 
                                 _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                                is_static=(not is_sequential)
+                                is_static=(not is_sequential), bus_types=_bus_types
                             )
                             train_loader, val_loader, test_loader = loaders
                             model = model_class_map[model_name](**model_kwargs).to(device)
@@ -548,7 +566,7 @@ def main():
             loaders_best = create_data_loaders(
                 _features, _adjacency, _ybus_matrices, _targets, 
                 _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                is_static=(not is_sequential)
+                is_static=(not is_sequential), bus_types=_bus_types
             )
             _, _, test_loader_best = loaders_best
 
@@ -570,7 +588,7 @@ def main():
                     loaders_best = create_data_loaders(
                         _features, _adjacency, _ybus_matrices, _targets, 
                         _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                        is_static=(not is_sequential)
+                        is_static=(not is_sequential), bus_types=_bus_types
                     )
                     _, _, test_loader_best = loaders_best
                     model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)

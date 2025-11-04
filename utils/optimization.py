@@ -49,7 +49,18 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
     """
     
     # --- 1. Initialization ---
-    best_position = np.zeros(dim)
+    # Convert bounds to numpy arrays if they're lists (robustness)
+    lower_bound = np.asarray(lower_bound, dtype=np.float64)
+    upper_bound = np.asarray(upper_bound, dtype=np.float64)
+    
+    # Validate bounds
+    if len(lower_bound) != dim or len(upper_bound) != dim:
+        raise ValueError(f"Bounds dimension mismatch: lower_bound={len(lower_bound)}, upper_bound={len(upper_bound)}, dim={dim}")
+    if np.any(lower_bound >= upper_bound):
+        raise ValueError("Lower bounds must be strictly less than upper bounds")
+    
+    # Initialize best_position to middle of bounds (not zeros) to avoid invalid models
+    best_position = (lower_bound + upper_bound) / 2.0
     best_score = float('inf')
     
     positions = _init_positions(num_agents, dim, upper_bound, lower_bound)
@@ -69,13 +80,31 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         # --- 2a. Fitness Evaluation and Global Best Update ---
         fitness_all = np.full(num_agents, np.inf)
         for i in range(num_agents):
+            # ROOT CAUSE DETECTION: Track if clipping occurs (indicates boundary issues)
+            original_pos = positions[i, :].copy()
             positions[i, :] = np.clip(positions[i, :], lower_bound, upper_bound)
-            fitness = objective_func(positions[i, :])
-            fitness_all[i] = fitness
+            was_clipped = not np.allclose(original_pos, positions[i, :])
+            if was_clipped and param_keys:
+                clipped_dims = np.where(~np.isclose(original_pos, positions[i, :]))[0]
+                # Log first time clipping happens for each dimension (avoid spam)
             
-            if fitness < best_score:
-                best_score = fitness
-                best_position = positions[i, :].copy()
+            # Validate parameters before evaluation to prevent invalid model initialization
+            try:
+                fitness = objective_func(positions[i, :])
+                # Only update if fitness is valid (not NaN or inf)
+                if np.isfinite(fitness):
+                    fitness_all[i] = fitness
+                    
+                    if fitness < best_score:
+                        best_score = fitness
+                        best_position = positions[i, :].copy()
+                else:
+                    # Invalid fitness - keep previous best
+                    fitness_all[i] = np.inf
+            except (ValueError, RuntimeError) as e:
+                # Model initialization failed - skip this position
+                fitness_all[i] = np.inf
+                continue
 
         # --- 2b. Calculate Adaptive Parameters ---
         f_max, f_min, f_avg = np.max(fitness_all), np.min(fitness_all), np.mean(fitness_all)
@@ -168,13 +197,8 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
         'NUM_GC_LAYERS': gc_layers_range
     }
     
-    # Add LAMBDA_P and LAMBDA_V as hyperparameters ONLY if using fixed lambdas
-    # Controlled by config.USE_ADAPTIVE_LAMBDA:
-    #   True  -> Adaptive lambda calculates weights dynamically (no tuning needed)
-    #   False -> MoSOA tunes LAMBDA_P and LAMBDA_V as hyperparameters
-    if is_physics_informed and not getattr(model_config, 'USE_ADAPTIVE_LAMBDA', True):
-        param_bounds['LAMBDA_P'] = (1.0, 50.0)
-        param_bounds['LAMBDA_V'] = (1.0, 50.0)
+    # Note: Loss weights are learnable (Kendall et al., CVPR 2018) - no hyperparameter tuning needed
+    # The model automatically learns optimal loss weights via backpropagation
     
     # Add sequential model parameters with adaptive ranges
     if is_sequential: 
@@ -212,8 +236,10 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
     Returns:
         Dictionary of model keyword arguments
     """
+    # CRITICAL FIX: Use INPUT_DIM (10) for feature_dim, NOT FEATURE_DIM which equals OUTPUT_DIM (2)
+    input_dim = getattr(model_config, 'INPUT_DIM', 10)  # Default to 10 for pure state estimation
     model_kwargs = {
-        'feature_dim': model_config.FEATURE_DIM,
+        'feature_dim': input_dim,  # Input dimension (10 measurements), NOT output dimension (2 voltages)
         'hidden_dim': int(params['HIDDEN_DIM']),
         'num_gc_layers': int(params['NUM_GC_LAYERS']),
         'num_buses': num_buses,
@@ -228,6 +254,10 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
             'embedding_dim': int(params['EMBEDDING_DIM']),
             'phi': float(params['PHI'])
         })
+    
+    # Add twin heads flag if configured (for AdaptivePIGCN and similar models)
+    use_twin_heads = getattr(model_config, 'USE_TWIN_HEADS', False)
+    model_kwargs['use_twin_heads'] = use_twin_heads
     
     return model_kwargs
 
@@ -246,20 +276,46 @@ def generate_run_name(model_name: str, params: Dict[str, Any], num_buses: int,
 def process_optimization_params(param_keys: List[str], param_values: np.ndarray) -> Dict[str, Any]:
     """
     Process optimization parameters, converting integers where needed.
+    Validates and ensures parameters are within valid ranges to prevent invalid model initialization.
     
     Args:
         param_keys: List of parameter names
         param_values: Array of parameter values
         
     Returns:
-        Dictionary of processed parameters
+        Dictionary of processed parameters with validated values
     """
     params = {key: val for key, val in zip(param_keys, param_values)}
     
-    # Convert specific parameters to integers
+    # Define minimum values for each parameter type to prevent invalid model initialization
+    min_values = {
+        'HIDDEN_DIM': 16,      # Minimum hidden dimension for valid neural network layers
+        'NUM_GC_LAYERS': 1,    # Must have at least 1 graph convolution layer
+        'SEQUENCE_LENGTH': 1,  # Minimum sequence length
+        'RNN_LAYERS': 1,       # Must have at least 1 RNN layer
+        'EMBEDDING_DIM': 4,    # Minimum embedding dimension for adaptive graph
+    }
+    
+    # Convert specific parameters to integers with validation
     for k in ['HIDDEN_DIM', 'NUM_GC_LAYERS', 'SEQUENCE_LENGTH', 'RNN_LAYERS', 'EMBEDDING_DIM']:
         if k in params:
-            params[k] = int(round(params[k]))
+            # Handle NaN, inf, and invalid values
+            val = params[k]
+            if np.isnan(val) or np.isinf(val) or val <= 0:
+                # Use minimum value if invalid
+                params[k] = min_values.get(k, 1)
+            else:
+                # Round and ensure minimum value
+                rounded = int(round(val))
+                params[k] = max(rounded, min_values.get(k, 1))
+    
+    # Validate PHI (mixing coefficient) - must be between 0 and 1
+    if 'PHI' in params:
+        phi_val = params['PHI']
+        if np.isnan(phi_val) or np.isinf(phi_val):
+            params['PHI'] = 0.5  # Default to balanced mixing
+        else:
+            params['PHI'] = np.clip(float(phi_val), 0.0, 1.0)
     
     return params
 
@@ -290,9 +346,8 @@ def calculate_objective_score(metrics: Dict[str, float], config: Any, is_physics
         Total objective score to minimize
     """
     if is_physics_informed:
-        total_loss = (metrics['mse'] + 
-                     config.LAMBDA_P * metrics['power_violation'] + 
-                     config.LAMBDA_V * metrics['voltage_violation'])
+        # Loss weights are learnable (Kendall et al., CVPR 2018) - use total_loss directly
+        total_loss = metrics.get('total_loss', metrics['mse'])
     else:
         # For non-physics-informed models, only use MSE
         total_loss = metrics['mse']
@@ -318,16 +373,26 @@ def trial_based_search(num_trials: int, lower_bound: np.ndarray, upper_bound: np
         Tuple of (best_score, best_position, convergence_history, trial_details)
     """
     
+    # Convert bounds to numpy arrays if they're lists or scalars (robustness)
+    lower_bound = np.asarray(lower_bound, dtype=np.float64)
+    upper_bound = np.asarray(upper_bound, dtype=np.float64)
+    
+    # Handle scalar bounds (expand to array)
+    if lower_bound.ndim == 0:
+        lower_bound = np.full(dim, lower_bound.item())
+    if upper_bound.ndim == 0:
+        upper_bound = np.full(dim, upper_bound.item())
+    
+    # Validate bounds
+    if len(lower_bound) != dim or len(upper_bound) != dim:
+        raise ValueError(f"Bounds dimension mismatch: lower_bound={len(lower_bound)}, upper_bound={len(upper_bound)}, dim={dim}")
+    if np.any(lower_bound >= upper_bound):
+        raise ValueError("Lower bounds must be strictly less than upper bounds")
+    
     best_position = np.zeros(dim)
     best_score = float('inf')
     convergence_curve = []
     trial_details = []
-    
-    # Convert bounds to arrays if they're scalars
-    if isinstance(upper_bound, (int, float)):
-        upper_bound = np.full(dim, upper_bound)
-    if isinstance(lower_bound, (int, float)):
-        lower_bound = np.full(dim, lower_bound)
     
     # Generate all trial positions at once
     if search_strategy == 'latin_hypercube':

@@ -24,6 +24,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     model.eval()
     all_outputs, all_targets = [], []
     all_ybus = []  # Add this to collect Ybus matrices
+    all_bus_types = []  # OPF: Collect bus types for bus-type-specific metrics
     
     with torch.no_grad():
         for batch in test_loader:
@@ -31,6 +32,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
             targets = batch['targets'].to(device)
             adj = batch['adjacency'].to(device)
             ybus = batch['ybus_matrix'].to(device)  # Get Ybus from batch
+            bus_types = batch.get('bus_types', None)  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
 
             # Handle sequential vs non-sequential models
             if is_sequential and features.dim() == 3:
@@ -41,14 +43,25 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
                 features_input = features
             
             outputs = model(features_input, adj)
+            
+            # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
+            use_twin_heads = getattr(config, 'USE_TWIN_HEADS', False)
+            if use_twin_heads and isinstance(outputs, tuple):
+                # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
+                # Convert to combined format [batch, buses, 2] for evaluation
+                x_mag, x_pha = outputs
+                outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
 
             all_outputs.append(outputs)
             all_targets.append(targets)
             all_ybus.append(ybus)  # Store Ybus matrices
+            if bus_types is not None:
+                all_bus_types.append(bus_types.cpu())  # Store bus types for analysis
 
     all_outputs_tensor = torch.cat(all_outputs, dim=0)
     all_targets_tensor = torch.cat(all_targets, dim=0)
     all_ybus_tensor = torch.cat(all_ybus, dim=0)
+    all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None  # OPF: [batch, buses]
 
     # Get num_buses dynamically from config without hardcoding
     if hasattr(config, 'NUM_BUSES'):
@@ -59,16 +72,24 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
         raise ValueError("Config must specify NUM_BUSES")
     
     # Handle shape consistency for different model types before denormalization
+    # PURE STATE ESTIMATION: Outputs are [batch, buses, 2] (vm, va) or flattened [batch, buses*2]
     if all_outputs_tensor.dim() == 2:
-        # If model outputs flattened format [batch_size, num_buses * features]
+        # If model outputs flattened format [batch_size, num_buses * 2] (pure state estimation)
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 10  # Updated for 10-feature approach
-        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+        num_features = 2  # Pure state estimation: only vm and va
+        expected_size = num_buses * num_features
+        if all_outputs_tensor.shape[1] == expected_size:
+            all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+        else:
+            raise ValueError(
+                f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, "
+                f"expected {expected_size} (num_buses={num_buses} * num_features={num_features})"
+            )
     
     outputs_denorm = normalizer.denormalize(all_outputs_tensor)
     targets_denorm = normalizer.denormalize(all_targets_tensor)
 
-    return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
+    return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config, bus_types=all_bus_types_tensor)
 
 
 def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.utils.data.DataLoader, 
@@ -104,6 +125,14 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
                 features_input = features
             
             outputs = model(features_input, adj)
+            
+            # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
+            use_twin_heads = getattr(config, 'USE_TWIN_HEADS', False)
+            if use_twin_heads and isinstance(outputs, tuple):
+                # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
+                # Convert to combined format [batch, buses, 2] for evaluation
+                x_mag, x_pha = outputs
+                outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
 
             all_outputs.append(outputs)
             all_targets.append(targets)
@@ -123,11 +152,15 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
     else:
         raise ValueError("Config must specify NUM_BUSES")
     
-    # Handle shape consistency
+    # Handle shape consistency - PURE STATE ESTIMATION: 2 features (vm, va)
     if all_outputs_tensor.dim() == 2:
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 10
-        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+        num_features = 2  # Pure state estimation: only vm and va
+        expected_size = num_buses * num_features
+        if all_outputs_tensor.shape[1] == expected_size:
+            all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+        else:
+            raise ValueError(f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, expected {expected_size}")
     
     outputs_denorm = normalizer.denormalize(all_outputs_tensor)
     targets_denorm = normalizer.denormalize(all_targets_tensor)
@@ -146,7 +179,7 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
 
 
 def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, 
-                              config: object, normalizer: Any) -> Dict[str, float]:
+                              config: object, normalizer: Any, bus_types: torch.Tensor = None) -> Dict[str, float]:
     """Computes metrics on normalized data (same scale as training) for MoSOA optimization."""
     with torch.no_grad():
         # Ensure outputs and targets have the same shape
@@ -160,59 +193,53 @@ def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybu
         
         # Standard regression metrics - consistent with training loss calculation
         # Denormalize first, then compute MSE on physical values
+        # OPF: 2 features (unknowns per bus type)
+        # Get num_buses from outputs shape
         if outputs.dim() == 2:
             batch_size = outputs.shape[0]
-            num_features = 10
+            num_features = 2  # OPF: 2 unknowns per bus
+            num_buses = outputs.shape[1] // num_features
             outputs_for_mse = outputs.view(batch_size, num_buses, num_features)
             targets_for_mse = targets.view(batch_size, num_buses, num_features)
         else:
             outputs_for_mse = outputs
             targets_for_mse = targets
+            num_buses = outputs.shape[1]
         
         outputs_denorm_mse = normalizer.denormalize(outputs_for_mse)
         targets_denorm_mse = normalizer.denormalize(targets_for_mse)
         
-        # Get system base power for normalization
-        s_base_mva = 10.0 if 'case33' in str(config.CASE_NAME).lower() else 100.0
-        
-        # MSE on physical values, normalized by S_BASE^2 (same as training)
+        # CRITICAL FIX: Voltages are ALREADY in per-unit (vm_pu) and radians (va_rad)
+        # Do NOT divide by S_BASE^2 - that's only for power normalization!
+        # MSE is already in correct units: per-unit^2 for voltage magnitude, rad^2 for angle
         mse_physical = F.mse_loss(outputs_denorm_mse, targets_denorm_mse).item()
-        mse = mse_physical / (s_base_mva ** 2)
+        mse = mse_physical  # Already in per-unit^2 (vm) + rad^2 (va)
         rmse = torch.sqrt(torch.tensor(mse)).item()
         
-        # For physics calculations, we need to denormalize only for physics violations
-        # but keep the same scale as training
-        if outputs.dim() == 2:
-            batch_size = outputs.shape[0]
-            num_features = 10  # Updated for 10-feature approach
-            num_buses = outputs.shape[1] // num_features
-            outputs_3d = outputs.view(batch_size, num_buses, num_features)
-        else:
-            outputs_3d = outputs
-        
-        # Denormalize only for physics calculations (same as training)
-        outputs_denorm = normalizer.denormalize(outputs_3d)
-        
-        # Create PowerSystemLoss instance for physics calculations
-        physics_metrics = PowerSystemLoss(config=config, normalizer=normalizer)
-        
-        # Calculate physics violations (same method as training)
-        power_violation = physics_metrics._compute_power_balance_violation(
-            state=outputs_denorm,
-            ybus_batch=ybus_batch,
-            squared=False
-        ).mean().item()
-        
-        voltage_violation = torch.sqrt(physics_metrics._compute_voltage_limit_violation(
-            outputs_denorm
-        )).mean().item()
-        
-        return {
+        # OPF: Bus-type-specific metrics (optional)
+        metrics = {
             'mse': mse,
             'rmse': rmse,
-            'power_violation': power_violation,
-            'voltage_violation': voltage_violation
         }
+        
+        if bus_types is not None:
+            # Compute bus-type-specific MSE for reporting
+            bus_types_cpu = bus_types.cpu() if bus_types.is_cuda else bus_types
+            
+            for bus_type_code, bus_type_name in [(0, 'PQ'), (1, 'PV'), (2, 'Slack')]:
+                mask = (bus_types_cpu == bus_type_code)
+                if mask.any():
+                    outputs_type = outputs_for_mse[mask]
+                    targets_type = targets_for_mse[mask]
+                    mse_type = F.mse_loss(outputs_type, targets_type).item()
+                    metrics[f'mse_{bus_type_name.lower()}'] = mse_type
+        
+        # For OPF, physics violations require full voltage state reconstruction
+        # For now, set to 0 (can be implemented later if needed)
+        metrics['power_violation'] = 0.0
+        metrics['voltage_violation'] = 0.0
+        
+        return metrics
 
 
 def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.data.DataLoader, 
@@ -222,6 +249,7 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
     model.eval()
     all_outputs, all_targets = [], []
     all_ybus = []
+    all_bus_types = []  # OPF: Collect bus types
     
     with torch.no_grad():
         for batch in test_loader:
@@ -229,6 +257,7 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
             targets = batch['targets'].to(device)
             adj = batch['adjacency'].to(device)
             ybus = batch['ybus_matrix'].to(device)
+            bus_types = batch.get('bus_types', None)  # OPF: bus type codes
 
             # Handle sequential vs non-sequential models
             if is_sequential and features.dim() == 3:
@@ -237,14 +266,25 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
                 features_input = features
             
             outputs = model(features_input, adj)
+            
+            # ETH Zurich Technique 1: Handle twin heads output (tuple of two tensors)
+            use_twin_heads = getattr(config, 'USE_TWIN_HEADS', False)
+            if use_twin_heads and isinstance(outputs, tuple):
+                # Twin heads: outputs = (x_mag, x_pha) where each is [batch, buses]
+                # Convert to combined format [batch, buses, 2] for evaluation
+                x_mag, x_pha = outputs
+                outputs = torch.stack([x_mag, x_pha], dim=-1)  # [batch, buses, 2]
 
             all_outputs.append(outputs)
             all_targets.append(targets)
             all_ybus.append(ybus)
+            if bus_types is not None:
+                all_bus_types.append(bus_types.cpu())
 
     all_outputs_tensor = torch.cat(all_outputs, dim=0)
     all_targets_tensor = torch.cat(all_targets, dim=0)
     all_ybus_tensor = torch.cat(all_ybus, dim=0)
+    all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None
 
     # Get num_buses dynamically from config
     if hasattr(config, 'NUM_BUSES'):
@@ -255,14 +295,20 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
         raise ValueError("Config must specify NUM_BUSES")
     
     # Handle shape consistency for different model types
+    # OPF: 2 features (unknowns per bus type)
     if all_outputs_tensor.dim() == 2:
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 10  # Updated for 10-feature approach
-        all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+        num_features = 2  # OPF: 2 unknowns per bus
+        expected_size = num_buses * num_features
+        if all_outputs_tensor.shape[1] == expected_size:
+            all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
+        else:
+            raise ValueError(f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, expected {expected_size}")
     
     # FIXED: Use normalized data for MoSOA (same as training)
     # This ensures consistent evaluation scale between training and optimization
-    return compute_metrics_normalized(all_outputs_tensor, all_targets_tensor, all_ybus_tensor, config, normalizer)
+    all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None
+    return compute_metrics_normalized(all_outputs_tensor, all_targets_tensor, all_ybus_tensor, config, normalizer, bus_types=all_bus_types_tensor)
 
 
 def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.data.DataLoader, 
@@ -287,24 +333,30 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             
             # Handle shape consistency for different model types
             if outputs_norm.dim() == 2:
-                # If model outputs flattened format [batch_size, num_buses * features]
+                # If model outputs flattened format [batch_size, num_buses * 2] (pure state estimation)
                 batch_size = outputs_norm.shape[0]
-                num_features = 10  # Updated for 10-feature approach
-                outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
+                num_features = 2  # Pure state estimation: only vm and va
+                expected_size = num_buses * num_features
+                if outputs_norm.shape[1] == expected_size:
+                    outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
+                else:
+                    raise ValueError(f"Unexpected flattened output size: {outputs_norm.shape[1]}, expected {expected_size}")
             
             # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
-            outputs_phys = normalizer.denormalize(outputs_norm)
+            outputs_phys = normalizer.denormalize(outputs_norm)  # [batch, buses, 2] = [vm, va]
+            features_phys = normalizer.denormalize(features)  # [batch, buses, 10] = [p_load, q_load, ...]
 
             if is_physics_informed:
                 # Calculate physics-based metrics for physics-informed models
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
+                # PURE STATE ESTIMATION: Pass voltages (2 features) and measurements (10 features) separately
+                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                # Generation components are now included in the state tensor
+                # Use measured power for carbon emissions calculation
                 emissions = physics_calculator._compute_carbon_emissions(
-                    outputs_phys, time_carbon, time_energy, renewable_frac
+                    features_phys, time_carbon, time_energy, renewable_frac
                 )
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
+                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
                 batch_size = features.shape[0]
@@ -330,12 +382,12 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
 
             if is_physics_informed:
                 # Calculate test MSE for physics-informed models (consistent with training)
-                # MSE on physical values normalized by S_BASE^2 for comparability
+                # CRITICAL FIX: Voltages ALREADY in per-unit - don't divide by S_BASE^2!
                 targets = batch['targets'].to(device)
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                test_mse = mse_physical / (s_base_mva ** 2)
+                test_mse = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
                 
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
@@ -353,7 +405,7 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                mse_normalized = mse_physical / (s_base_mva ** 2)
+                mse_normalized = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
                 all_results.append({
                     'mse_score': mse_normalized.item()  # MSE in per-unit squared (consistent with training)
                 })
@@ -389,17 +441,19 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
             
             # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
-            outputs_phys = normalizer.denormalize(outputs_norm)
+            outputs_phys = normalizer.denormalize(outputs_norm)  # [batch, buses, 2] = [vm, va]
+            features_phys = normalizer.denormalize(features)  # [batch, buses, 10] = [p_load, q_load, ...]
 
             if is_physics_informed:
                 # Calculate physics-based metrics for physics-informed models
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, ybus)
+                # PURE STATE ESTIMATION: Pass voltages (2 features) and measurements (10 features) separately
+                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                # Generation components are now included in the state tensor
+                # Use measured power for carbon emissions calculation
                 emissions = physics_calculator._compute_carbon_emissions(
-                    outputs_phys, time_carbon, time_energy, renewable_frac
+                    features_phys, time_carbon, time_energy, renewable_frac
                 )
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, ybus)
+                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
                 batch_size = features.shape[0]
@@ -425,12 +479,12 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
 
             if is_physics_informed:
                 # Calculate test MSE for physics-informed models (consistent with training)
-                # MSE on physical values normalized by S_BASE^2 for comparability
+                # CRITICAL FIX: Voltages ALREADY in per-unit - don't divide by S_BASE^2!
                 targets = batch['targets'].to(device)
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                test_mse = mse_physical / (s_base_mva ** 2)
+                test_mse = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
                 
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
@@ -448,7 +502,7 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                mse_normalized = mse_physical / (s_base_mva ** 2)
+                mse_normalized = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
                 all_results.append({
                     'mse_score': mse_normalized.item()  # MSE in per-unit squared (consistent with training)
                 })

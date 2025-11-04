@@ -9,13 +9,50 @@ from torch.utils.data.dataloader import default_collate
 from torch.nn.utils.rnn import pad_sequence
 
 class PowerSystemNormalizer:
-    """A class to handle normalization and de-normalization of power system features."""
-    def __init__(self, features):
-        self.mean = np.mean(features, axis=(0, 1))
-        self.std = np.std(features, axis=(0, 1))
-        self.std[self.std == 0] = 1.0
+    """
+    A class to handle normalization and de-normalization of power system features.
+    
+    Optimal Power Flow (OPF) Approach:
+    - Features (inputs): 10 measurements [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+    - Targets (outputs): 2 unknowns per bus, bus-type dependent [PQ: V,θ | PV: Q,θ | Slack: P,Q]
+    
+    CRITICAL: All targets are in consistent units for proper normalization:
+    - V: per-unit (0.95-1.05)
+    - θ: radians (-0.5 to 0.5)
+    - P, Q: per-unit (converted from MW/MVar by dividing by S_BASE)
+    This ensures the normalizer can compute meaningful mean/std across all bus types.
+    """
+    def __init__(self, features, targets):
+        """
+        Args:
+            features: Input measurements [samples, buses, 10] (in MW/MVar, pu, rad)
+            targets: Output unknowns [samples, buses, 2] (all in pu or radians for consistent scaling)
+        """
+        # Normalize features (measurements)
+        self.feature_mean = np.mean(features, axis=(0, 1))  # [10]
+        self.feature_std = np.std(features, axis=(0, 1))    # [10]
+        self.feature_std[self.feature_std == 0] = 1.0
+        
+        # Normalize targets (voltages)
+        self.target_mean = np.mean(targets, axis=(0, 1))    # [2]
+        self.target_std = np.std(targets, axis=(0, 1))      # [2]
+        self.target_std[self.target_std == 0] = 1.0
+        
+        # Legacy support: Use feature stats as default
+        self.mean = self.feature_mean
+        self.std = self.feature_std
 
     def normalize(self, data):
+        """
+        Normalize data using z-score normalization.
+        Auto-detects whether data is features (10 dims) or targets (2 dims).
+        
+        Args:
+            data: Input data [samples, buses, num_features] or tensor equivalent
+            
+        Returns:
+            Normalized data in same format as input
+        """
         # Handle both numpy arrays and PyTorch tensors
         if torch.is_tensor(data):
             # If it's a CUDA tensor, move to CPU first
@@ -25,17 +62,44 @@ class PowerSystemNormalizer:
                 data_cpu = data
             # Convert to numpy for computation
             data_np = data_cpu.numpy()
+            was_tensor = True
+            original_device = data.device if data.is_cuda else None
         else:
             data_np = data
+            was_tensor = False
+            original_device = None
         
-        result = (data_np - self.mean) / self.std
+        # Auto-detect: features (10) or targets (2)?
+        if data_np.ndim == 3:
+            num_features = data_np.shape[-1]
+        elif data_np.ndim == 2:
+            # Flattened: try to infer from shape
+            # This is ambiguous, but we'll try to match based on total elements
+            num_features = data_np.shape[-1]
+        else:
+            # Fallback to feature stats
+            num_features = len(self.feature_mean)
+        
+        if num_features == 10:
+            # Features (measurements)
+            mean_np = self.feature_mean
+            std_np = self.feature_std
+        elif num_features == 2:
+            # Targets (unknowns)
+            mean_np = self.target_mean
+            std_np = self.target_std
+        else:
+            # Fallback: use feature stats (for partial features)
+            mean_np = self.feature_mean[:num_features] if num_features <= len(self.feature_mean) else self.mean[:num_features]
+            std_np = self.feature_std[:num_features] if num_features <= len(self.feature_std) else self.std[:num_features]
+        
+        result = (data_np - mean_np) / std_np
         
         # Convert back to tensor if input was a tensor
-        if torch.is_tensor(data):
+        if was_tensor:
             result_tensor = torch.from_numpy(result).float()
-            # Move back to original device
-            if data.is_cuda:
-                result_tensor = result_tensor.to(data.device)
+            if original_device is not None:
+                result_tensor = result_tensor.to(original_device)
             return result_tensor
         else:
             return result
@@ -43,6 +107,7 @@ class PowerSystemNormalizer:
     def denormalize(self, data: torch.Tensor) -> torch.Tensor:
         """
         Denormalize data back to physical units.
+        Auto-detects whether data is features (10) or targets (2).
         
         Args:
             data: Tensor of shape [batch_size, num_buses, num_features]
@@ -58,15 +123,25 @@ class PowerSystemNormalizer:
                 f"Example: data.view(batch_size, num_buses, num_features)"
             )
         
-        num_output_features = data.shape[-1]
+        num_features = data.shape[-1]
         
-        # Slice mean/std to match the number of features being denormalized
-        mean_slice = self.mean[:num_output_features]
-        std_slice = self.std[:num_output_features]
+        # Auto-detect: features (10) or targets (2)?
+        if num_features == 10:
+            # Features (measurements)
+            mean_np = self.feature_mean
+            std_np = self.feature_std
+        elif num_features == 2:
+            # Targets (voltages)
+            mean_np = self.target_mean
+            std_np = self.target_std
+        else:
+            # Fallback: use slice (for partial features)
+            mean_np = self.feature_mean[:num_features]
+            std_np = self.feature_std[:num_features]
         
         # Convert to tensors on the same device as data
-        mean_tensor = torch.from_numpy(mean_slice).float().to(data.device)
-        std_tensor = torch.from_numpy(std_slice).float().to(data.device)
+        mean_tensor = torch.from_numpy(mean_np).float().to(data.device)
+        std_tensor = torch.from_numpy(std_np).float().to(data.device)
         
         # Simple denormalization: x_original = x_normalized * std + mean
         denormalized_data = data * std_tensor + mean_tensor
@@ -81,15 +156,13 @@ class PowerSystemDataset(Dataset):
     """
     def __init__(self, features, adjacency_matrix, ybus_matrices, targets, 
                  time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1,
-                 is_time_series=False, hours_per_day=24):
+                 hours_per_day=24, bus_types=None):
         """
         Args:
-            is_time_series: If True, respects day boundaries when creating sequences
-            hours_per_day: Number of hours per day (for time-series mode)
+            hours_per_day: Number of hours per day (always 24 for time-series mode)
         """
         self.features = torch.from_numpy(features).float()
         self.adjacency = torch.from_numpy(adjacency_matrix).float()
-        self.is_time_series = is_time_series
         self.hours_per_day = hours_per_day
         
         # Handle Ybus - either pre-loaded array or lazy reconstruction data
@@ -108,13 +181,14 @@ class PowerSystemDataset(Dataset):
             self.ybus_matrices = torch.from_numpy(ybus_matrices).cfloat()
         
         self.targets = torch.from_numpy(targets).float()
+        self.bus_types = torch.from_numpy(bus_types).long() if bus_types is not None else None  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
         self.time_energy_coeffs = torch.from_numpy(time_energy_coeffs).float()
         self.time_carbon_coeffs = torch.from_numpy(time_carbon_coeffs).float()
         self.renewable_fractions = torch.from_numpy(renewable_fractions).float()
         
-        # Note: Generation components are now included in the features/targets matrices
-        # Features: [vm_pu, va_rad, p_load, q_load, p_ext_grid, q_ext_grid, p_conventional, q_conventional, p_renewable, q_renewable]
-        # Targets: Same structure as features
+        # OPF Approach:
+        # Features: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas] (10 measurements)
+        # Targets: [var1, var2] bus-type dependent (PQ: [V,θ], PV: [Q,θ], Slack: [P,Q])
         
         self.is_static = is_static
         self.sequence_length = sequence_length
@@ -165,16 +239,30 @@ class PowerSystemDataset(Dataset):
         time_carbon = self.time_carbon_coeffs[target_idx]
         renewable_fraction = self.renewable_fractions[target_idx]
 
-        # Extract generation components from the target tensor (10 features: vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren)
-        ext_grid_gen = target_tensor[:, 4:6]  # p_ext_grid, q_ext_grid
-        conventional_gen = target_tensor[:, 6:8]  # p_conventional, q_conventional  
-        renewable_gen = target_tensor[:, 8:10]  # p_renewable, q_renewable
+        # PURE STATE ESTIMATION: Targets only have [vm, va] (2 features)
+        # Extract generation components from FEATURES (measurements), not targets
+        # Features format: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+        if features_tensor.dim() == 3:
+            # Sequential model: use last timestep
+            features_last = features_tensor[-1] if features_tensor.shape[0] > 1 else features_tensor[0]
+        else:
+            features_last = features_tensor
+        
+        ext_grid_gen = features_last[:, 2:4]  # p_ext, q_ext (indices 2-3)
+        conventional_gen = features_last[:, 4:6]  # p_conv, q_conv (indices 4-5)
+        renewable_gen = features_last[:, 6:8]  # p_ren, q_ren (indices 6-7)
+        
+        # Get bus types for this timestep (OPF: needed for loss calculation)
+        bus_types_tensor = None
+        if self.bus_types is not None:
+            bus_types_tensor = self.bus_types[target_idx]
         
         return {
             'features': features_tensor,
             'adjacency': self.adjacency,
             'ybus_matrix': ybus_for_item,
             'targets': target_tensor,
+            'bus_types': bus_types_tensor,  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
             'time_energy_coeffs': time_energy,
             'time_carbon_coeffs': time_carbon,
             'renewable_fraction': renewable_fraction,
@@ -218,6 +306,7 @@ def load_power_system_data(config, case_name):
         raise
 
     all_features, all_ybus, all_targets = [], [], []
+    all_bus_types = []  # OPF: Store bus types for each timestep
     all_energy_coeffs, all_carbon_coeffs = [], []
     all_renewable_fractions = []  # Track renewable fractions for each data file
     
@@ -272,6 +361,16 @@ def load_power_system_data(config, case_name):
                 all_ybus.append(ybus_full)
             
             all_targets.append(np.load(targets_path))
+            
+            # Load bus types (OPF: bus-type-dependent unknowns)
+            bus_types_path = f_path.replace('features', 'bus_types')
+            if os.path.exists(bus_types_path):
+                all_bus_types.append(np.load(bus_types_path))
+            else:
+                # Fallback: If bus_types not found, assume all PQ buses (backward compatibility)
+                print(f"[Warning] bus_types file not found: {bus_types_path}. Assuming all PQ buses.")
+                all_bus_types.append(np.zeros((num_timesteps, num_buses), dtype=np.int32))
+            
             all_energy_coeffs.append(np.loadtxt(energy_path))
             all_carbon_coeffs.append(np.loadtxt(carbon_path))
             
@@ -288,6 +387,7 @@ def load_power_system_data(config, case_name):
     # --- START CORRECTION: Concatenate all data arrays along the time axis ---
     concatenated_features = np.concatenate(all_features, axis=0)
     concatenated_targets = np.concatenate(all_targets, axis=0)
+    concatenated_bus_types = np.concatenate(all_bus_types, axis=0) if all_bus_types else None
     concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0)
     concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0)
     concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0)
@@ -311,13 +411,21 @@ def load_power_system_data(config, case_name):
         raise ValueError("Mixed Ybus formats detected - all scenarios must use the same format (lazy or pre-loaded)")
     # --- END CORRECTION ---
 
-    normalizer = PowerSystemNormalizer(concatenated_features)
+    # Create normalizer with BOTH features and targets (for pure state estimation)
+    normalizer = PowerSystemNormalizer(concatenated_features, concatenated_targets)
     features_norm = normalizer.normalize(concatenated_features)
+    targets_norm = normalizer.normalize(concatenated_targets)  # CRITICAL: Normalize targets too!
     print(f"[Data] Loaded {len(feature_files)} scenarios -> {concatenated_features.shape[0]} samples")
+    print(f"[Data] Features shape: {concatenated_features.shape} (measurements: {concatenated_features.shape[-1]} dims)")
+    print(f"[Data] Targets shape: {concatenated_targets.shape} (unknowns: {concatenated_targets.shape[-1]} dims)")
+    print(f"[Data] Features normalized: mean={np.mean(features_norm):.4f}, std={np.std(features_norm):.4f}")
+    print(f"[Data] Targets normalized: mean={np.mean(targets_norm):.4f}, std={np.std(targets_norm):.4f}")
     
-    # Return concatenated arrays (generation components are now included in features/targets)
-    return (features_norm, static_adjacency_matrix, concatenated_ybus, concatenated_targets, 
-            concatenated_energy_coeffs, concatenated_carbon_coeffs, concatenated_renewable_fractions, normalizer)
+    # Return concatenated arrays (OPF: features=measurements, targets=unknowns per bus type)
+    # Both are now normalized for consistent training
+    return (features_norm, static_adjacency_matrix, concatenated_ybus, targets_norm,
+            concatenated_bus_types, concatenated_energy_coeffs, concatenated_carbon_coeffs, 
+            concatenated_renewable_fractions, normalizer)
 
 def _collate_static(batch):
     # This collate function will now work correctly as targets are already single slices.
@@ -335,86 +443,68 @@ def _collate_sequential_padded(batch):
     collated_batch['targets'] = default_collate([item['targets'] for item in batch])
     return collated_batch
 
-def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static):
-    seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
+def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static, bus_types=None):
+    """
+    Create data loaders for power system OPF data.
     
-    # Check if time-series mode is enabled
-    use_time_series = getattr(config, 'USE_TIME_SERIES', False)
+    Args:
+        bus_types: Optional array of bus type codes [timesteps, buses] with values [0=PQ, 1=PV, 2=Slack]
+    """
+    seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
     hours_per_day = getattr(config, 'HOURS_PER_DAY', 24)
     
     dataset = PowerSystemDataset(
         features, adjacency, ybus_matrices, targets, 
         time_energy_coeffs, time_carbon_coeffs, renewable_fractions,
-        is_static, seq_len, is_time_series=use_time_series, hours_per_day=hours_per_day
+        is_static, seq_len, hours_per_day=hours_per_day, bus_types=bus_types
     )
     dataset_size = len(dataset)
     
-    # For TIME-SERIES mode: Use STRATIFIED split by renewable fraction for ALL models
+    # TIME-SERIES mode: Use STRATIFIED split by renewable fraction for ALL models
     # This ensures ALL renewable fractions appear in train/val/test sets
-    if use_time_series:
-        # Silent - no need to print split strategy every time
-        # model_type = "sequential" if not is_static else "static"
-        # print(f"[Data] Using STRATIFIED split by renewable fraction ({model_type} model)")
+    
+    # Group indices by renewable fraction
+    unique_fractions = np.unique(renewable_fractions)
+    train_indices, val_indices, test_indices = [], [], []
+    
+    for frac in unique_fractions:
+        # Get all sample indices for this renewable fraction
+        frac_mask = renewable_fractions == frac
+        frac_indices = np.where(frac_mask)[0]
         
-        # Group indices by renewable fraction
-        unique_fractions = np.unique(renewable_fractions)
-        train_indices, val_indices, test_indices = [], [], []
+        # Adjust for sequential models (some indices might be out of bounds)
+        # Only keep indices that are valid for the dataset
+        valid_frac_indices = [idx for idx in frac_indices if idx < dataset_size]
         
-        for frac in unique_fractions:
-            # Get all sample indices for this renewable fraction
-            frac_mask = renewable_fractions == frac
-            frac_indices = np.where(frac_mask)[0]
-            
-            # Adjust for sequential models (some indices might be out of bounds)
-            # Only keep indices that are valid for the dataset
-            valid_frac_indices = [idx for idx in frac_indices if idx < dataset_size]
-            
-            if len(valid_frac_indices) == 0:
-                continue
-            
-            # Split THIS fraction's data into train/val/test
-            n_frac = len(valid_frac_indices)
-            n_train = int(config.TRAIN_SPLIT * n_frac)
-            n_val = int(config.VAL_SPLIT * n_frac)
-            
-            # Contiguous splits WITHIN each fraction (preserves temporal order)
-            frac_train = valid_frac_indices[:n_train]
-            frac_val = valid_frac_indices[n_train:n_train + n_val]
-            frac_test = valid_frac_indices[n_train + n_val:]
-            
-            train_indices.extend(frac_train)
-            val_indices.extend(frac_val)
-            test_indices.extend(frac_test)
+        if len(valid_frac_indices) == 0:
+            continue
         
-        # Sort indices to maintain some temporal structure across fractions
-        train_indices = sorted(train_indices)
-        val_indices = sorted(val_indices)
-        test_indices = sorted(test_indices)
+        # Split THIS fraction's data into train/val/test
+        n_frac = len(valid_frac_indices)
+        n_train = int(config.TRAIN_SPLIT * n_frac)
+        n_val = int(config.VAL_SPLIT * n_frac)
         
-        # Silent - split info is not critical for every iteration
-        # print(f"[Data] Stratified split: Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}")
-        # print(f"[Data] Each split contains samples from ALL {len(unique_fractions)} renewable fractions")
+        # Contiguous splits WITHIN each fraction (preserves temporal order)
+        frac_train = valid_frac_indices[:n_train]
+        frac_val = valid_frac_indices[n_train:n_train + n_val]
+        frac_test = valid_frac_indices[n_train + n_val:]
         
-        train_dataset = torch.utils.data.Subset(dataset, train_indices)
-        val_dataset = torch.utils.data.Subset(dataset, val_indices)
-        test_dataset = torch.utils.data.Subset(dataset, test_indices)
-        
-        # Sequential models: NO shuffling (order matters)
-        # Non-sequential models: CAN shuffle (order doesn't matter)
-        shuffle_train = is_static  # True for GCN/adaptiveGCN, False for LSTM/GRU
-    else:
-        # NON-TIME-SERIES (Monte Carlo mode): Random splits (can shuffle)
-        train_size = int(config.TRAIN_SPLIT * dataset_size)
-        val_size = int(config.VAL_SPLIT * dataset_size)
-        test_size = dataset_size - train_size - val_size
-        
-        train_dataset, val_dataset, test_dataset = random_split(
-            dataset, [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(config.SEED)
-        )
-        
-        # CAN SHUFFLE for non-sequential models
-        shuffle_train = True
+        train_indices.extend(frac_train)
+        val_indices.extend(frac_val)
+        test_indices.extend(frac_test)
+    
+    # Sort indices to maintain some temporal structure across fractions
+    train_indices = sorted(train_indices)
+    val_indices = sorted(val_indices)
+    test_indices = sorted(test_indices)
+    
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    test_dataset = torch.utils.data.Subset(dataset, test_indices)
+    
+    # Sequential models: NO shuffling (order matters)
+    # Non-sequential models: CAN shuffle (order doesn't matter)
+    shuffle_train = is_static  # True for GCN/adaptiveGCN, False for LSTM/GRU
     
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
     

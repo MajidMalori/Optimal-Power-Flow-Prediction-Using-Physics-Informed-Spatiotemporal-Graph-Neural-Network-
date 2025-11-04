@@ -45,9 +45,8 @@ class Args:
     #       Timesteps must be multiples of 120 (5 days × 24 hours) for 60/20/20 split.
     #       Use calculate_timesteps.py to compute custom configurations.
     
-    # Data generation mode
-    use_time_series = True  # True: Time-Series (realistic daily cycles), False: Monte Carlo (random scenarios)
-    hours_per_day = 24      # Number of hours in a day for time-series mode
+    # Time-series data configuration
+    hours_per_day = 24      # Number of hours in a day (fixed at 24)
     sequence_length = 5     # Sequence length for LSTM/GRU models (past N hours to predict current)
     
     # === MODEL CAPACITY CONFIGURATION ===
@@ -133,16 +132,27 @@ class Config:
     # S_BASE_MVA is determined dynamically based on system type in metrics.py
     # Case33: 10 MVA, Case57/118: 100 MVA
     
-    USE_ADAPTIVE_LAMBDA = True  # True: adaptive (Option 1), False: fixed + MoSOA tuning (Option 2)
+    # =============================================================================
+    # LOSS WEIGHTING METHOD: Learnable Uncertainty Weighting (Kendall et al., CVPR 2018)
+    # =============================================================================
+    # State-of-the-art method with theoretical grounding (Bayesian interpretation)
+    # Automatically learns optimal weights via backpropagation
+    # Paper: "Multi-Task Learning Using Uncertainty to Weigh Losses"
+    # No configuration needed - always uses learnable uncertainty weighting
+
+    # ETH Zurich Technique 1: Twin Heads Architecture
+    # When True: Separate neural networks for voltage magnitude and angle (like ETH Zurich)
+    #   - Forward returns: x_mag, x_pha (two separate tensors [batch, buses])
+    #   - Each head learns independently
+    # When False: Single head outputs combined [batch, buses, 2]
+    USE_TWIN_HEADS = False  # Disabled by default (can enable for ETH Zurich-style architecture)
     
-    # Adaptive Lambda Configuration (only used if USE_ADAPTIVE_LAMBDA=True)
-    TARGET_POWER_CONTRIBUTION = 0.02  # Power violation should contribute ~5% of total loss
-    TARGET_VOLTAGE_CONTRIBUTION = 0.02  # Voltage violation should contribute ~5% of total loss
+    # ETH Zurich Technique 4: Separate VM/VA backward passes
+    # WARNING: Experimental feature - may affect training stability
+    # When True: VM and VA gradients computed separately before physics gradients
+    # When False: Standard single backward pass (recommended for most cases)
+    USE_SEPARATE_VM_VA_BACKWARD = False  # Disabled by default (advanced users only)
     
-    # Fixed Lambda Configuration (only used if USE_ADAPTIVE_LAMBDA=False)
-    # Initial values - MoSOA will tune these in range (1.0, 50.0) during optimization
-    LAMBDA_P = 10.0  # Weight for power balance violation
-    LAMBDA_V = 10.0  # Weight for voltage limit violation
     
     # --- Data Mode Configuration (Set during __init__ from Args) ---
     # DATA_MODE and DATA_MODE_TIMESTEPS are set dynamically in __init__()
@@ -172,8 +182,23 @@ class Config:
     # =============================================================================
     
     class _ModelConfig:
-        """Base template for all model configurations"""
-        FEATURE_DIM = 10  # Updated to include separated generation components: [vm, va, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
+        """
+        Base template for all model configurations.
+        
+        PURE STATE ESTIMATION APPROACH:
+        - INPUT_DIM: Number of input features (measurements from sensors)
+        - OUTPUT_DIM: Number of output features (state variables to estimate)
+        - FEATURE_DIM: Legacy name for OUTPUT_DIM (kept for backward compatibility)
+        """
+        # Input features (measurements): [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_partial, va_partial]
+        INPUT_DIM = 10
+        
+        # Output features (state to estimate): [vm, va] - voltage magnitude and angle
+        OUTPUT_DIM = 2
+        
+        # Legacy field (kept for backward compatibility with older model code)
+        FEATURE_DIM = OUTPUT_DIM  # This refers to the OUTPUT dimension
+        
         DROPOUT = 0.2
         HIDDEN_DIM_RANGE = (16, 128)  # Default fallback
         NUM_GC_LAYERS_RANGE = (1, 5)
@@ -183,23 +208,25 @@ class Config:
             """
             Get hidden dimension range based on system size and capacity setting.
             Capacity levels: 'normal' (conservative), 'medium' (balanced), 'large' (maximum)
+            Returns ranges with minimum width to allow optimization exploration.
             """
             # Capacity presets for each bus system
+            # Single values are converted to ranges with ±10% tolerance for optimization
             capacity_settings = {
                 33: {
                     'normal': (32, 64),
-                    'medium': (64, 64),
-                    'large': (96, 96)
+                    'medium': (58, 70),  # 64 ± 10% for exploration
+                    'large': (86, 106)   # 96 ± 10% for exploration
                 },
                 57: {
                     'normal': (32, 64),
-                    'medium': (64, 64),
-                    'large': (96, 96)
+                    'medium': (58, 70),  # 64 ± 10% for exploration
+                    'large': (86, 106)   # 96 ± 10% for exploration
                 },
                 118: {
                     'normal': (32, 64),
-                    'medium': (96, 96),
-                    'large': (128, 128)
+                    'medium': (86, 106),  # 96 ± 10% for exploration
+                    'large': (115, 141)   # 128 ± 10% for exploration
                 }
             }
             
@@ -217,22 +244,23 @@ class Config:
         def get_num_gc_layers_range(num_buses):
             """
             Get GC layers range based on system size and capacity setting.
+            Returns ranges with minimum width to allow optimization exploration.
             """
             capacity_settings = {
                 33: {
                     'normal': (1, 5),
-                    'medium': (5, 5),
-                    'large': (6, 6)
+                    'medium': (4, 6),  # 5 ± 1 for exploration
+                    'large': (5, 7)    # 6 ± 1 for exploration
                 },
                 57: {
                     'normal': (1, 5),
-                    'medium': (5, 5),
-                    'large': (6, 6)
+                    'medium': (4, 6),  # 5 ± 1 for exploration
+                    'large': (5, 7)    # 6 ± 1 for exploration
                 },
                 118: {
                     'normal': (1, 5),
-                    'medium': (6, 6),
-                    'large': (8, 8)
+                    'medium': (5, 7),  # 6 ± 1 for exploration
+                    'large': (7, 9)    # 8 ± 1 for exploration
                 }
             }
             
@@ -250,22 +278,23 @@ class Config:
         def get_embedding_dim_range(num_buses):
             """
             Get embedding dimension range based on system size and capacity setting.
+            Returns ranges with minimum width to allow optimization exploration.
             """
             capacity_settings = {
                 33: {
                     'normal': (8, 32),
-                    'medium': (32, 32),
-                    'large': (48, 48)
+                    'medium': (29, 35),  # 32 ± 10% for exploration
+                    'large': (43, 53)    # 48 ± 10% for exploration
                 },
                 57: {
                     'normal': (8, 32),
-                    'medium': (32, 32),
-                    'large': (48, 48)
+                    'medium': (29, 35),  # 32 ± 10% for exploration
+                    'large': (43, 53)    # 48 ± 10% for exploration
                 },
                 118: {
                     'normal': (8, 32),
-                    'medium': (48, 48),
-                    'large': (64, 64)
+                    'medium': (43, 53),  # 48 ± 10% for exploration
+                    'large': (58, 70)    # 64 ± 10% for exploration
                 }
             }
             
@@ -425,7 +454,7 @@ class Config:
     # =============================================================================
 
     def __init__(self, data_mode='train', save_results=True, test_timesteps=100, clear_results=False, 
-                 use_time_series=True, hours_per_day=24, sequence_length=5):
+                 hours_per_day=24, sequence_length=5):
         """Initializes directories and sets up experimental run structure."""
         # Set save_results flag
         self.SAVE_RESULTS = save_results
@@ -448,22 +477,17 @@ class Config:
         if data_mode not in self.DATA_MODE_TIMESTEPS:
             raise ValueError(f"Invalid data_mode '{data_mode}'. Must be 'train' or 'test'")
         
-        # Set time-series configuration from Args
-        self.USE_TIME_SERIES = use_time_series
+        # Set time-series configuration (always time-series mode)
         self.HOURS_PER_DAY = hours_per_day
         self.SEQUENCE_LENGTH = sequence_length
         
         print(f"Data mode: {self.DATA_MODE}, Timesteps: {self.DATA_MODE_TIMESTEPS[self.DATA_MODE]}")
-        print(f"Generation mode: {'Time-Series' if self.USE_TIME_SERIES else 'Monte Carlo'}")
+        print(f"Generation mode: Time-Series")
         
-        # Determine generation mode folder (monte_carlo or time_series)
-        generation_mode = 'time_series' if self.USE_TIME_SERIES else 'monte_carlo'
+        # Data directory structure: data/time_series/[train|test]
+        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', 'time_series', data_mode)
         
-        # Update DATA_DIR to point to generation_mode/data_mode subdirectory
-        # Structure: data/monte_carlo/train or data/time_series/test
-        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', generation_mode, data_mode)
-        
-        print(f"\n[Data Mode] Using {generation_mode} data in {data_mode} mode")
+        print(f"\n[Data Mode] Using time_series data in {data_mode} mode")
         print(f"[Data Directory] {self.DATA_DIR}")
         
         # Initialize timestamp only when actually starting a run

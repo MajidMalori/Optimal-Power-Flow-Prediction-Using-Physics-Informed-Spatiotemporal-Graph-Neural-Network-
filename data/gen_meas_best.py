@@ -4,12 +4,30 @@ import os
 import traceback
 import json
 import warnings
+import sys
 
-# Suppress numba/pandapower warnings
+# Aggressively suppress numba/pandapower warnings and print statements
 warnings.filterwarnings('ignore', message='.*numba.*')
+warnings.filterwarnings('ignore', message='.*Please install numba.*')
+warnings.filterwarnings('ignore', message='.*numba cannot be imported.*')
+warnings.filterwarnings('ignore', message='.*Probably the execution is slow.*')
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-import pandapower as pp
+# Context manager to suppress print statements during pandapower operations
+class SuppressPrints:
+    """Context manager to suppress stdout print statements."""
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        self._devnull = open(os.devnull, 'w')
+        sys.stdout = self._devnull
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout = self._original_stdout
+        self._devnull.close()
+
+# Import pandapower (suppress any print statements during import)
+with SuppressPrints():
+    import pandapower as pp
 import pandapower.networks as pn
 import pandapower.topology as top
 import numpy as np
@@ -482,6 +500,101 @@ def calculate_adjacency_matrix(net: pp.pandapowerNet) -> np.ndarray:
     
     return adj_matrix
 
+def identify_bus_types(net: pp.pandapowerNet) -> np.ndarray:
+    """
+    Identify bus types for Optimal Power Flow (OPF) from pandapower network state.
+    Bus types are determined AFTER power flow solution (pandapower decides).
+    
+    - Slack bus: Bus with ext_grid (reference bus, V and θ known/specified)
+    - PV bus: Bus with gen (generator with voltage control, V known, P specified)
+    - PQ bus: Bus with load or sgen only (load bus, V and θ unknown)
+    
+    Note: A bus type can change dynamically (e.g., if gen hits Q limits, becomes PQ),
+    but we use static classification based on network elements for simplicity.
+    
+    Returns:
+        bus_types: Array of bus type codes [0=PQ, 1=PV, 2=Slack] for each bus
+    """
+    num_buses = len(net.bus)
+    bus_types = np.zeros(num_buses, dtype=np.int32)  # Default: PQ bus
+    
+    # Identify slack buses (external grid) - these are always slack
+    slack_buses = set(net.ext_grid.bus.values)
+    for bus_idx in slack_buses:
+        bus_types[bus_idx] = 2  # Slack bus
+    
+    # Identify PV buses (conventional generators with voltage control)
+    # PV buses have gen connected (not ext_grid, not just load/sgen)
+    # Note: If a gen hits Q limits during power flow, pandapower may convert it to PQ,
+    # but we use static classification for training data consistency
+    gen_buses = set(net.gen.bus.values)
+    for bus_idx in gen_buses:
+        if bus_idx not in slack_buses:  # Don't override slack
+            bus_types[bus_idx] = 1  # PV bus
+    
+    return bus_types
+
+def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarray:
+    """
+    Create OPF-style targets based on bus type (predict only unknowns):
+    - PQ bus: Predict [V, θ] (unknowns)
+    - PV bus: Predict [Q, θ] (unknowns, V is known/specified)
+    - Slack bus: Predict [P, Q] (unknowns, V and θ are known/specified)
+    
+    CRITICAL: All targets are normalized to per-unit for consistent scaling:
+    - V: Already in per-unit (vm_pu)
+    - θ: In radians (typically -0.5 to 0.5)
+    - P, Q: Converted to per-unit by dividing by net.sn_mva
+    
+    Args:
+        net: Pandapower network AFTER power flow solution
+        bus_types: Array of bus type codes [0=PQ, 1=PV, 2=Slack] from identify_bus_types()
+    
+    Returns:
+        targets: Array [num_buses, 2] with unknowns for each bus (all in consistent units)
+    """
+    num_buses = len(net.bus)
+    targets = np.zeros((num_buses, 2), dtype=np.float64)
+    
+    # Get system base power (MVA) for per-unit conversion
+    s_base_mva = net.sn_mva  # Base power in MVA
+    
+    # Get power flow results
+    vm_pu = net.res_bus.vm_pu.values
+    va_rad = np.deg2rad(net.res_bus.va_degree.values)
+    
+    # Get power injections (net injection = generation - load)
+    ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    
+    # Net power injection at each bus (generation - load) in MW/MVar
+    p_inj_mw = (ext_grid_p_by_bus + gen_p_by_bus + sgen_p_by_bus - load_p_by_bus).values
+    q_inj_mvar = (ext_grid_q_by_bus + gen_q_by_bus + sgen_q_by_bus - load_q_by_bus).values
+    
+    # Convert power to per-unit for consistent normalization
+    p_inj_pu = p_inj_mw / s_base_mva
+    q_inj_pu = q_inj_mvar / s_base_mva
+    
+    # Create targets based on bus type (only unknowns, all in consistent units)
+    for bus_idx in range(num_buses):
+        if bus_types[bus_idx] == 0:  # PQ bus: unknowns = [V, θ]
+            targets[bus_idx, 0] = vm_pu[bus_idx]  # Already in per-unit
+            targets[bus_idx, 1] = va_rad[bus_idx]  # In radians
+        elif bus_types[bus_idx] == 1:  # PV bus: unknowns = [Q, θ]
+            targets[bus_idx, 0] = q_inj_pu[bus_idx]  # Reactive power in per-unit
+            targets[bus_idx, 1] = va_rad[bus_idx]  # Voltage angle in radians
+        else:  # Slack bus: unknowns = [P, Q]
+            targets[bus_idx, 0] = p_inj_pu[bus_idx]  # Active power in per-unit
+            targets[bus_idx, 1] = q_inj_pu[bus_idx]  # Reactive power in per-unit
+    
+    return targets
+
 # =============================================================================
 # SECTION 3: SIMULATION AND SAVING
 # =============================================================================
@@ -496,8 +609,9 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     num_buses = len(net.bus)
     time_steps = config['time_steps']
     
-    feature_matrix = np.zeros((time_steps, num_buses, 10))
-    target_matrix = np.zeros((time_steps, num_buses, 10))
+    feature_matrix = np.zeros((time_steps, num_buses, 10))  # Features: measurements [p_load, q_load, ..., vm_meas, va_meas]
+    target_matrix = np.zeros((time_steps, num_buses, 2))  # Targets: OPF unknowns [var1, var2] based on bus type
+    bus_types_array = np.zeros((time_steps, num_buses), dtype=np.int32)  # Store bus types for each timestep
     adjacency_array = np.zeros((time_steps, num_buses, num_buses))
     time_energy_coeffs = np.zeros(time_steps)
     time_carbon_coeffs = np.zeros(time_steps)
@@ -717,7 +831,9 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         
         # Try power flow with current topology (contingency or normal)
         try:
-            pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+            # Suppress numba print statements during power flow
+            with SuppressPrints():
+                pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
             convergence_successful = True
             convergence_stats['successful'] += 1
             convergence_stats['successful_timesteps'].append(t)
@@ -747,8 +863,9 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                 
                 try:
                     # Relaxed settings for contingency (realistic - grid under stress)
-                    pp.runpp(net, numba=False, enforce_q_lims=False, algorithm='nr', 
-                            tolerance_mva=1e-6, max_iteration=20)
+                    with SuppressPrints():
+                        pp.runpp(net, numba=False, enforce_q_lims=False, algorithm='nr', 
+                                tolerance_mva=1e-6, max_iteration=20)
                     convergence_successful = True
                     convergence_stats['successful'] += 1
                     convergence_stats['successful_timesteps'].append(t)
@@ -769,7 +886,8 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                     
                     try:
                         # Retry with normal topology
-                        pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+                        with SuppressPrints():
+                            pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
                         convergence_successful = True
                         convergence_stats['successful'] += 1
                         convergence_stats['successful_timesteps'].append(t)
@@ -854,47 +972,67 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
         time_energy_coeffs[t] = config['max_energy_utilization_coeff'] - (net.res_line.pl_mw.sum() * config['loss_sensitivity'])
         
-        # Assemble the ground truth state vector (targets) with separated generation components
-        true_state = np.stack([vm_pu, va_rad, p_load, q_load, 
-                              ext_grid_p_by_bus.values, ext_grid_q_by_bus.values,  # Slack bus generation
-                              gen_p_by_bus.values, gen_q_by_bus.values,            # Conventional generation
-                              sgen_p_by_bus.values, sgen_q_by_bus.values], axis=1) # Renewable generation
-        target_matrix[t] = true_state
-
-        # Create noisy measurements for the model features with separated generation components
-        # Use positive noise for ALL values to preserve original information and prevent sign changes
+        # ============================================================================
+        # OPTIMAL POWER FLOW (OPF) APPROACH: Predict only unknowns based on bus type
+        # ============================================================================
+        # Identify bus types from pandapower network (determined by power flow solution)
+        # Bus types are determined AFTER power flow - pandapower decides based on network state
+        bus_types = identify_bus_types(net)
+        bus_types_array[t] = bus_types  # Store for later use (e.g., evaluation, loss calculation)
         
-        # Generate positive noise for all values
+        # Create OPF-style targets: only unknowns for each bus type
+        # PQ bus: [V, θ], PV bus: [Q, θ], Slack: [P, Q]
+        opf_targets = create_opf_targets(net, bus_types)
+        target_matrix[t] = opf_targets  # [num_buses, 2]
+
+        # ============================================================================
+        # FEATURES: Power measurements + partial voltage measurements (what sensors provide)
+        # Shape: [num_buses, 10] = [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+        # ============================================================================
+        
+        # Generate noise for measurements
         positive_noise_vm = np.abs(np.random.normal(0, config['voltage_error_std'], num_buses))
         positive_noise_angle = np.abs(np.random.normal(0, config['angle_error_std'], num_buses))
         positive_noise_power = np.abs(np.random.normal(0, config['power_error_std'], num_buses))
         
-        # Voltage magnitude: positive noise ensures non-negative result
-        meas_vm = true_state[:,0] * (1 + positive_noise_vm)
+        # Power measurements (from smart meters, SCADA, etc.)
+        # These are the "known" quantities with sensor noise
+        meas_pl = p_load * (1 + positive_noise_power)
+        meas_ql = q_load * (1 + positive_noise_power)
+        meas_p_ext = ext_grid_p_by_bus.values * (1 + positive_noise_power)
+        meas_q_ext = ext_grid_q_by_bus.values * (1 + positive_noise_power)
+        meas_p_conv = gen_p_by_bus.values * (1 + positive_noise_power)
+        meas_q_conv = gen_q_by_bus.values * (1 + positive_noise_power)
+        meas_p_ren = sgen_p_by_bus.values * (1 + positive_noise_power)
+        meas_q_ren = sgen_q_by_bus.values * (1 + positive_noise_power)
         
-        # Voltage angle: positive noise preserves sign and magnitude relationship
-        meas_va = true_state[:,1] * (1 + positive_noise_angle)
+        # Partial voltage measurements (from PMUs at SOME buses only - ETH Zurich style)
+        # PMUs are expensive, so only some buses have them (typically 20-40% coverage)
+        # Select buses with PMUs (random selection each timestep for realism)
+        num_pmu_buses = max(1, int(num_buses * config.get('pmu_coverage', 0.3)))
+        pmu_buses = np.random.choice(num_buses, size=num_pmu_buses, replace=False)
         
-        # Loads: positive noise ensures non-negative result
-        meas_pl = true_state[:,2] * (1 + positive_noise_power)
-        meas_ql = true_state[:,3] * (1 + positive_noise_power)
+        # Initialize with NaN (no measurement)
+        meas_vm = np.full(num_buses, np.nan)
+        meas_va = np.full(num_buses, np.nan)
         
-        # External grid: positive noise preserves sign and magnitude relationship
-        meas_p_ext = true_state[:,4] * (1 + positive_noise_power)
-        meas_q_ext = true_state[:,5] * (1 + positive_noise_power)
+        # Add noisy PMU measurements only at selected buses
+        meas_vm[pmu_buses] = vm_pu[pmu_buses] * (1 + positive_noise_vm[pmu_buses])
+        meas_va[pmu_buses] = va_rad[pmu_buses] * (1 + positive_noise_angle[pmu_buses])
         
-        # Conventional generation: positive noise ensures non-negative result
-        meas_p_conv = true_state[:,6] * (1 + positive_noise_power)
-        meas_q_conv = true_state[:,7] * (1 + positive_noise_power)
+        # Replace NaN with 0 for missing measurements (model will learn to ignore these)
+        meas_vm = np.nan_to_num(meas_vm, nan=0.0)
+        meas_va = np.nan_to_num(meas_va, nan=0.0)
         
-        # Renewable generation: positive noise ensures non-negative result
-        meas_p_ren = true_state[:,8] * (1 + positive_noise_power)
-        meas_q_ren = true_state[:,9] * (1 + positive_noise_power)
-        
-        feature_matrix[t] = np.stack([meas_vm, meas_va, meas_pl, meas_ql, 
-                                     meas_p_ext, meas_q_ext,           # Slack bus generation
-                                     meas_p_conv, meas_q_conv,         # Conventional generation
-                                     meas_p_ren, meas_q_ren], axis=1)   # Renewable generation
+        # Feature matrix: Power measurements FIRST (indices 0-7), then partial voltages (indices 8-9)
+        # This ordering is important for physics calculations
+        feature_matrix[t] = np.stack([
+            meas_pl, meas_ql,           # [0:2] Load measurements (from smart meters)
+            meas_p_ext, meas_q_ext,     # [2:4] External grid (from SCADA)
+            meas_p_conv, meas_q_conv,   # [4:6] Conventional generation (from SCADA)
+            meas_p_ren, meas_q_ren,     # [6:8] Renewable generation (from meters)
+            meas_vm, meas_va            # [8:10] Partial voltage measurements (from PMUs)
+        ], axis=1)
         
         # Adjacency matrix already stored above
     
@@ -919,14 +1057,14 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     # This will be handled in the main execution block after all scenarios are generated
     
     return {
-        "features": feature_matrix, 
-        "targets": target_matrix, 
+        "features": feature_matrix,  # [timesteps, buses, 10] = measurements
+        "targets": target_matrix,     # [timesteps, buses, 2] = OPF unknowns (bus-type dependent)
+        "bus_types": bus_types_array, # [timesteps, buses] = bus type codes [0=PQ, 1=PV, 2=Slack]
         "adjacency": adjacency_array, 
         "ybus_data": ybus_data,  # Sparse format
         "time_energy_coeffs": time_energy_coeffs, 
         "time_carbon_coeffs": time_carbon_coeffs,
         "convergence_stats": convergence_stats  # Detailed convergence report
-        # Note: Generation components are now included in features/targets matrices
     }
 
     

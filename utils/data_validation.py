@@ -78,6 +78,11 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
                 "convergence_report.json"
             ]
             
+            # OPF: Check for bus_types file (new structure)
+            opf_files = [
+                "bus_types.npy"  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
+            ]
+            
             # Try sparse format first
             dense_ybus_type = "ybus_matrices.npy"
             
@@ -103,6 +108,27 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
                 
                 if not found:
                     missing_files.append(f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}.{file_type.split('.')[1]}")
+            
+            # Check OPF files (bus_types) - required for new OPF structure
+            for file_type in opf_files:
+                found = False
+                
+                if latest_timestamp:
+                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
+                    filename = base_name + '.' + file_type.split('.')[1]
+                    filepath = os.path.join(data_dir, filename)
+                    if os.path.exists(filepath):
+                        found = True
+                
+                if not found:
+                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}"
+                    filename = base_name + '.' + file_type.split('.')[1]
+                    filepath = os.path.join(data_dir, filename)
+                    if os.path.exists(filepath):
+                        found = True
+                
+                if not found:
+                    missing_files.append(f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}.{file_type.split('.')[1]} (OPF structure)")
             
             # Check Ybus files - REQUIRE sparse format (new implementation)
             # Old dense format is only for backward compatibility during loading, not validation
@@ -134,8 +160,8 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
 
 def check_data_consistency(config) -> Tuple[bool, str]:
     """
-    Check if existing data files have consistent timestamps, correct timesteps, and matching generation mode.
-    Validates both file consistency and configuration match (including time-series vs Monte Carlo).
+    Check if existing data files have consistent timestamps and correct timesteps.
+    Validates both file consistency and configuration match (time-series mode only).
     
     Args:
         config: Configuration object
@@ -161,12 +187,11 @@ def check_data_consistency(config) -> Tuple[bool, str]:
             with open(metadata_file, 'r') as f:
                 metadata = json.load(f)
             
-            # Check generation mode (time-series vs Monte Carlo)
-            current_mode = "time_series" if getattr(config, 'USE_TIME_SERIES', False) else "monte_carlo"
-            stored_mode = metadata.get('generation_mode', 'monte_carlo')
+            # Check generation mode (should always be time-series)
+            stored_mode = metadata.get('generation_mode', 'time_series')
             
-            if current_mode != stored_mode:
-                return False, f"Data generation mode mismatch: existing={stored_mode}, config={current_mode}. Regeneration needed."
+            if stored_mode != 'time_series':
+                return False, f"Data generation mode mismatch: existing={stored_mode}, expected=time_series. Regeneration needed."
             
             # Check data mode (train vs test)
             stored_data_mode = metadata.get('data_mode', 'unknown')
@@ -239,7 +264,7 @@ def check_data_consistency(config) -> Tuple[bool, str]:
         
         if feature_files:
             try:
-                # Load first file to check shape
+                # Load first file to check shape and structure
                 features = np.load(feature_files[0])
                 actual_timesteps = features.shape[0]
                 
@@ -247,16 +272,35 @@ def check_data_consistency(config) -> Tuple[bool, str]:
                 if actual_timesteps != expected_timesteps:
                     return False, f"Data generated with {actual_timesteps} timesteps, but config requires {expected_timesteps}. Regeneration needed."
                 
+                # OPF Structure Validation: Check target shape (should be 2 features, not 10)
+                targets_pattern = feature_files[0].replace('features', 'targets')
+                if os.path.exists(targets_pattern):
+                    targets = np.load(targets_pattern)
+                    if targets.shape[-1] != 2:
+                        return False, f"OPF structure mismatch: targets have {targets.shape[-1]} features (expected 2). Old state estimation data detected. Regeneration needed."
+                    
+                    # Check if bus_types file exists (required for OPF)
+                    bus_types_pattern = feature_files[0].replace('features', 'bus_types')
+                    if not os.path.exists(bus_types_pattern):
+                        return False, f"OPF structure incomplete: bus_types file missing. Old state estimation data detected. Regeneration needed."
+                    
+                    # Validate bus_types shape matches targets
+                    bus_types = np.load(bus_types_pattern)
+                    if bus_types.shape != targets.shape[:2]:  # Should be [timesteps, buses]
+                        return False, f"OPF structure mismatch: bus_types shape {bus_types.shape} doesn't match targets shape {targets.shape[:2]}. Regeneration needed."
+                
                 break  # Only need to check one file
             except Exception as e:
-                return False, f"Error reading data file for timestep validation: {e}"
+                return False, f"Error reading data file for structure validation: {e}"
     
     return False, f"Data files exist but no metadata found (timestamp: {timestamp}). Regeneration recommended to add metadata."
 
 def monitor_data_generation_progress_per_system(config, stop_event):
     """
     Monitor data generation progress by checking file creation.
-    Shows one unified progress bar for all bus systems.
+    Shows one unified tqdm progress bar for all bus systems.
+    
+    Waits for filesystem synchronization before starting to ensure accurate tracking.
     """
     import glob
     import re
@@ -273,79 +317,137 @@ def monitor_data_generation_progress_per_system(config, stop_event):
     # Find the current timestamp being generated
     def get_current_timestamp():
         """Get the most recent timestamp from existing files"""
+        if not os.path.exists(data_dir):
+            return None
         timestamp_pattern = r"_(\d{8}_\d{6})"
         timestamps = set()
-        for file in os.listdir(data_dir):
-            match = re.search(timestamp_pattern, file)
-            if match:
-                timestamps.add(match.group(1))
-        return max(timestamps) if timestamps else None
+        try:
+            for file in os.listdir(data_dir):
+                if file.endswith(('.npy', '.txt', '.json')):
+                    match = re.search(timestamp_pattern, file)
+                    if match:
+                        timestamps.add(match.group(1))
+            return max(timestamps) if timestamps else None
+        except (OSError, PermissionError):
+            return None
     
     current_timestamp = None
     last_count = 0
+    max_wait_for_first_file = 30  # Maximum 30 seconds to wait for first file
+    wait_elapsed = 0
     
-    # Create progress bar immediately at 0%
+    # Create tqdm progress bar
     pbar = tqdm(
         initial=0,
         total=total_expected_files,
         desc="Generating data",
         bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} files",
-        leave=True
+        leave=True,
+        unit="file",
+        unit_scale=False
     )
-    
-    wait_start_time = time.time()
     
     try:
         while not stop_event.is_set():
-            # Get current timestamp on first iteration
+            # Wait for first file to determine timestamp
             if current_timestamp is None:
                 current_timestamp = get_current_timestamp()
                 if current_timestamp is None:
-                    # Still waiting for first file to determine timestamp
+                    # Still waiting for first file
+                    wait_elapsed += 0.5
+                    if wait_elapsed > max_wait_for_first_file:
+                        pbar.set_description("Waiting for data generation to start...")
+                        time.sleep(0.5)
+                        continue
                     time.sleep(0.5)
-                    continue  # Wait for first file to be created
+                    continue
+                else:
+                    # Found timestamp - start tracking
+                    pbar.set_description(f"Generating data (timestamp: {current_timestamp[:8]})")
             
             # Count all files from current timestamp
-            pattern = os.path.join(data_dir, f"case*_*_{current_timestamp}.*")
-            existing_files = glob.glob(pattern)
-            current_count = len(existing_files)
+            try:
+                pattern = os.path.join(data_dir, f"case*_*_{current_timestamp}.*")
+                existing_files = glob.glob(pattern)
+                current_count = len(existing_files)
+            except (OSError, PermissionError):
+                # Filesystem still syncing - wait a bit
+                time.sleep(0.2)
+                continue
             
             # Update progress bar if new files were created
             if current_count > last_count:
                 delta = current_count - last_count
                 pbar.update(delta)
                 last_count = current_count
+                pbar.refresh()  # Force refresh display
             
             # Check if we're done
             if current_count >= total_expected_files:
                 pbar.update(total_expected_files - pbar.n)  # Complete the bar
+                pbar.set_description("✓ Data generation complete")
                 pbar.close()
                 return
             
-            time.sleep(0.2)  # Check every 0.2 seconds (faster for quick generations)
+            time.sleep(0.2)  # Check every 0.2 seconds
+            
+    except KeyboardInterrupt:
+        pbar.set_description("⚠ Interrupted")
+        pbar.close()
+        raise
     finally:
         # Ensure progress bar is closed
-        if pbar is not None:
+        if pbar is not None and not pbar.disable:
             pbar.close()
 
-def clean_existing_data(config):
+def clean_existing_data(config, aggressive=True):
     """
-    Remove all existing data files to ensure data integrity.
-    This prevents mixing data from different generation runs.
-    Now handles both timestamped and legacy file formats.
+    Remove ALL existing data files to ensure complete data integrity.
+    This is a ROBUST cleanup that prevents any data mixing.
+    
+    Args:
+        config: Configuration object
+        aggressive: If True, removes ALL files including metadata (recommended)
     """
     import glob
+    import shutil
     
-    data_dir = config.DATA_DIR  # Use mode-specific directory
+    data_dir = config.DATA_DIR  # Use mode-specific directory (train or test)
     files_removed = 0
     
-    print(f"Cleaning existing {config.DATA_MODE.upper()} data files to ensure data integrity...")
+    print(f"\n{'='*80}")
+    print(f"CLEANING ALL {config.DATA_MODE.upper()} DATA")
+    print(f"{'='*80}")
+    print(f"Target directory: {data_dir}")
     
-    # Remove all data files (both timestamped and legacy formats)
+    if not os.path.exists(data_dir):
+        print("Directory doesn't exist yet. Nothing to clean.")
+        return
+    
+    if aggressive:
+        # AGGRESSIVE CLEANUP: Remove the entire mode-specific directory and recreate it
+        # This ensures absolutely NO leftover files from previous runs
+        try:
+            print(f"Performing aggressive cleanup: removing entire directory...")
+            shutil.rmtree(data_dir)
+            os.makedirs(data_dir, exist_ok=True)
+            print(f"✓ Successfully cleaned and recreated: {data_dir}")
+            print("   All previous data has been completely removed.\n")
+            return
+        except Exception as e:
+            print(f"WARNING: Could not remove directory: {e}")
+            print("Falling back to file-by-file cleanup...\n")
+    
+    # FALLBACK: File-by-file cleanup (if aggressive fails)
+    # Remove ALL data files (both timestamped and legacy formats)
     patterns = [
-        "case*_*_frac*.npy",      # Legacy and timestamped .npy files
-        "case*_*_frac*.txt",      # Legacy and timestamped .txt files
-        "case*_*_frac*.json",     # Convergence reports
+        "case*_*_frac*.npy",          # All .npy data files
+        "case*_*_frac*.txt",          # All .txt coefficient files
+        "case*_*_frac*.json",         # All convergence reports
+        "data_generation_metadata.json",  # Metadata file
+        "*.npy",                      # Any other numpy files
+        "*.json",                     # Any other json files
+        "*.txt",                      # Any other text files
     ]
     
     for pattern in patterns:
@@ -353,7 +455,7 @@ def clean_existing_data(config):
         files_to_remove = glob.glob(file_pattern)
         
         for filepath in files_to_remove:
-            # Skip the generation script and check script
+            # Skip the generation script and check script (should not be in data dir anyway)
             filename = os.path.basename(filepath)
             if filename in ["gen_meas_best.py", "check_data.py"]:
                 continue
@@ -365,14 +467,22 @@ def clean_existing_data(config):
                 print(f"WARNING: Could not remove {filepath}: {e}")
     
     if files_removed > 0:
-        print(f"Removed {files_removed} existing data files.")
-        print("   Cleanup complete. Ready for fresh data generation.\n")
+        print(f"✓ Removed {files_removed} data files from {config.DATA_MODE} folder.")
+        print("   Ready for fresh data generation.\n")
     else:
-        print("No existing data files to clean.\n")
+        print("No existing data files found to clean.\n")
+    
+    print("="*80)
 
 def generate_data_if_missing(config) -> bool:
     """
-    Generate data if any files are missing by running gen_meas_best.py
+    ROBUST data validation and generation system.
+    
+    This function performs comprehensive validation and ensures data integrity by:
+    1. Checking if all required files exist
+    2. Validating data consistency (timestamps, timesteps, mode)
+    3. Detecting ANY inconsistency and triggering full cleanup
+    4. Regenerating everything from scratch if needed
     
     Args:
         config: Configuration object
@@ -380,104 +490,175 @@ def generate_data_if_missing(config) -> bool:
     Returns:
         bool: True if data generation was successful, False otherwise
     """
+    print(f"\n{'='*80}")
+    print(f"ROBUST DATA VALIDATION - {config.DATA_MODE.upper()} MODE")
+    print(f"{'='*80}")
+    print(f"Expected timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]}")
+    print(f"Data directory: {config.DATA_DIR}")
+    
+    # STEP 1: Check if files exist
     data_exist, missing_files = check_data_files_exist(config)
     
-    if data_exist:
-        # Even if all files exist, check for data consistency (mixed timestamps + timesteps)
-        is_consistent, reason = check_data_consistency(config)
-        
-        if is_consistent:
-            print(f"Data validation passed: {reason}")
-            print("   Skipping data generation.")
-            return True
-        else:
-            print(f"WARNING: Data inconsistency detected: {reason}")
-            print("Will regenerate all data to ensure consistency.")
-            # Continue to cleaning and regeneration
-    else:
-        print(f"Missing {len(missing_files)} data files. Examples:")
-        for i, file in enumerate(missing_files[:5]):  # Show first 5 missing files
-            print(f"   - {file}")
+    # STEP 2: Check data consistency (even if files exist)
+    needs_regeneration = False
+    regeneration_reason = []
+    
+    if not data_exist:
+        needs_regeneration = True
+        regeneration_reason.append(f"Missing {len(missing_files)} data files")
+        print(f"\n❌ VALIDATION FAILED: {len(missing_files)} files missing")
+        print("   Examples:")
+        for i, file in enumerate(missing_files[:5]):
+            print(f"      - {file}")
         if len(missing_files) > 5:
-            print(f"   ... and {len(missing_files) - 5} more files")
+            print(f"      ... and {len(missing_files) - 5} more files")
+    else:
+        print("\n✓ All files present")
+        
+        # Even if files exist, validate consistency
+        is_consistent, consistency_reason = check_data_consistency(config)
+        
+        if not is_consistent:
+            needs_regeneration = True
+            regeneration_reason.append(consistency_reason)
+            print(f"❌ VALIDATION FAILED: {consistency_reason}")
+        else:
+            print(f"✓ Data consistent: {consistency_reason}")
     
-    # CRITICAL: Clean all existing data to prevent mixing different time periods
-    clean_existing_data(config)
+    # STEP 3: If data is valid, skip generation
+    if not needs_regeneration:
+        print("\n" + "="*80)
+        print("✓ DATA VALIDATION PASSED - Using existing data")
+        print("="*80)
+        return True
     
-    # Wait for file system to sync and confirm deletion (especially important on slower systems)
+    # STEP 4: Data needs regeneration - perform AGGRESSIVE cleanup
+    print(f"\n{'='*80}")
+    print("DATA REGENERATION REQUIRED")
+    print(f"{'='*80}")
+    print("Reason(s):")
+    for reason in regeneration_reason:
+        print(f"  • {reason}")
+    
+    # AGGRESSIVE CLEANUP: Remove ALL data in the mode-specific folder
+    print("\nPerforming aggressive cleanup to ensure data integrity...")
+    clean_existing_data(config, aggressive=True)
+    
+    # Verify cleanup was successful and synchronize filesystem
     import glob
     data_dir = config.DATA_DIR
-    max_wait = 5  # Maximum 5 seconds
-    wait_interval = 0.2
-    elapsed = 0
+    remaining_patterns = ["*.npy", "*.txt", "*.json"]
+    remaining_files = []
+    for pattern in remaining_patterns:
+        remaining_files.extend(glob.glob(os.path.join(data_dir, pattern)))
     
-    while elapsed < max_wait:
-        # Check if any data files still exist
-        remaining = []
-        for pattern in ["case*_*_frac*.npy", "case*_*_frac*.txt", "case*_*_frac*.json"]:
-            remaining.extend(glob.glob(os.path.join(data_dir, pattern)))
-        
-        if not remaining:
-            break  # All files deleted
-        
-        time.sleep(wait_interval)
-        elapsed += wait_interval
+    if remaining_files:
+        print(f"\n⚠ WARNING: {len(remaining_files)} files still remain after cleanup:")
+        for f in remaining_files[:5]:
+            print(f"   - {os.path.basename(f)}")
+        print("   Waiting for filesystem sync...")
+        time.sleep(2)
+    else:
+        print("✓ Cleanup verified: All old data removed")
     
-    print("Running data generation script...")
+    # CRITICAL: Synchronization delay before starting progress monitoring
+    # This ensures file deletion is complete and filesystem is ready
+    print("   Synchronizing filesystem (2 seconds)...")
+    time.sleep(2)
+    print("✓ Filesystem synchronized\n")
+    
+    # STEP 5: Generate fresh data with tqdm progress bar
+    print(f"{'='*80}")
+    print("GENERATING FRESH DATA")
+    print(f"{'='*80}")
     
     try:
-        # Run gen_meas_best.py from the data directory
         data_gen_script = os.path.join("data", "gen_meas_best.py")
         
         if not os.path.exists(data_gen_script):
-            print(f"ERROR: Data generation script not found: {data_gen_script}")
+            print(f"❌ ERROR: Data generation script not found: {data_gen_script}")
             return False
         
-        # Run the script with per-system progress bars
-        print("Starting data generation...\n")
+        # Run data generation with tqdm progress monitoring
+        timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
+        print(f"Mode: {config.DATA_MODE} | Timesteps: {timesteps}")
+        print("Starting data generation with progress tracking...\n")
         
-        # Start monitoring progress in background thread
+        # Start monitoring progress in background thread (with tqdm)
         stop_event = threading.Event()
         monitor_thread = threading.Thread(
-            target=monitor_data_generation_progress_per_system, 
-            args=(config, stop_event)
+            target=monitor_data_generation_progress_per_system,
+            args=(config, stop_event),
+            daemon=True
         )
         monitor_thread.start()
         
-        # Run data generation script with mode and timesteps (capture output to avoid interference)
-        timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
+        # Small delay to ensure progress bar is initialized
+        time.sleep(0.5)
+        
+        # Run data generation script (capture output to avoid interfering with tqdm)
         result = subprocess.run(
             [sys.executable, data_gen_script, config.DATA_MODE, str(timesteps)],
             cwd=".",
-            capture_output=True,  # Capture to avoid interfering with progress bar
+            capture_output=True,  # Capture to avoid interfering with tqdm progress bar
             text=True
         )
         
         # Stop monitoring thread
         stop_event.set()
-        monitor_thread.join(timeout=3)  # Wait for thread to finish
+        monitor_thread.join(timeout=5)  # Wait for thread to finish
         
-        if result.returncode == 0:
-            print("\nData generation completed successfully!")
+        # Print captured output after progress bar is done
+        if result.stdout:
+            # Only print non-progress lines to avoid clutter
+            output_lines = result.stdout.split('\n')
+            important_lines = [line for line in output_lines if line.strip() and 
+                             'Progress:' not in line and 'timesteps' not in line.lower()]
+            if important_lines:
+                print("\nData generation output:")
+                for line in important_lines[:10]:  # Show first 10 important lines
+                    print(f"  {line}")
+        
+        if result.stderr:
+            print("\nWarnings/Errors:")
+            print(result.stderr)
+        
+        if result.returncode != 0:
+            print(f"\n❌ ERROR: Data generation failed (exit code {result.returncode})")
+            return False
+        
+        # STEP 6: Verify generation was successful
+        print(f"\n{'='*80}")
+        print("VERIFYING GENERATED DATA")
+        print(f"{'='*80}")
+        
+        data_exist_after, remaining_missing = check_data_files_exist(config)
+        
+        if data_exist_after:
+            print("✓ All required files successfully generated")
             
-            # Verify data was actually generated
-            data_exist_after, remaining_missing = check_data_files_exist(config)
-            if data_exist_after:
-                print("All required data files now exist.\n")
+            # Double-check consistency
+            is_consistent_after, reason_after = check_data_consistency(config)
+            if is_consistent_after:
+                print(f"✓ Generated data is consistent: {reason_after}")
+                print(f"\n{'='*80}")
+                print("✓✓✓ DATA GENERATION SUCCESSFUL ✓✓✓")
+                print(f"{'='*80}\n")
                 return True
             else:
-                print(f"WARNING: Data generation completed but {len(remaining_missing)} files still missing.")
-                for missing in remaining_missing[:3]:  # Show a few examples
-                    print(f"   - Still missing: {missing}")
+                print(f"❌ Generated data has consistency issues: {reason_after}")
                 return False
         else:
-            print(f"ERROR: Data generation failed with return code {result.returncode}")
-            if result.stderr:
-                print(f"Error details: {result.stderr}")
+            print(f"❌ Generation incomplete: {len(remaining_missing)} files still missing")
+            print("   Examples:")
+            for missing in remaining_missing[:5]:
+                print(f"      - {missing}")
             return False
             
     except Exception as e:
-        print(f"ERROR: Error running data generation: {e}")
+        print(f"\n❌ ERROR: Exception during data generation: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def display_convergence_analysis(config, bus_systems_to_show=None):
@@ -562,6 +743,15 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
     
     # Calculate summary statistics
     total_timesteps = total_successful + total_failed
+    
+    # Check if ANY data was found
+    if total_timesteps == 0:
+        print("\n⚠ WARNING: No convergence data found!")
+        print("  Data may not have been generated yet.")
+        print("  Run with validate_data=True or manually run data/gen_meas_best.py")
+        print("="*80)
+        return  # Exit early
+    
     overall_rate = (total_successful / total_timesteps * 100) if total_timesteps > 0 else 0
     
     print(f"\nOverall convergence: {overall_rate:.1f}% ({total_successful}/{total_timesteps} timesteps)")
