@@ -748,7 +748,7 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
     if total_timesteps == 0:
         print("\n⚠ WARNING: No convergence data found!")
         print("  Data may not have been generated yet.")
-        print("  Run with validate_data=True or manually run data/gen_meas_best.py")
+        print("  Data will be generated automatically if missing.")
         print("="*80)
         return  # Exit early
     
@@ -823,15 +823,13 @@ def force_clean_all_data(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def validate_data_before_training(config, bus_systems_to_show=None, run_integrity_analysis=True) -> bool:
+def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
     """
     Main function to validate data exists and generate if needed.
-    All analysis (including convergence) is done by data integrity module.
     
     Args:
         config: Configuration object
-        bus_systems_to_show: List of bus systems for data integrity analysis
-        run_integrity_analysis: If True, run comprehensive data integrity analysis (default: True)
+        bus_systems_to_show: List of bus systems to show in convergence analysis
         
     Returns:
         bool: True if data is ready for training, False otherwise
@@ -843,35 +841,15 @@ def validate_data_before_training(config, bus_systems_to_show=None, run_integrit
     success = generate_data_if_missing(config)
     
     if success:
-        # Run comprehensive data integrity analysis (includes convergence display)
-        if run_integrity_analysis:
-            print("\n" + "="*80)
-            print("RUNNING COMPREHENSIVE DATA INTEGRITY ANALYSIS")
-            print("="*80)
-            
-            try:
-                from utils.data_integrity import analyze_data_integrity
-                
-                # Determine output directory (experimental_results/data_integrity)
-                output_dir = os.path.join(config.EXPERIMENTAL_RESULTS_DIR, "data_integrity")
-                
-                # Run analysis for bus systems being tested
-                if bus_systems_to_show:
-                    cases = [f"case{bus}" for bus in bus_systems_to_show]
-                else:
-                    cases = None  # Auto-detect all
-                
-                analyze_data_integrity(config.DATA_DIR, output_dir, cases)
-                
-                print(f"\n✓ Data integrity analysis complete!")
-                print(f"  Reports saved to: {output_dir}")
-                
-            except Exception as e:
-                print(f"\n⚠ Warning: Data integrity analysis failed: {e}")
-                import traceback
-                traceback.print_exc()
-                print("  Continuing with training...")
+        # Display convergence analysis table (shows power flow success rates)
+        try:
+            display_convergence_analysis(config, bus_systems_to_show)
+        except Exception as e:
+            print(f"Warning: Could not display convergence analysis: {e}")
         
+        # Note: Data profile story is now generated automatically during training
+        # when GENERATE_DATA_PROFILE_STORY=True in config
+        # This provides professional graphs telling the story of your data
         print("\nReady for training!")
     else:
         print("\nData validation failed!")

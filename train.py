@@ -142,6 +142,7 @@ from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluat
                              evaluate_moopf_objectives, evaluate_moopf_objectives_normalized, 
                              save_best_model_results, print_comprehensive_summary, print_model_summary)
 from utils.uncertainty_analysis import generate_uncertainty_visualizations
+from utils.data_profile_story import analyze_data_profiles
 from trainers.model_trainer import PowerSystemTrainer
 from config import Config, Args
 
@@ -242,39 +243,10 @@ def main():
     print(f"Bus Systems: {bus_systems_to_test}")
     print("="*80)
     
-    # STEP 2: Validate data before training (optional - can be skipped for faster startup)
-    if args.validate_data:
-        print("\n[Data Validation] Running data integrity checks...")
-        if not validate_data_before_training(base_config, bus_systems_to_test):
-            print("Data validation failed. Exiting training.")
-            return
-    else:
-        print("\n[Data Validation] Skipped (validate_data=False). Assuming data is correct.")
-        
-        # Check if data actually exists, if not, generate it automatically
-        from utils.data_validation import generate_data_if_missing, display_convergence_analysis
-        import glob
-        
-        # Quick check: Do we have ANY data files?
-        data_exists = False
-        for bus_system in bus_systems_to_test:
-            pattern = os.path.join(base_config.DATA_DIR, f"case{bus_system}_features_frac*.npy")
-            if glob.glob(pattern):
-                data_exists = True
-                break
-        
-        if not data_exists:
-            print("\n[Auto-Generate] No data found. Generating data automatically...")
-            success = generate_data_if_missing(base_config)
-            if not success:
-                print("[Auto-Generate] Failed to generate data. Exiting training.")
-                return
-        
-        # Still display convergence analysis even if validation is skipped
-        try:
-            display_convergence_analysis(base_config, bus_systems_to_test)
-        except Exception as e:
-            print(f"Warning: Could not display convergence analysis: {e}")
+    # STEP 2: Validate data before training (check files exist, generate if missing, show convergence)
+    if not validate_data_before_training(base_config, bus_systems_to_test):
+        print("Data validation failed. Exiting training.")
+        return
     
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -347,6 +319,21 @@ def main():
         try:
             data_tuple = load_power_system_data(base_config, case_name)
             _features, _adjacency, _ybus_matrices, _targets, _bus_types, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
+            
+            # Generate data profile story if enabled
+            if base_config.GENERATE_DATA_PROFILE_STORY:
+                try:
+                    analyze_data_profiles(
+                        config=base_config,
+                        case_name=case_name,
+                        features=_features,  # Use current data mode (train/test)
+                        normalizer=_normalizer,
+                        renewable_fractions=_renewable_fractions
+                    )
+                except Exception as e:
+                    print(f"  ⚠️  Warning: Could not generate data profile story: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:

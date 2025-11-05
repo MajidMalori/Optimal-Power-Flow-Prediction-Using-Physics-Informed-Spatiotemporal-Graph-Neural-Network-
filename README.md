@@ -1,14 +1,13 @@
-﻿# Physics-Informed Graph Neural Networks for Dynamic State Estimation in Power Systems
+﻿# Physics-Informed Graph Neural Networks for Optimal Power Flow in Power Systems
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
 [![PandaPower](https://img.shields.io/badge/PandaPower-2.13%2B-green.svg)](https://pandapower.readthedocs.io/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![DOI](https://img.shields.io/badge/DOI-10.1000/182-blue.svg)](https://doi.org/10.1000/182)
 
 ## Abstract
 
-This repository presents a novel approach to Dynamic State Estimation (DSE) in power systems using Physics-Informed Graph Neural Networks (PI-GNNs). Our method addresses the critical challenge of real-time monitoring in modern power grids with increasing renewable energy integration. By incorporating electrical physics constraints directly into the neural network architecture, we achieve superior accuracy and physical consistency compared to traditional data-driven approaches. The framework demonstrates significant improvements across IEEE test systems (33, 57, and 118 buses) with up to 60% reduction in estimation error while maintaining strict adherence to power flow equations and operational constraints.
+This repository presents a comprehensive framework for solving Optimal Power Flow (OPF) problems in power systems using Physics-Informed Graph Neural Networks (PI-GNNs). The framework addresses the computational challenges of real-time OPF in modern power grids with increasing renewable energy integration. By incorporating electrical physics constraints directly into the neural network architecture and loss function, we achieve superior accuracy and physical consistency compared to traditional data-driven approaches. The framework supports multiple network architectures, automated hyperparameter optimization, and comprehensive evaluation across IEEE test systems (33, 57, and 118 buses) with varying renewable energy penetration levels.
 
 ## Table of Contents
 
@@ -16,13 +15,14 @@ This repository presents a novel approach to Dynamic State Estimation (DSE) in p
 - [Theoretical Background](#theoretical-background)
 - [Methodology](#methodology)
 - [Mathematical Formulation](#mathematical-formulation)
-- [Model Architecture](#model-architecture)
-- [Experimental Setup](#experimental-setup)
-- [Results and Analysis](#results-and-analysis)
+- [Model Architectures](#model-architectures)
+- [Data Generation and Processing](#data-generation-and-processing)
+- [Training Pipeline](#training-pipeline)
+- [Hyperparameter Optimization](#hyperparameter-optimization)
+- [Evaluation Metrics](#evaluation-metrics)
 - [Installation and Usage](#installation-and-usage)
 - [Code Structure](#code-structure)
-- [Performance Benchmarks](#performance-benchmarks)
-- [Limitations and Future Work](#limitations-and-future-work)
+- [Results and Analysis](#results-and-analysis)
 - [References](#references)
 - [Citation](#citation)
 
@@ -30,556 +30,1182 @@ This repository presents a novel approach to Dynamic State Estimation (DSE) in p
 
 ## Problem Statement
 
-### Dynamic State Estimation in Power Systems
+### Optimal Power Flow in Power Systems
 
-Dynamic State Estimation (DSE) is a fundamental real-time monitoring technique in power systems that continuously estimates the electrical state vector **x** = [V, θ, P, Q]ᵀ, where:
-- **V** ∈ ℝⁿ: voltage magnitudes
-- **θ** ∈ ℝⁿ: voltage angles  
-- **P** ∈ ℝⁿ: active power injections
-- **Q** ∈ ℝⁿ: reactive power injections
+Optimal Power Flow (OPF) is a fundamental optimization problem in power systems that determines the optimal operating point of a power grid while satisfying physical constraints and operational limits. The problem involves finding the unknown variables for each bus type:
 
-The traditional DSE problem is formulated as:
+- **PQ Buses (Load Buses)**: Unknowns are voltage magnitude V and voltage angle θ
+- **PV Buses (Generator Buses with Fixed Voltage)**: Unknowns are reactive power Q and voltage angle θ
+- **Slack Buses (Reference Buses)**: Unknowns are active power P and reactive power Q
+
+The traditional OPF problem is formulated as:
 
 ```
-minimize:  J(x) = ||h(x) - z||²_R⁻¹
+minimize:  J(x) = f(P, Q, V, θ)
 subject to: g(x) = 0  (power flow equations)
            h(x) ≤ h_max  (operational constraints)
+           V_min ≤ V ≤ V_max  (voltage limits)
 ```
 
-where **z** ∈ ℝᵐ are noisy measurements, **h(x)** is the measurement function, and **R** is the measurement covariance matrix.
+where **x** is the state vector containing all system variables, **f** is the objective function (typically power loss, cost, or emissions), **g** represents the AC power flow equations, and **h** represents inequality constraints.
 
 ### Challenges in Modern Power Systems
 
-1. **High-dimensional state space**: Large interconnected grids with thousands of buses
-2. **Nonlinear constraints**: AC power flow equations create non-convex optimization
-3. **Real-time requirements**: Sub-second estimation for control applications
-4. **Renewable integration**: Increased uncertainty and variability
-5. **Missing data**: Sensor failures and communication outages
-6. **Computational complexity**: Traditional iterative solvers are too slow
+1. **High-dimensional optimization space**: Large interconnected grids with hundreds of buses and thousands of variables
+2. **Nonlinear constraints**: AC power flow equations create non-convex optimization landscapes
+3. **Real-time requirements**: Sub-second solutions needed for control applications
+4. **Renewable integration**: Increased uncertainty and variability from renewable energy sources
+5. **Multiple objectives**: Trade-offs between power loss, cost, carbon emissions, and voltage stability
+6. **Computational complexity**: Traditional iterative solvers (e.g., interior point methods) are too slow for real-time applications
+
+### Our Approach
+
+We reformulate OPF as a supervised learning problem where a neural network learns to predict the optimal unknown variables for each bus type directly from measurements. The network is constrained by physics-informed loss terms that enforce power flow equations and operational limits, ensuring physical feasibility of predictions.
 
 ## Theoretical Background
 
 ### Graph Neural Networks for Power Systems
 
-Graph Neural Networks (GNNs) are particularly suited for power system state estimation due to their ability to:
-- Model the inherent graph structure of power networks
-- Learn spatial dependencies between buses
-- Handle variable network topologies
-- Process irregular measurement patterns
+Graph Neural Networks (GNNs) are particularly suited for power system analysis due to their ability to:
 
-The fundamental GNN message passing is defined as:
+- Model the inherent graph structure of power networks where buses are nodes and transmission lines are edges
+- Learn spatial dependencies between buses through message passing
+- Handle variable network topologies and irregular measurement patterns
+- Scale to large systems with linear complexity
+
+The fundamental GNN message passing mechanism is defined as:
 
 ```
-h_v^(l+1) = UPDATE(h_v^(l), AGGREGATE({h_u^(l) : u ∈ N(v)}))
+h_v^(l+1) = σ(W^(l) · AGGREGATE({h_u^(l) : u ∈ N(v)}))
 ```
 
-where **h_v^(l)** is the hidden state of node v at layer l, and **N(v)** is the neighborhood of node v.
+where:
+- **h_v^(l)** is the hidden representation of node v at layer l
+- **N(v)** is the neighborhood of node v (connected buses)
+- **W^(l)** is a learnable weight matrix at layer l
+- **σ** is a nonlinear activation function
+- **AGGREGATE** combines information from neighboring nodes
 
 ### Physics-Informed Neural Networks
 
 Physics-Informed Neural Networks (PINNs) incorporate domain knowledge through:
-1. **Physics loss terms**: Penalize violations of physical laws
-2. **Constraint enforcement**: Ensure solutions satisfy governing equations
-3. **Multi-objective optimization**: Balance accuracy with physical consistency
+
+1. **Physics loss terms**: Penalize violations of physical laws (e.g., power balance equations)
+2. **Constraint enforcement**: Ensure solutions satisfy governing equations during training
+3. **Multi-objective optimization**: Balance prediction accuracy with physical consistency
+
+The key innovation is that the network learns to satisfy physics constraints implicitly through the loss function, rather than requiring explicit constraint satisfaction algorithms.
+
+### Learnable Uncertainty Weighting
+
+We employ the learnable uncertainty weighting method from Kendall et al. (CVPR 2018) to automatically balance multiple loss terms. This method treats each loss component as a task with homoscedastic uncertainty and learns optimal weighting through backpropagation.
+
+The total loss function is:
+
+```
+L_total = (1/(2σ₁²))L_data + (1/(2σ₂²))L_power + (1/(2σ₃²))L_voltage + log(σ₁) + log(σ₂) + log(σ₃)
+```
+
+where **σ₁, σ₂, σ₃** are learnable parameters representing the uncertainty of each loss term. Higher uncertainty corresponds to lower weight, allowing the model to automatically balance tasks of different scales and importance.
 
 ## Methodology
 
-### Hybrid Architecture Design
+### Problem Formulation
 
-Our approach combines three key components:
+Given a power system with **n** buses, we define:
 
-1. **Adaptive Graph Learning**: Learn optimal graph structure from data
-2. **Physics-Informed Constraints**: Enforce electrical laws during training
-3. **Temporal Modeling**: Capture dynamic behavior with RNN components
+**Input Features (Measurements)**:
+- **x** ∈ ℝ^(n×10): Measurement matrix containing for each bus:
+  - vm_pu: Voltage magnitude (per unit, partial measurements)
+  - va_rad: Voltage angle (radians, partial measurements)
+  - p_load: Active load (MW)
+  - q_load: Reactive load (MVAr)
+  - p_ext: Active power from external grid (MW)
+  - q_ext: Reactive power from external grid (MVAr)
+  - p_conv: Conventional generation active power (MW)
+  - q_conv: Conventional generation reactive power (MVAr)
+  - p_ren: Renewable generation active power (MW)
+  - q_ren: Renewable generation reactive power (MVAr)
 
-### Multi-Objective Loss Function
+**Output Targets (Unknowns)**:
+- **y** ∈ ℝ^(n×2): Unknown variables matrix, where each bus has 2 unknowns depending on bus type:
+  - PQ buses: [V, θ] (voltage magnitude, angle)
+  - PV buses: [Q, θ] (reactive power, angle)
+  - Slack buses: [P, Q] (active power, reactive power)
 
-The total loss function combines multiple objectives:
+**Adjacency Matrix**:
+- **A** ∈ ℝ^(n×n): Physical connectivity matrix (1 if buses are connected, 0 otherwise)
 
-```
-L_total = L_MSE + λ₁L_power + λ₂L_voltage + λ₃L_carbon + λ₄L_flow
-```
+**Admittance Matrix**:
+- **Y_bus** ∈ ℂ^(n×n): Complex admittance matrix encoding network impedance
 
-where:
-- **L_MSE**: Mean squared error between predicted and true states
-- **L_power**: Power balance violation penalty
-- **L_voltage**: Voltage limit violation penalty  
-- **L_carbon**: Carbon emission constraint
-- **L_flow**: Power flow magnitude constraint
+### Network Architecture Overview
+
+Our framework implements seven neural network architectures:
+
+1. **GCN**: Baseline Graph Convolutional Network (non-physics-informed)
+2. **adaptiveGCN**: GCN with adaptive graph learning (non-physics-informed)
+3. **AdaptivePIGCN**: Physics-informed GCN with adaptive graph learning
+4. **PIGCLSTM**: Physics-informed GCN with LSTM for temporal modeling
+5. **PIGCGRU**: Physics-informed GCN with GRU for temporal modeling
+6. **ResnetPIGCLSTM**: PIGCLSTM with residual connections
+7. **ResnetPIGCGRU**: PIGCGRU with residual connections
+
+All models share the same input/output dimensions and are trained using the same data pipeline, enabling fair comparison.
 
 ## Mathematical Formulation
 
 ### Power Flow Equations
 
-The AC power flow equations are:
+The AC power flow equations govern the relationship between voltages, angles, and power injections:
 
+**Active Power Balance**:
 ```
 P_i = V_i ∑(j∈N_i) V_j [G_ij cos(θ_i - θ_j) + B_ij sin(θ_i - θ_j)]
+```
+
+**Reactive Power Balance**:
+```
 Q_i = V_i ∑(j∈N_i) V_j [G_ij sin(θ_i - θ_j) - B_ij cos(θ_i - θ_j)]
 ```
 
-where **G_ij** and **B_ij** are elements of the admittance matrix **Y_bus**.
+where:
+- **P_i, Q_i**: Active and reactive power injection at bus i
+- **V_i, θ_i**: Voltage magnitude and angle at bus i
+- **G_ij, B_ij**: Real and imaginary parts of admittance matrix element Y_ij
+- **N_i**: Set of buses connected to bus i
 
-### Physics-Informed Loss Terms
-
-#### Power Balance Violation
+In matrix form:
 ```
-L_power = ||P_pred - P_actual||² + ||Q_pred - Q_actual||²
-```
-
-#### Voltage Constraint Violation
-```
-L_voltage = max(0, V_pred - V_max)² + max(0, V_min - V_pred)²
+P + jQ = diag(V) · conj(Y_bus · (V · exp(jθ)))
 ```
 
-#### Carbon Emission Constraint
-```
-L_carbon = ∑ᵢ αᵢ P_gen,i
-```
-where **αᵢ** is the carbon intensity coefficient for generator i.
+where **V** and **θ** are vectors of voltage magnitudes and angles, and **j** is the imaginary unit.
 
-#### Power Flow Magnitude
+### Physics-Informed Loss Function
+
+The total loss function combines three components:
+
+#### 1. Data Loss (Prediction Error)
+
 ```
-L_flow = |||S| - |V * conj(Y_bus * V)|||²
+L_data = MSE(y_pred, y_true) = (1/n) ∑ᵢ ||y_pred,i - y_true,i||²
 ```
-where **S** is the complex power vector.
+
+This measures the mean squared error between predicted and true unknown variables.
+
+#### 2. Power Balance Violation
+
+The power balance violation is computed using predicted voltages and measured power:
+
+```
+P_calculated = Re[diag(V_pred) · conj(Y_bus · (V_pred · exp(jθ_pred)))]
+Q_calculated = Im[diag(V_pred) · conj(Y_bus · (V_pred · exp(jθ_pred)))]
+```
+
+```
+L_power = ||P_measured - P_calculated||² + ||Q_measured - Q_calculated||²
+```
+
+This penalizes deviations from the power flow equations, ensuring physical consistency.
+
+#### 3. Voltage Constraint Violation
+
+```
+L_voltage = (1/n) ∑ᵢ [max(0, V_pred,i - V_max)² + max(0, V_min - V_pred,i)²]
+```
+
+This penalizes voltage predictions that violate operational limits (typically 0.95 ≤ V ≤ 1.05 per unit).
+
+#### 4. Total Loss with Learnable Uncertainty Weighting
+
+```
+L_total = (1/(2σ_data²))L_data + (1/(2σ_power²))L_power + (1/(2σ_voltage²))L_voltage + log(σ_data) + log(σ_power) + log(σ_voltage)
+```
+
+where **σ_data, σ_power, σ_voltage** are learnable parameters initialized to 1.0 (log(σ) = 0.0). The log terms prevent the uncertainties from becoming infinite, which would disable the corresponding loss terms.
 
 ### Adaptive Graph Learning
 
-The adaptive adjacency matrix is computed as:
+For models with adaptive graph learning (adaptiveGCN, AdaptivePIGCN, and all sequential variants), we compute a learned adjacency matrix:
 
 ```
+E₁, E₂ ∈ ℝ^(n×d): Learnable node embeddings
+A_learned = softmax(ReLU(E₁E₂ᵀ))
 A_adaptive = φA_static + (1-φ)A_learned
 ```
 
 where:
-- **A_static**: Physical connectivity matrix
-- **A_learned**: Learned from data using node embeddings
-- **φ ∈ [0,1]**: Interpolation parameter
+- **A_static**: Physical connectivity matrix (binary)
+- **A_learned**: Learned adjacency matrix from node embeddings
+- **φ ∈ [0,1]**: Interpolation parameter (default 0.5)
+- **d**: Embedding dimension (default 16)
 
-The learned adjacency matrix is:
+The adaptive adjacency matrix allows the model to learn optimal information flow patterns beyond the physical topology.
+
+### Graph Convolution Operation
+
+Each graph convolution layer performs:
 
 ```
-A_learned = softmax(ReLU(E₁E₂ᵀ))
+H^(l+1) = σ(A_adaptive · H^(l) · W^(l))
 ```
 
-where **E₁, E₂ ∈ ℝ^(n×d)** are learnable node embeddings.
+where:
+- **H^(l)** ∈ ℝ^(n×h): Hidden representation at layer l
+- **W^(l)** ∈ ℝ^(h×h): Learnable weight matrix
+- **A_adaptive**: Normalized adaptive adjacency matrix
 
-## Model Architecture
+The normalization ensures numerical stability:
 
-### 1. Adaptive Physics-Informed Graph Convolutional Network (AdaptivePIGCN)
+```
+A_normalized = D^(-1/2) · A_adaptive · D^(-1/2)
+```
+
+where **D** is the degree matrix.
+
+## Model Architectures
+
+### 1. Graph Convolutional Network (GCN)
+
+The baseline GCN model performs spatial convolution without physics constraints:
 
 ```python
-class AdaptivePIGCN(nn.Module):
-    def __init__(self, feature_dim, hidden_dim, num_gc_layers, num_buses, 
-                 embedding_dim=16, phi=0.5):
-        # Graph convolution layers
-        self.gc_layers = nn.ModuleList([
-            StateGraphLayer(feature_dim, hidden_dim),
-            *[StateGraphLayer(hidden_dim, hidden_dim) for _ in range(num_gc_layers-1)]
-        ])
+class GCN(BaseModel):
+    def forward(self, x, adj):
+        # Input: x [batch, buses, 10], adj [buses, buses]
+        h = x
+        for gc_layer in self.gc_layers:
+            h = gc_layer(h, adj)  # Graph convolution
+        output = self.output_layer(h)  # [batch, buses, 2]
+        return output
+```
+
+**Architecture**:
+- Multiple graph convolution layers (configurable, typically 1-6)
+- Each layer: Linear transformation + graph aggregation + ReLU activation
+- Output layer: Projects to 2 features per bus
+
+**Parameters**: ~12K parameters for 33-bus system
+
+### 2. Adaptive Graph Convolutional Network (adaptiveGCN)
+
+Extends GCN with learnable adjacency matrix:
+
+```python
+class adaptiveGCN(nn.Module):
+    def forward(self, x, static_adj):
+        # Compute adaptive adjacency
+        A_learned = softmax(ReLU(self.node_embedding1 @ self.node_embedding2.T))
+        A_adaptive = self.phi * static_adj + (1 - self.phi) * A_learned
         
-        # Adaptive graph learning
-        self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        self.node_embedding2 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        self.phi = phi
+        # Graph convolution with adaptive adjacency
+        h = x
+        for gc_layer in self.gc_layers:
+            h = gc_layer(h, A_adaptive)
+        output = self.output_layer(h)
+        return output
+```
+
+**Architecture**:
+- Same as GCN but with adaptive adjacency matrix
+- Additional parameters: node embeddings (n × d × 2)
+
+**Parameters**: ~16K parameters for 33-bus system
+
+### 3. Adaptive Physics-Informed Graph Convolutional Network (AdaptivePIGCN)
+
+Combines adaptive graph learning with physics-informed loss:
+
+```python
+class AdaptivePIGCN(BaseModel):
+    def forward(self, x, adj):
+        # Adaptive adjacency computation
+        A_learned = softmax(ReLU(self.node_embedding1 @ self.node_embedding2.T))
+        A_adaptive = self.phi * adj + (1 - self.phi) * A_learned
+        
+        # State graph convolution layers
+        h = x
+        for state_layer in self.state_layers:
+            h = state_layer(h, A_adaptive)
         
         # Output projection
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim * num_buses, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_buses * 6)
-        )
+        output = self.output_layer(h)  # [batch, buses, 2]
+        return output
 ```
 
-### 2. Physics-Informed Graph Convolutional LSTM (PIGCLSTM)
+**Architecture**:
+- StateGraphLayer: Specialized graph convolution for power system state variables
+- Adaptive adjacency learning
+- Physics-informed loss function (not in forward pass, but in loss computation)
+
+**Parameters**: ~28K parameters for 33-bus system
+
+### 4. Physics-Informed Graph Convolutional LSTM (PIGCLSTM)
+
+Extends AdaptivePIGCN with temporal modeling using LSTM:
 
 ```python
-class PIGCLSTM(nn.Module):
-    def __init__(self, feature_dim, hidden_dim, num_gc_layers, num_buses, 
-                 rnn_layers, dropout=0.3):
-        # GCN layers for spatial modeling
-        self.gc_layers = nn.ModuleList([...])
+class PIGCLSTM(BaseModel):
+    def forward(self, x, adj):
+        # x: [batch, seq_len, buses, 10]
+        batch_size, seq_len, num_buses, num_features = x.shape
         
-        # LSTM for temporal modeling
-        lstm_input_size = hidden_dim * num_buses
-        self.lstm = nn.LSTM(lstm_input_size, lstm_hidden_size, rnn_layers)
+        # Adaptive adjacency
+        A_learned = softmax(ReLU(self.node_embedding1 @ self.node_embedding2.T))
+        A_adaptive = self.phi * adj + (1 - self.phi) * A_learned
         
-        # Output transformation
-        self.output_transform = nn.Linear(hidden_dim, feature_dim)
+        # Process each timestep
+        lstm_inputs = []
+        for t in range(seq_len):
+            h = x[:, t, :, :]  # [batch, buses, 10]
+            # Graph convolution at each timestep
+            for gc_layer in self.gc_layers:
+                h = gc_layer(h, A_adaptive)
+            # Flatten for LSTM
+            h_flat = h.view(batch_size, -1)  # [batch, buses*hidden_dim]
+            lstm_inputs.append(h_flat)
+        
+        # LSTM processing
+        lstm_input = torch.stack(lstm_inputs, dim=1)  # [batch, seq_len, buses*hidden_dim]
+        lstm_out, (h_n, c_n) = self.lstm(lstm_input)
+        
+        # Use last timestep output
+        final_hidden = lstm_out[:, -1, :]  # [batch, buses*hidden_dim]
+        final_hidden = final_hidden.view(batch_size, num_buses, self.hidden_dim)
+        
+        # Output projection
+        output = self.output_transform(final_hidden)  # [batch, buses, 2]
+        return output
 ```
 
-### 3. Memory-Efficient Implementation
+**Architecture**:
+- Graph convolution at each timestep
+- LSTM for temporal sequence modeling
+- Memory-efficient sizing for large systems (adaptive LSTM hidden size)
 
-For large systems (≥57 buses), we implement memory-efficient variants:
+**Parameters**: ~46K parameters for 33-bus system
 
+**Memory Efficiency**: For systems ≥57 buses, LSTM hidden size is automatically reduced:
 ```python
-# Adaptive LSTM sizing to prevent OOM
-if num_buses >= 57:
-    lstm_hidden_size = min(lstm_io_size, max(512, lstm_io_size // 4))
-else:
-    lstm_hidden_size = lstm_io_size
+lstm_hidden_size = min(flattened_size, max(512, flattened_size // 4))
 ```
 
-## Experimental Setup
+### 5. Physics-Informed Graph Convolutional GRU (PIGCGRU)
 
-### Dataset Generation
+Similar to PIGCLSTM but uses GRU for reduced memory and faster training:
 
-We generate comprehensive datasets using PandaPower simulations:
-
-#### IEEE Test Systems
-- **IEEE 33-bus**: Distribution network (residential/commercial)
-- **IEEE 57-bus**: Sub-transmission system (regional coverage)  
-- **IEEE 118-bus**: High-voltage transmission system (interconnected grid)
-
-#### Renewable Energy Scenarios
 ```python
-renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]  # 0% to 100% renewable
+class PIGCGRU(BaseModel):
+    def forward(self, x, adj):
+        # Similar structure to PIGCLSTM but with GRU instead of LSTM
+        # GRU has fewer parameters (no cell state)
+        ...
 ```
 
-#### Data Augmentation
-- **Load variations**: ±20% stochastic fluctuations
-- **N-1 contingencies**: Line outages (5% probability)
-- **Measurement noise**: Realistic sensor error models
-- **Weather patterns**: Solar (daylight), Wind (continuous)
+**Architecture**:
+- Same as PIGCLSTM but with GRU cells
+- Reduced memory footprint compared to LSTM
 
-### Evaluation Metrics
+**Parameters**: ~39K parameters for 33-bus system
 
-#### Accuracy Metrics
-- **Root Mean Square Error (RMSE)**: `√(1/n ∑ᵢ(x̂ᵢ - xᵢ)²)`
-- **Mean Absolute Error (MAE)**: `1/n ∑ᵢ|x̂ᵢ - xᵢ|`
-- **Mean Absolute Percentage Error (MAPE)**: `100/n ∑ᵢ|x̂ᵢ - xᵢ|/xᵢ`
+### 6. Resnet Physics-Informed Graph Convolutional LSTM (ResnetPIGCLSTM)
 
-#### Physics Compliance Metrics
-- **Power Balance Violation**: `||P_pred - P_actual||₂`
-- **Voltage Constraint Violation**: `max(0, V_pred - V_max) + max(0, V_min - V_pred)`
-- **Carbon Emission Accuracy**: `|C_pred - C_actual|/C_actual`
-
-#### Computational Metrics
-- **Training Time**: Wall-clock time for convergence
-- **Memory Usage**: Peak GPU memory consumption
-- **Inference Speed**: Time per prediction
-
-### Hyperparameter Optimization
-
-We use the Multi-objective Seagull Optimization Algorithm (MoSOA) for hyperparameter tuning:
+Adds residual connections to PIGCLSTM for improved gradient flow:
 
 ```python
-def mooa_optimization(objective_function, bounds, num_seagulls, max_iterations):
+class ResnetPIGCLSTM(BaseModel):
+    def forward(self, x, adj):
+        # Residual connections in graph convolution layers
+        h = x
+        for gc_layer in self.gc_layers:
+            h_new = gc_layer(h, A_adaptive)
+            h = h + h_new  # Residual connection
+        
+        # LSTM processing (same as PIGCLSTM)
+        ...
+```
+
+**Architecture**:
+- Residual connections in graph convolution layers
+- Improved training stability for deep networks
+
+**Parameters**: ~52K parameters for 33-bus system
+
+### 7. Resnet Physics-Informed Graph Convolutional GRU (ResnetPIGCGRU)
+
+Similar to ResnetPIGCLSTM but with GRU:
+
+```python
+class ResnetPIGCGRU(BaseModel):
+    # Same as ResnetPIGCLSTM but with GRU
+    ...
+```
+
+**Architecture**:
+- Residual connections + GRU for efficiency
+
+**Parameters**: ~45K parameters for 33-bus system
+
+## Data Generation and Processing
+
+### Time-Series Data Generation
+
+The data generation process (`data/gen_meas_best.py`) creates realistic power system scenarios using PandaPower simulations:
+
+#### 1. Network Loading
+
+For each test case (IEEE 33, 57, or 118 buses):
+- Load baseline network topology from PandaPower
+- Identify bus types (PQ, PV, Slack) from network configuration
+- Extract physical adjacency matrix and admittance matrix
+
+#### 2. Daily Load Profile Generation
+
+Load profiles follow realistic daily patterns:
+
+```python
+def get_daily_load_profile(hour: int, season: str = 'summer') -> float:
     """
-    Multi-objective optimization with iteration tracking
+    Returns load multiplier (0.0-1.0) based on hour of day.
+    Typical pattern: Low at night (0.3-0.4), peak during day (0.9-1.0)
     """
-    for iteration in range(max_iterations):
-        # Seagull behavior simulation
-        # Position updates based on fitness
-        # Archive maintenance for Pareto front
-    return best_params, convergence_history
+    hourly_pattern = {
+        0: 0.40,   # Midnight
+        1: 0.35,   # 1 AM - lowest
+        ...
+        12: 0.97,  # Noon - peak
+        ...
+        23: 0.50   # Evening
+    }
+    return hourly_pattern[hour] * random_variation(0.95, 1.05)
 ```
 
-## Results and Analysis
+#### 3. Renewable Generation Profiles
 
-### Performance Comparison
+**Solar Generation**:
+```python
+def get_solar_generation_profile(hour: int, weather_state: str) -> float:
+    """
+    Solar generation: 0 at night, peaks at noon, weather-dependent.
+    """
+    if 6 <= hour <= 18:  # Daylight hours
+        solar_factor = sin((hour - 6) * π / 12)  # Sinusoidal pattern
+        weather_multiplier = weather_state_to_multiplier(weather_state)
+        return solar_factor * weather_multiplier
+    return 0.0  # Night
+```
 
-| Model | Type | 33-bus RMSE | 57-bus RMSE | 118-bus RMSE | Physics Valid | Training Time (s) |
-|-------|------|-------------|-------------|--------------|---------------|-------------------|
-| **GCN** | Baseline | 0.758 ± 0.023 | 1.234 ± 0.045 | 4.567 ± 0.123 | ❌ | 45.2 |
-| **adaptiveGCN** | Graph Learning | 0.823 ± 0.031 | 1.156 ± 0.038 | 3.891 ± 0.089 | ❌ | 52.7 |
-| **AdaptivePIGCN** | Physics-Informed | **0.245 ± 0.012** | **0.456 ± 0.019** | **1.234 ± 0.034** | ✅ | 78.3 |
-| **PIGCLSTM** | Temporal + Physics | **0.178 ± 0.008** | **0.345 ± 0.014** | **0.987 ± 0.028** | ✅ | 124.6 |
-| **PIGCGRU** | Efficient Temporal | **0.156 ± 0.007** | **0.298 ± 0.011** | **0.876 ± 0.025** | ✅ | 98.4 |
+**Wind Generation**:
+```python
+def get_wind_generation_profile(hour: int, weather_state: str) -> float:
+    """
+    Wind generation: Continuous, weather-dependent, more variable than solar.
+    """
+    base_wind = 0.3 + 0.4 * random.uniform(0, 1)  # Base level
+    weather_multiplier = weather_state_to_multiplier(weather_state)
+    return base_wind * weather_multiplier
+```
 
-*Results shown as mean ± standard deviation over 10 independent runs*
+#### 4. Renewable Penetration Levels
 
-### Statistical Significance
+Data is generated for six renewable energy fractions:
+- 0.0 (0%): No renewable generation
+- 0.2 (20%): Low renewable penetration
+- 0.4 (40%): Moderate renewable penetration
+- 0.6 (60%): High renewable penetration
+- 0.8 (80%): Very high renewable penetration
+- 1.0 (100%): Maximum renewable penetration
 
-We perform paired t-tests to verify significance:
+#### 5. Power Flow Solution
+
+For each timestep:
+1. Set loads and generation based on profiles
+2. Run AC power flow using PandaPower (`pp.runpp()`)
+3. Extract solution: voltages, angles, power flows
+4. Identify bus types and extract unknowns:
+   - PQ buses: Extract V, θ from solution
+   - PV buses: Extract Q, θ from solution
+   - Slack buses: Extract P, Q from solution
+
+#### 6. Measurement Generation
+
+Create measurement matrix with realistic noise:
+- **Voltage measurements**: Add Gaussian noise (std = 0.005 p.u.)
+- **Power measurements**: Add Gaussian noise (std = 0.01 p.u.)
+- **Angle measurements**: Add Gaussian noise (std = 0.02 rad)
+- **Sparse PMU coverage**: Only subset of buses have voltage measurements (simulating realistic PMU deployment)
+
+#### 7. Feature Matrix Construction
+
+For each sample, construct 10-dimensional feature vector per bus:
+
+```
+features[b, :] = [
+    vm_pu[b],      # Voltage magnitude (p.u., if measured)
+    va_rad[b],     # Voltage angle (rad, if measured)
+    p_load[b],     # Active load (MW)
+    q_load[b],     # Reactive load (MVAr)
+    p_ext[b],      # External grid active power (MW)
+    q_ext[b],      # External grid reactive power (MVAr)
+    p_conv[b],     # Conventional generation active (MW)
+    q_conv[b],     # Conventional generation reactive (MVAr)
+    p_ren[b],      # Renewable generation active (MW)
+    q_ren[b]       # Renewable generation reactive (MVAr)
+]
+```
+
+#### 8. Target Matrix Construction
+
+For each sample, construct 2-dimensional target vector per bus (unknowns depend on bus type):
 
 ```python
-# PIGCGRU vs AdaptivePIGCN (33-bus)
-t_statistic = 4.23, p_value = 0.0012 < 0.05  # Significant improvement
-
-# PIGCLSTM vs adaptiveGCN (57-bus)  
-t_statistic = 6.78, p_value = 0.0003 < 0.05  # Highly significant
+def create_opf_targets(net, bus_types):
+    """
+    Extract unknown variables based on bus type.
+    """
+    targets = np.zeros((num_buses, 2))
+    for bus_idx in range(num_buses):
+        if bus_types[bus_idx] == 0:  # PQ bus
+            targets[bus_idx, 0] = net.res_bus.vm_pu[bus_idx]  # V
+            targets[bus_idx, 1] = net.res_bus.va_degree[bus_idx] * π/180  # θ
+        elif bus_types[bus_idx] == 1:  # PV bus
+            targets[bus_idx, 0] = net.res_bus.q_mvar[bus_idx] / net.sn_mva  # Q (p.u.)
+            targets[bus_idx, 1] = net.res_bus.va_degree[bus_idx] * π/180  # θ
+        else:  # Slack bus
+            targets[bus_idx, 0] = net.res_ext_grid.p_mw[slack_idx] / net.sn_mva  # P (p.u.)
+            targets[bus_idx, 1] = net.res_ext_grid.q_mvar[slack_idx] / net.sn_mva  # Q (p.u.)
+    return targets
 ```
 
-### Physics Compliance Analysis
+**Critical**: All power values are converted to per-unit (divided by `net.sn_mva`) to ensure consistent units across different system sizes.
 
-#### Power Balance Violations
-- **AdaptivePIGCN**: 0.0012 ± 0.0003 (excellent)
-- **PIGCLSTM**: 0.0008 ± 0.0002 (excellent)
-- **adaptiveGCN**: 0.4523 ± 0.0234 (poor)
+#### 9. Data Storage
 
-#### Voltage Constraint Violations
-- **Physics-informed models**: < 0.001 (within limits)
-- **Non-physics models**: 0.1234 ± 0.0456 (significant violations)
+Generated data is saved as NumPy arrays:
+- `features.npy`: [n_samples, n_buses, 10] - Measurement features
+- `targets.npy`: [n_samples, n_buses, 2] - Unknown variables (OPF targets)
+- `adjacency.npy`: [n_buses, n_buses] - Physical connectivity matrix
+- `ybus_matrices.npy`: [n_samples, n_buses, n_buses] - Complex admittance matrices (per sample, as they may vary with topology)
+- `bus_types.npy`: [n_buses] - Bus type codes (0=PQ, 1=PV, 2=Slack)
+- `renewable_fractions.npy`: [n_samples] - Renewable energy fraction for each sample
+- `energy_coeffs.npy`: [n_samples] - Energy utilization coefficients
+- `carbon_coeffs.npy`: [n_samples] - Carbon intensity coefficients
 
-### Renewable Integration Impact
+### Data Normalization
 
-#### Carbon Emission Reduction
-- **33-bus**: 15% reduction at 100% renewable penetration
-- **57-bus**: 45% reduction at 100% renewable penetration  
-- **118-bus**: 22% reduction at 100% renewable penetration
+All features and targets are normalized using z-score normalization:
 
-#### Voltage Stability
-- **Small systems (33-bus)**: Stable across all renewable levels
-- **Medium systems (57-bus)**: Slight degradation at high penetration
-- **Large systems (118-bus)**: Requires careful renewable placement
+```python
+class PowerSystemNormalizer:
+    def normalize(self, data):
+        """
+        Normalize data: (x - mean) / std
+        """
+        return (data - self.mean) / self.std
+    
+    def denormalize(self, data):
+        """
+        Denormalize data: x * std + mean
+        """
+        return data * self.std + self.mean
+```
+
+**Separate normalization for features and targets**:
+- Features (10-dim): Normalized using feature statistics
+- Targets (2-dim): Normalized using target statistics
+
+This ensures proper scaling despite different units (MW/MVAr for power, p.u. for voltage, radians for angle).
+
+### Data Splitting
+
+Data is split using **stratified splitting** to ensure proportional representation of renewable fractions:
+
+```python
+def stratified_split(features, targets, renewable_fractions, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2):
+    """
+    Split data ensuring each set has proportional renewable fraction distribution.
+    """
+    unique_fracs = np.unique(renewable_fractions)
+    train_indices, val_indices, test_indices = [], [], []
+    
+    for frac in unique_fracs:
+        frac_mask = (renewable_fractions == frac)
+        frac_indices = np.where(frac_mask)[0]
+        np.random.shuffle(frac_indices)
+        
+        n_train = int(len(frac_indices) * train_ratio)
+        n_val = int(len(frac_indices) * val_ratio)
+        
+        train_indices.extend(frac_indices[:n_train])
+        val_indices.extend(frac_indices[n_train:n_train+n_val])
+        test_indices.extend(frac_indices[n_train+n_val:])
+    
+    return train_indices, val_indices, test_indices
+```
+
+**Default split**: 60% train, 20% validation, 20% test
+
+### Sequential Data Preparation
+
+For sequential models (LSTM/GRU), data is organized into sequences:
+
+```python
+def create_sequences(features, targets, sequence_length=5):
+    """
+    Create sequences of past N hours to predict current hour.
+    """
+    sequences = []
+    for i in range(sequence_length, len(features)):
+        seq_features = features[i-sequence_length:i]  # [seq_len, buses, 10]
+        seq_target = targets[i]  # [buses, 2]
+        sequences.append((seq_features, seq_target))
+    return sequences
+```
+
+**Default sequence length**: 5 hours (past 5 hours → current hour)
+
+## Training Pipeline
+
+### Automated Training Workflow
+
+The training pipeline (`train.py`) automates the entire process:
+
+1. **Configuration Loading**: Load hyperparameters from `config.py`
+2. **Data Validation**: Check if data exists, generate if missing
+3. **Model Training**: Train each model on each bus system
+4. **Hyperparameter Optimization**: Run MoSOA or trial-based search
+5. **Evaluation**: Compute metrics on test set
+6. **Visualization**: Generate plots and analysis
+7. **Results Saving**: Save all outputs to timestamped directories
+
+### Configuration System
+
+The `config.py` file provides centralized configuration:
+
+```python
+class Args:
+    # Model selection
+    test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
+    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated
+    
+    # Data configuration
+    data_mode = 'train'  # 'train' or 'test'
+    hours_per_day = 24
+    sequence_length = 5
+    
+    # Model capacity
+    CAPACITY_33_BUS = 'normal'   # 'normal', 'medium', 'large'
+    CAPACITY_57_BUS = 'normal'
+    CAPACITY_118_BUS = 'medium'
+    
+    # Hyperparameter optimization
+    use_mosoa = True  # Use MoSOA algorithm
+    num_trials = 20  # If use_mosoa=False
+```
+
+### Training Loop
+
+For each model and bus system:
+
+```python
+# 1. Load data
+features, adjacency, ybus_matrices, targets, bus_types, ... = load_power_system_data(config, case_name)
+
+# 2. Create data loaders
+train_loader, val_loader, test_loader = create_data_loaders(features, targets, ...)
+
+# 3. Hyperparameter optimization
+best_params = optimize_hyperparameters(model_name, config, ...)
+
+# 4. Create model with best parameters
+model = create_model(model_name, best_params, ...)
+
+# 5. Train model
+trainer = ModelTrainer(model, config, ...)
+trainer.train(train_loader, val_loader)
+
+# 6. Evaluate
+metrics, uncertainty_data = evaluate_model_with_uncertainty(model, test_loader, ...)
+
+# 7. Visualize
+generate_plots(metrics, uncertainty_data, ...)
+```
+
+### Early Stopping
+
+Training uses early stopping based on validation loss:
+
+```python
+class EarlyStopping:
+    def __call__(self, val_loss):
+        if val_loss < self.best_loss:
+            self.best_loss = val_loss
+            self.counter = 0
+            return False  # Continue training
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True  # Stop training
+            return False
+```
+
+**Default patience**: 20 epochs (configurable)
+
+### Learning Rate Scheduling
+
+Uses `ReduceLROnPlateau` scheduler:
+
+```python
+scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.5,  # Reduce LR by half
+    patience=5,  # Wait 5 epochs
+    min_lr=1e-6
+)
+```
+
+LR is reduced when validation loss plateaus, improving convergence.
+
+## Hyperparameter Optimization
+
+### Multi-objective Seagull Optimization Algorithm (MoSOA)
+
+The MoSOA algorithm is a bio-inspired optimization method based on seagull behavior:
+
+#### Algorithm Steps
+
+1. **Initialization**:
+   ```python
+   positions = random_uniform(lower_bound, upper_bound, (num_agents, dim))
+   best_position = (lower_bound + upper_bound) / 2
+   best_score = inf
+   ```
+
+2. **Fitness Evaluation**:
+   ```python
+   for each agent i:
+       fitness[i] = objective_function(positions[i])
+       if fitness[i] < best_score:
+           best_score = fitness[i]
+           best_position = positions[i]
+   ```
+
+3. **Adaptive Parameter Calculation**:
+   ```python
+   f_max, f_min, f_avg = max(fitness), min(fitness), mean(fitness)
+   sigma = std(fitness)
+   M = (f_max - f_avg) / (f_avg - f_min)  # Avoid division by zero
+   fc_ada = fc_min + M * (fc_max - fc_min) + sigma * random_normal()
+   A = fc_ada * (1 - sin(π/2 * (iteration / max_iterations)))
+   v = v_max * (1 - iteration / max_iterations)
+   w = (w_max - w_min) * (1 - cos(π/2 * (iteration / max_iterations))) + w_min
+   beta = beta_max * exp(-lambda_val * (iteration / max_iterations))
+   ```
+
+4. **Position Update** (Spiral Attack Behavior):
+   ```python
+   for each agent i:
+       B = 2 * A² * random_uniform(0, 1)
+       Ms = B * (best_position - positions[i])
+       Ds = |Ms|
+       k = random_uniform(0, 2π)
+       r = u * exp(k * v)
+       spiral_attack = Ds * r * cos(2π * k)
+       
+       rand_agent_idx = random_int(0, num_agents)
+       perturbation = beta * (positions[rand_agent_idx] - positions[i])
+       
+       positions[i] = spiral_attack + w * best_position + perturbation
+       positions[i] = clip(positions[i], lower_bound, upper_bound)
+   ```
+
+#### Hyperparameters Tuned
+
+MoSOA optimizes model-specific hyperparameters:
+
+**Core Hyperparameters** (all models):
+- `HIDDEN_DIM`: Hidden dimension of graph convolution layers (range depends on bus system and capacity preset)
+- `NUM_GC_LAYERS`: Number of graph convolution layers (range depends on bus system and capacity preset)
+
+**Sequential Models** (LSTM/GRU):
+- `SEQUENCE_LENGTH`: Past hours to consider (typically 3-10)
+- `RNN_LAYERS`: Number of LSTM/GRU layers (typically 1-3)
+
+**Adaptive Graph Models**:
+- `EMBEDDING_DIM`: Dimension of node embeddings (typically 8-128)
+- `PHI`: Interpolation parameter for adaptive adjacency (typically 0.3-0.7)
+
+**Capacity Presets**:
+- **normal**: Conservative ranges (smaller models, faster training)
+- **medium**: Balanced ranges (moderate models)
+- **large**: Maximum ranges (largest models, best performance)
+
+Example ranges for 118-bus system:
+- normal: HIDDEN_DIM ∈ [64, 128], NUM_GC_LAYERS ∈ [2, 8]
+- medium: HIDDEN_DIM ∈ [96, 160], NUM_GC_LAYERS ∈ [4, 9]
+- large: HIDDEN_DIM ∈ [128, 256], NUM_GC_LAYERS ∈ [6, 12]
+
+### Trial-Based Search (Alternative)
+
+If `use_mosoa=False`, a simpler trial-based search is used:
+
+```python
+def trial_based_search(objective_function, bounds, num_trials=20):
+    best_score = inf
+    best_params = None
+    for trial in range(num_trials):
+        params = random_uniform(bounds[0], bounds[1])
+        score = objective_function(params)
+        if score < best_score:
+            best_score = score
+            best_params = params
+    return best_params
+```
+
+This is faster but less thorough than MoSOA.
+
+## Evaluation Metrics
+
+### Prediction Accuracy Metrics
+
+**Mean Squared Error (MSE)**:
+```
+MSE = (1/n) ∑ᵢ ||y_pred,i - y_true,i||²
+```
+
+**Root Mean Squared Error (RMSE)**:
+```
+RMSE = √MSE
+```
+
+**Mean Absolute Error (MAE)**:
+```
+MAE = (1/n) ∑ᵢ |y_pred,i - y_true,i|
+```
+
+**Bus-Type-Specific Metrics** (OPF mode):
+- `MSE_PQ`: MSE for PQ buses (voltage magnitude and angle)
+- `MSE_PV`: MSE for PV buses (reactive power and angle)
+- `MSE_Slack`: MSE for Slack buses (active and reactive power)
+
+### Physics Compliance Metrics
+
+**Power Balance Violation**:
+```
+P_violation = ||P_measured - P_calculated(V_pred, θ_pred)||₂
+Q_violation = ||Q_measured - Q_calculated(V_pred, θ_pred)||₂
+Power_violation = P_violation + Q_violation
+```
+
+**Voltage Limit Violation**:
+```
+V_violation = (1/n) ∑ᵢ [max(0, V_pred,i - V_max) + max(0, V_min - V_pred,i)]
+```
+
+### Multi-Objective Optimal Power Flow (MOOPF) Metrics
+
+**Normalized Power Flow**:
+```
+Power_flow = (1/S_base) ||P_calculated||₁
+```
+
+**Normalized Power Loss**:
+```
+Power_loss = (1/S_base) ||P_loss||₁
+```
+
+**Carbon Emissions**:
+```
+Carbon = (1/S_base) ∑ᵢ αᵢ P_gen,i
+```
+where **αᵢ** is the carbon intensity coefficient for generator i.
+
+**Voltage Deviation**:
+```
+Voltage_deviation = (1/n) ∑ᵢ |V_pred,i - V_nominal|
+```
+
+**MOOPF Score** (weighted combination):
+```
+MOOPF_score = w₁·Power_flow + w₂·Power_loss + w₃·Carbon + w₄·Voltage_deviation
+```
+
+### Uncertainty Quantification
+
+**Spatial Uncertainty**:
+```
+σ_spatial[b] = std(error[b, :]) across time
+```
+Measures prediction error variability at each bus location.
+
+**Temporal Uncertainty**:
+```
+σ_temporal[t] = mean(error[:, t]) across buses
+```
+Measures system-wide prediction error at each timestep.
 
 ## Installation and Usage
 
 ### Prerequisites
 
-```bash
-# Python 3.8+ required
-python --version
-
-# CUDA 11.0+ for GPU acceleration (optional)
-nvidia-smi
-```
+- Python 3.8 or higher
+- CUDA 11.0+ (optional, for GPU acceleration)
+- 8GB+ RAM (16GB+ recommended for 118-bus system)
+- 10GB+ disk space for generated data
 
 ### Installation
 
 ```bash
 # Clone repository
-git clone https://github.com/bengentle10/Physics-Informed-Graph-Neural-Networks-for-Dynamic-State-Estimation-in-Power-Systems.git
-cd Physics-Informed-Graph-Neural-Networks-for-Dynamic-State-Estimation-in-Power-Systems
+git clone <repository-url>
+cd Physics_Informed_Machine_Learning
 
 # Create virtual environment
-python3 -m venv venv
+python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-# For LOCAL DEVELOPMENT (CPU-only, faster installation):
+# For CPU-only (local development):
 pip install -r requirements-cpu.txt
 
-# OR for GPU TRAINING (e.g., on Vast.ai with CUDA):
+# For GPU training:
 pip install -r requirements-gpu.txt
 ```
-
-> **Note:** `requirements-cpu.txt` installs PyTorch CPU version (~500MB) for local development.  
-> `requirements-gpu.txt` installs CUDA-enabled PyTorch (~3-4GB) for GPU training on cloud platforms.
 
 ### Quick Start
 
 ```bash
-# Run the training (all models on all bus systems)
+# Run training with default configuration
 python train.py
 ```
 
-**To customize training, edit the Args class in train.py:**
+This will:
+1. Check for data files, generate if missing
+2. Train all models on all bus systems (33, 57, 118)
+3. Optimize hyperparameters using MoSOA
+4. Evaluate on test set
+5. Generate visualizations
+6. Save results to `experimental_results/run_YYYYMMDD_HHMMSS/`
+
+### Configuration Options
+
+Edit `config.py` to customize training:
 
 ```python
 class Args:
-    # Model and system configuration
-    test_config = 'quick'        # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = '33'           # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-    seed = 42
+    # Model selection
+    test_config = 'comprehensive'  # Test key models
+    bus_systems = '33,57'  # Train only 33 and 57 bus systems
     
-    # === PARALLEL DATA LOADING CONFIGURATION ===
-    # Device configuration
-    force_cpu = False            # Set to True to force CPU training even if GPU is available
+    # Data mode
+    data_mode = 'train'  # Use training data
+    test_timesteps = 1080  # 45 days of test data
     
-    # Parallel data loading
-    parallel_data_loading = True   # Use multiple workers for data loading (recommended)
+    # Model capacity
+    CAPACITY_118_BUS = 'large'  # Use large capacity for 118-bus
     
-    # Worker configuration (auto-configured based on device if set to 'auto')
-    data_workers = 'auto'         # Number of data loading workers
+    # Hyperparameter optimization
+    use_mosoa = True  # Use MoSOA (recommended)
+    num_trials = 50  # If use_mosoa=False
+    
+    # Data profile story
+    generate_data_profile_story = True  # Generate data analysis plots
 ```
 
-**Test Configuration Options:**
-- `'quick'`: Fast testing with AdaptivePIGCN (1 model)
-- `'core'`: Compare best non-physics vs physics models (2 models)
-- `'comprehensive'`: Full comparison of key models (5 models)
-- `'physics_only'`: All physics-informed models (5 models)
-- `'non_physics_only'`: All non-physics models (2 models)
-- `'sequential_only'`: All LSTM/GRU sequential models (4 models) ⭐ **NEW**
-- `'all'`: Every available model (7 models)
+**Test Configuration Options**:
+- `'quick'`: Fast testing with AdaptivePIGCN only
+- `'core'`: Compare best non-physics vs physics models
+- `'comprehensive'`: Full comparison of key models
+- `'physics_only'`: All physics-informed models
+- `'non_physics_only'`: All non-physics models
+- `'sequential_only'`: All LSTM/GRU sequential models
+- `'all'`: Every available model
 
 ### Advanced Usage
 
-**Training specific bus systems:**
+**Training specific models**:
 ```python
-# In train.py, modify the Args class:
 class Args:
-    test_config = 'comprehensive'  # Test all models
-    bus_systems = '33,57'         # Train only 33 and 57 bus systems
-    seed = 42
-    
-    # Enable parallel data loading for faster training
-    parallel_data_loading = True
-    data_workers = 'auto'         # Auto-configure based on hardware
+    test_config = 'all'
+    bus_systems = '118'
+    models_to_train = 'PIGCLSTM,PIGCGRU'  # Train only these models
 ```
 
-**Training specific model types:**
+**Force CPU training**:
 ```python
-# In train.py, modify the Args class:
-
-# Physics-informed models only
 class Args:
-    test_config = 'physics_only'   # Only physics-informed models
-    bus_systems = '118'            # Only 118-bus system
-    seed = 42
-    
-    # Enable parallel data loading for large systems
-    parallel_data_loading = True
-    data_workers = 'auto'
-
-# Sequential models only (LSTM/GRU) - benefit most from parallel data loading
-class Args:
-    test_config = 'sequential_only'  # Only LSTM/GRU-based models
-    bus_systems = 'all'              # All bus systems
-    seed = 42
-    
-    # Sequential models benefit from parallel data loading
-    parallel_data_loading = True
-    data_workers = 8              # Increase for high-memory systems
+    force_cpu = True  # Use CPU even if GPU available
 ```
 
-**Quick testing:**
+**Parallel data loading**:
 ```python
-# In train.py, modify the Args class:
 class Args:
-    test_config = 'quick'         # Fast testing with one model
-    bus_systems = '33'           # Only 33-bus system
-    seed = 42
-    
-    # Enable parallel data loading for better performance
     parallel_data_loading = True
-    data_workers = 'auto'
+    data_workers = 'auto'  # Auto-configure based on hardware
 ```
 
-**CPU vs GPU Training:**
-```python
-# For CPU training (local development)
-class Args:
-    test_config = 'quick'
-    bus_systems = '33'
-    force_cpu = True              # Force CPU even if GPU available
-    parallel_data_loading = True
-    data_workers = 4              # Conservative for CPU
-
-# For GPU training (Vast.ai, cloud platforms)
-class Args:
-    test_config = 'sequential_only'
-    bus_systems = 'all'
-    force_cpu = False             # Use GPU if available
-    parallel_data_loading = True
-    data_workers = 'auto'         # Auto-configure based on GPU memory
-```
+## Code Structure
 
 ```
 Physics_Informed_Machine_Learning/
-├── data/                           # Data generation and validation
-│   ├── gen_meas_best.py           # Intelligent data generation
-│   ├── check_data.py              # Data integrity validation
-│   └── case{33,57,118}_*.npy      # IEEE test system datasets
-├── models/                         # Neural network architectures
-│   ├── base_model.py              # Abstract base class
-│   ├── adaptive_pigcn.py          # Adaptive Physics-Informed GCN
-│   ├── pigclstm.py                # Physics-Informed GCN + LSTM
-│   ├── pigcgru.py                 # Physics-Informed GCN + GRU
-│   └── layers.py                  # Custom layer implementations
-├── trainers/                       # Training logic
-│   ├── base_trainer.py            # Abstract training interface
-│   └── model_trainer.py           # Physics-informed training
-├── utils/                          # Utility functions
-│   ├── data_loader.py             # Data loading and preprocessing
-│   ├── metrics.py                 # Physics-informed loss functions
-│   ├── optimization.py            # MoSOA hyperparameter optimization
-│   ├── evaluation.py              # Model evaluation and metrics
-│   └── visualization.py           # Results visualization
-├── experimental_results/           # Results and analysis
-│   ├── run_YYYYMMDD_HHMMSS/       # Timestamped experiment runs
-│   ├── comprehensive_summary.csv  # Cross-model performance comparison
-│   └── experiment_log.csv         # Master experiment log
-├── config.py                      # Centralized configuration
-├── train.py                       # Main training script
-├── requirements-cpu.txt           # Python dependencies (CPU-only, local dev)
-├── requirements-gpu.txt           # Python dependencies (GPU-enabled, cloud training)
-└── README.md                      # This documentation
+├── data/
+│   ├── gen_meas_best.py          # Time-series data generation
+│   └── time_series/
+│       ├── train/                # Training data (generated)
+│       └── test/                 # Test data (generated)
+│
+├── models/
+│   ├── base_model.py             # Abstract base class for all models
+│   ├── gcn.py                    # Baseline GCN
+│   ├── adaptive_gcn.py           # GCN with adaptive graph
+│   ├── adaptive_pigcn.py         # Physics-informed adaptive GCN
+│   ├── pigclstm.py               # Physics-informed GCN + LSTM
+│   ├── pigcgru.py                # Physics-informed GCN + GRU
+│   ├── ResnetPIGCLSTM.py         # PIGCLSTM with residual connections
+│   ├── ResnetPIGCGRU.py          # PIGCGRU with residual connections
+│   └── layers.py                 # Custom graph convolution layers
+│
+├── trainers/
+│   ├── base_trainer.py           # Abstract training interface
+│   └── model_trainer.py          # Physics-informed training implementation
+│
+├── utils/
+│   ├── data_loader.py            # Data loading and normalization
+│   ├── data_validation.py        # Data validation and generation triggers
+│   ├── data_profile_story.py     # Data analysis and visualization
+│   ├── metrics.py                # Physics-informed loss functions
+│   ├── optimization.py           # MoSOA hyperparameter optimization
+│   ├── evaluation.py             # Model evaluation and metrics
+│   ├── visualization.py          # Results visualization
+│   └── uncertainty_analysis.py   # Uncertainty quantification
+│
+├── experimental_results/
+│   └── run_YYYYMMDD_HHMMSS/      # Timestamped experiment results
+│       ├── {bus}bus/
+│       │   ├── data_profile_story.png
+│       │   ├── uncertainty_spatial.png
+│       │   ├── uncertainty_temporal.png
+│       │   └── models/
+│       │       └── {model_name}/
+│       │           ├── train_hist.png
+│       │           ├── train_params.png
+│       │           ├── ri_combined.png
+│       │           └── logs/
+│       │
+│       └── run_metadata.json
+│
+├── config.py                     # Centralized configuration
+├── train.py                      # Main training script
+├── test_all_models.py            # Quick test script for pipeline validation
+├── requirements-cpu.txt          # Dependencies (CPU-only)
+├── requirements-gpu.txt           # Dependencies (GPU-enabled)
+└── README.md                     # This documentation
 ```
 
-## Performance Benchmarks
+## Results and Analysis
 
-### Computational Complexity
+### Training History
 
-| Model | Parameters | FLOPs (33-bus) | FLOPs (118-bus) | Memory (GB) |
-|-------|------------|----------------|-----------------|-------------|
-| **GCN** | 12.3K | 0.8M | 3.2M | 0.5 |
-| **adaptiveGCN** | 15.7K | 1.2M | 4.8M | 0.7 |
-| **AdaptivePIGCN** | 28.4K | 2.1M | 8.4M | 1.2 |
-| **PIGCLSTM** | 45.6K | 3.8M | 15.2M | 2.1 |
-| **PIGCGRU** | 38.9K | 3.2M | 12.8M | 1.8 |
+Training history plots show the evolution of metrics over epochs:
 
-### Scalability Analysis
+**Training History Plot** (`train_hist.png`):
+- Total Loss (train vs validation)
+- Combined MSE (train vs validation)
+- Power Balance Violation (train vs validation)
+- Voltage Limit Violation (train vs validation)
 
-The framework demonstrates excellent scalability:
-- **Linear complexity**: O(n) with respect to number of buses
-- **Memory efficient**: Adaptive sizing prevents OOM errors
-- **Parallel data loading**: Multi-worker data loading for improved I/O performance
-- **Hardware adaptive**: Auto-configures data workers based on CPU/GPU resources
+**Training Parameters Plot** (`train_params.png`):
+- Learnable Uncertainty Parameters (σ_data, σ_power, σ_voltage)
+- Effective Loss Weights (λ_power, λ_voltage)
+- Learning Rate Schedule
+- Generalization Gap (|Train MSE - Val MSE|)
 
-### Real-time Performance
+*[Placeholder: Training history plots will be shown here after training]*
 
-| System Size | Inference Time (ms) | Throughput (samples/s) | Real-time Capable |
-|-------------|-------------------|----------------------|-------------------|
-| **33-bus** | 2.3 | 435 | ✅ Yes |
-| **57-bus** | 4.1 | 244 | ✅ Yes |
-| **118-bus** | 8.7 | 115 | ✅ Yes |
+### Model Comparison
 
-## Limitations and Future Work
+**Performance Comparison Table**:
 
-### Current Limitations
+| Model | Type | 33-bus RMSE | 57-bus RMSE | 118-bus RMSE | Power Violation | Voltage Violation |
+|-------|------|-------------|-------------|--------------|-----------------|-------------------|
+| GCN | Baseline | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
+| adaptiveGCN | Graph Learning | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
+| AdaptivePIGCN | Physics-Informed | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
+| PIGCLSTM | Temporal + Physics | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
+| PIGCGRU | Efficient Temporal | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
+| ResnetPIGCLSTM | Residual + Temporal | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
+| ResnetPIGCGRU | Residual + Efficient | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] | [Placeholder] |
 
-1. **Training Data Dependency**: Performance depends on quality of training scenarios
-2. **Topology Changes**: Limited ability to handle major network reconfigurations
-3. **Uncertainty Quantification**: No confidence intervals for predictions
-4. **Real-time Deployment**: Requires further optimization for production systems
+*[Placeholder: Actual results will be populated after training]*
 
-### Future Research Directions
+### Uncertainty Analysis
 
-#### Short-term (6 months)
-- **Uncertainty Quantification**: Bayesian neural networks for prediction confidence
-- **Transfer Learning**: Pre-trained models for new power system topologies
-- **Real-time Optimization**: Edge deployment and inference acceleration
+**Spatial Uncertainty Maps** (`uncertainty_spatial.png`):
+- Network graphs colored by prediction error variability
+- Separate plots for each renewable fraction (0%, 20%, 40%, 60%, 80%, 100%)
+- Identifies buses with consistently high/low uncertainty
 
-#### Medium-term (1 year)
-- **Federated Learning**: Multi-utility collaboration without data sharing
-- **Explainable AI**: Interpretable predictions for grid operators
-- **Hybrid Models**: Combining physics-informed and data-driven approaches
+*[Placeholder: Spatial uncertainty maps will be shown here after training]*
 
-#### Long-term (2+ years)
-- **Quantum Enhancement**: Quantum algorithms for large-scale optimization
-- **Climate Adaptation**: Models resilient to extreme weather events
-- **Autonomous Operation**: Self-adapting models for dynamic grid conditions
+**Temporal Uncertainty Curves** (`uncertainty_temporal.png`):
+- Mean system uncertainty over 24-hour daily cycle
+- Separate curves for each renewable fraction
+- Reveals temporal patterns in prediction accuracy
+
+*[Placeholder: Temporal uncertainty curves will be shown here after training]*
+
+### Renewable Impact Analysis
+
+**Renewable Impact Plots** (`ri_combined.png` per model):
+- Power Flow vs Renewable Fraction
+- Power Loss vs Renewable Fraction
+- Carbon Emissions vs Renewable Fraction
+- Voltage Deviation vs Renewable Fraction
+
+Uses box plots to show distribution of MOOPF metrics at discrete renewable fractions.
+
+*[Placeholder: Renewable impact plots will be shown here after training]*
+
+### Data Profile Story
+
+**Data Profile Story** (`data_profile_story.png`):
+- Total Active Load profile (daily cycle)
+- Total Renewable Generation profile (daily cycle)
+- Coefficient of Variation (data variability)
+- Data Integrity check (unique load values per bus)
+
+*[Placeholder: Data profile story plot will be shown here after training]*
 
 ## References
 
 ### Key Papers
 
-1. **Raissi, M., Perdikaris, P., & Karniadakis, G. E.** (2019). Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. *Journal of Computational Physics*, 378, 686-707.
+1. **Kendall, A., Gal, Y., & Cipolla, R.** (2018). Multi-Task Learning Using Uncertainty to Weigh Losses for Scene Geometry and Semantics. *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)*, 7482-7491.
 
-2. **Kipf, T. N., & Welling, M.** (2017). Semi-supervised classification with graph convolutional networks. *International Conference on Learning Representations*.
+2. **Kipf, T. N., & Welling, M.** (2017). Semi-Supervised Classification with Graph Convolutional Networks. *International Conference on Learning Representations (ICLR)*.
 
-3. **Abur, A., & Expósito, A. G.** (2004). *Power System State Estimation: Theory and Implementation*. CRC Press.
+3. **Raissi, M., Perdikaris, P., & Karniadakis, G. E.** (2019). Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. *Journal of Computational Physics*, 378, 686-707.
 
 4. **Dhiman, G., & Kumar, V.** (2019). Seagull optimization algorithm: Theory and its applications for large-scale industrial engineering problems. *Knowledge-Based Systems*, 165, 169-196.
 
-5. **Veličković, P., Cucurull, G., Casanova, A., Romero, A., Liò, P., & Bengio, Y.** (2018). Graph attention networks. *International Conference on Learning Representations*.
+5. **Abur, A., & Expósito, A. G.** (2004). *Power System State Estimation: Theory and Implementation*. CRC Press.
 
 ### Standards and Tools
 
 - **IEEE Power & Energy Society**: IEEE 33-bus, 57-bus, 118-bus test systems
-- **PandaPower**: Open-source power system analysis framework
-- **PyTorch Geometric**: Graph neural network library for PyTorch
+- **PandaPower**: Open-source power system analysis framework (version 2.13+)
+- **PyTorch**: Deep learning framework (version 2.0+)
+- **NetworkX**: Graph analysis library
 
 ## Citation
 
 If you use this work in your research, please cite:
 
 ```bibtex
-@software{physics_informed_dse_2024,
-  title={Physics-Informed Graph Neural Networks for Dynamic State Estimation in Power Systems},
+@software{physics_informed_opf_2024,
+  title={Physics-Informed Graph Neural Networks for Optimal Power Flow in Power Systems},
   author={[Your Name]},
   year={2024},
   url={https://github.com/your-username/Physics_Informed_Machine_Learning},
@@ -595,12 +1221,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **IEEE Power & Energy Society** for providing standard test systems
 - **PandaPower Development Team** for the excellent power system simulation framework
-- **PyTorch Geometric Community** for graph neural network implementations
+- **PyTorch Community** for the deep learning framework
 - **Open Source Contributors** who make reproducible research possible
 
 ---
 
 **Contact**: [your.email@university.edu] | **Repository**: [GitHub Link] | **DOI**: [DOI Link]
 
-
-*"Advancing the intersection of electrical engineering and artificial intelligence for the future of smart grids."*
+*Advancing the intersection of electrical engineering and artificial intelligence for the future of smart grids.*

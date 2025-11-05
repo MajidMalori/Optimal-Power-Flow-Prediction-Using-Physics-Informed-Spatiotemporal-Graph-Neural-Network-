@@ -16,18 +16,17 @@ class Args:
     """
     # === MODEL & SYSTEM CONFIGURATION ===
     test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-    models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
+    bus_systems = '118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+    models_to_train = 'AdaptivePIGCN'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
     seed = 42
     
     # === DATA CONFIGURATION ===
     data_mode = 'test'  # Options: 'train' or 'test'
     test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
     
-    # Data validation configuration
-    validate_data = False  # True: Run data integrity checks before training, False: Skip validation (faster)
-    # Set to True after generating new data to verify correctness
-    # Set to False for subsequent runs to save time (data doesn't change unless regenerated)
+    # Data profile story configuration
+    generate_data_profile_story = True  # True: Generate data profile story graphs, False: Skip (faster)
+    # Generates professional graphs telling the story of your data (load/generation profiles, integrity checks)
     
     # ┌──────────────────────────────────────────────────────────────────────────┐
     # │ TIMESTEP REFERENCE TABLE (60/20/20 split with complete 24-hour cycles)  │
@@ -53,19 +52,20 @@ class Args:
     # Control model size per bus system for experimentation
     # Options: 'normal' (conservative), 'medium' (balanced), 'large' (maximum capacity)
     #
-    # Capacity Presets:
+    # Capacity Presets (WIDENED RANGES for better MoSOA exploration):
     # ┌─────────┬────────────────────┬──────────────────────┬─────────────────────┐
     # │ System  │ normal             │ medium               │ large               │
     # ├─────────┼────────────────────┼──────────────────────┼─────────────────────┤
-    # │ 33-bus  │ H:32-64, GC:1-5    │ H:64, GC:5, E:32     │ H:96, GC:6, E:48    │
-    # │ 57-bus  │ H:32-64, GC:1-5    │ H:64, GC:5, E:32     │ H:96, GC:6, E:48    │
-    # │ 118-bus │ H:32-64, GC:1-5    │ H:96, GC:6, E:48     │ H:128, GC:8, E:64   │
+    # │ 33-bus  │ H:32-96, GC:1-6    │ H:64-128, GC:3-7     │ H:96-160, GC:5-9    │
+    # │ 57-bus  │ H:32-96, GC:1-6    │ H:64-128, GC:3-7     │ H:96-160, GC:5-9    │
+    # │ 118-bus │ H:64-128, GC:2-8   │ H:96-160, GC:4-9     │ H:128-256, GC:6-12  │
     # └─────────┴────────────────────┴──────────────────────┴─────────────────────┘
     # H=Hidden_dim, GC=GC_layers, E=Embedding_dim
+    # Note: Wider ranges allow MoSOA to find optimal values without being restricted
     #
     CAPACITY_33_BUS = 'normal'   # 33-bus: normal is sufficient
     CAPACITY_57_BUS = 'normal'   # 57-bus: normal is sufficient  
-    CAPACITY_118_BUS = 'normal'  # 118-bus: testing medium (96) vs large (128)
+    CAPACITY_118_BUS = 'medium'  # 118-bus: normal now includes 64-128 (covers 128)
     
     # === RESULTS SAVING CONFIGURATION ===
     save_results = True  # False: No files saved (console output only), True: Save all results
@@ -109,7 +109,7 @@ class Config:
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
     LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 1  # Testing medium vs large capacity (set to 200 for full training)
+    NUM_EPOCHS = 5  # Testing medium vs large capacity (set to 200 for full training)
     EARLY_STOPPING_PATIENCE = 75  # Increased to prevent premature stopping on 118-bus
     TRAIN_SPLIT = 0.6  # Changed to 0.6 for time-series (was 0.7)
     VAL_SPLIT = 0.2    # Changed to 0.2 for time-series (was 0.15)
@@ -208,19 +208,19 @@ class Config:
             # Single values are converted to ranges with ±10% tolerance for optimization
             capacity_settings = {
                 33: {
-                    'normal': (32, 64),
-                    'medium': (58, 70),  # 64 ± 10% for exploration
-                    'large': (86, 106)   # 96 ± 10% for exploration
+                    'normal': (32, 96),    # Wider range: 32-96 (was 32-64)
+                    'medium': (64, 128),   # Wider range: 64-128 (was 58-70)
+                    'large': (96, 160)     # Wider range: 96-160 (was 86-106)
                 },
                 57: {
-                    'normal': (32, 64),
-                    'medium': (58, 70),  # 64 ± 10% for exploration
-                    'large': (86, 106)   # 96 ± 10% for exploration
+                    'normal': (32, 96),    # Wider range: 32-96 (was 32-64)
+                    'medium': (64, 128),   # Wider range: 64-128 (was 58-70)
+                    'large': (96, 160)     # Wider range: 96-160 (was 86-106)
                 },
                 118: {
-                    'normal': (32, 64),
-                    'medium': (86, 106),  # 96 ± 10% for exploration
-                    'large': (115, 141)   # 128 ± 10% for exploration
+                    'normal': (64, 128),   # FIXED: Wider range includes 128 (was 32-64)
+                    'medium': (96, 160),   # Wider range: 96-160 (was 86-106)
+                    'large': (128, 256)    # Wider range: 128-256 (was 115-141)
                 }
             }
             
@@ -242,19 +242,19 @@ class Config:
             """
             capacity_settings = {
                 33: {
-                    'normal': (1, 5),
-                    'medium': (4, 6),  # 5 ± 1 for exploration
-                    'large': (5, 7)    # 6 ± 1 for exploration
+                    'normal': (1, 6),     # Wider range: 1-6 (was 1-5)
+                    'medium': (3, 7),     # Wider range: 3-7 (was 4-6)
+                    'large': (5, 9)       # Wider range: 5-9 (was 5-7)
                 },
                 57: {
-                    'normal': (1, 5),
-                    'medium': (4, 6),  # 5 ± 1 for exploration
-                    'large': (5, 7)    # 6 ± 1 for exploration
+                    'normal': (1, 6),     # Wider range: 1-6 (was 1-5)
+                    'medium': (3, 7),     # Wider range: 3-7 (was 4-6)
+                    'large': (5, 9)       # Wider range: 5-9 (was 5-7)
                 },
                 118: {
-                    'normal': (1, 5),
-                    'medium': (5, 7),  # 6 ± 1 for exploration
-                    'large': (7, 9)    # 8 ± 1 for exploration
+                    'normal': (2, 8),     # Wider range: 2-8 (was 1-5)
+                    'medium': (4, 9),     # Wider range: 4-9 (was 5-7)
+                    'large': (6, 12)      # Wider range: 6-12 (was 7-9)
                 }
             }
             
@@ -276,19 +276,19 @@ class Config:
             """
             capacity_settings = {
                 33: {
-                    'normal': (8, 32),
-                    'medium': (29, 35),  # 32 ± 10% for exploration
-                    'large': (43, 53)    # 48 ± 10% for exploration
+                    'normal': (8, 48),    # Wider range: 8-48 (was 8-32)
+                    'medium': (32, 64),   # Wider range: 32-64 (was 29-35)
+                    'large': (48, 96)     # Wider range: 48-96 (was 43-53)
                 },
                 57: {
-                    'normal': (8, 32),
-                    'medium': (29, 35),  # 32 ± 10% for exploration
-                    'large': (43, 53)    # 48 ± 10% for exploration
+                    'normal': (8, 48),    # Wider range: 8-48 (was 8-32)
+                    'medium': (32, 64),   # Wider range: 32-64 (was 29-35)
+                    'large': (48, 96)     # Wider range: 48-96 (was 43-53)
                 },
                 118: {
-                    'normal': (8, 32),
-                    'medium': (43, 53),  # 48 ± 10% for exploration
-                    'large': (58, 70)    # 64 ± 10% for exploration
+                    'normal': (16, 64),   # Wider range: 16-64 (was 8-32)
+                    'medium': (48, 96),   # Wider range: 48-96 (was 43-53)
+                    'large': (64, 128)    # Wider range: 64-128 (was 58-70)
                 }
             }
             
@@ -452,6 +452,9 @@ class Config:
         """Initializes directories and sets up experimental run structure."""
         # Set save_results flag
         self.SAVE_RESULTS = save_results
+        
+        # Set data profile story flag from Args
+        self.GENERATE_DATA_PROFILE_STORY = Args.generate_data_profile_story
         
         # Clear experimental results folder if requested
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):

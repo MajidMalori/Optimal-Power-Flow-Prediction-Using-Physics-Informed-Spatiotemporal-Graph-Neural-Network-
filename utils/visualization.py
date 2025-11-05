@@ -266,7 +266,10 @@ def plot_all_renewable_impacts(renewable_impact_data: pd.DataFrame, config: Any,
 
 def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config: Any, 
                                     num_buses: int, model_name: str):
-    """Plot all renewable impact metrics for a physics-informed model in a single 2x2 grid."""
+    """
+    Plot all renewable impact metrics for a physics-informed model in a single 2x2 grid.
+    Uses professional box plots matching data_profile_story quality.
+    """
     if renewable_impact_data.empty:
         print(f"ℹ  No renewable impact data to plot for {model_name}")
         return
@@ -279,11 +282,18 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
         'power_flow': 'Power Flow'
     }
     
-    # Create 2x2 subplot grid
+    # Get unique renewable fractions (discrete values)
+    x_col = 'renewable_fraction'
+    unique_fracs = sorted(renewable_impact_data[x_col].unique())
+    
+    # Professional color scheme (matching data_profile_story style)
+    primary_color = 'steelblue'
+    trend_color = '#d62728'  # Professional red for trends
+    
+    # Create 2x2 subplot grid with professional styling
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     axes = axes.flatten()
-    
-    x_col = 'renewable_fraction'
+    fig.suptitle(f'Renewable Impact Analysis - {model_name}', fontsize=18, fontweight='bold', y=0.995)
     
     for idx, (metric, label) in enumerate(metrics.items()):
         ax = axes[idx]
@@ -293,49 +303,86 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
                 # If metric not available, show placeholder
                 ax.text(0.5, 0.5, f'{label}\nnot available', 
                        transform=ax.transAxes, ha='center', va='center',
-                       fontsize=12, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray"))
-                ax.set_title(f'{label}', fontsize=13, fontweight='bold')
+                       fontsize=14, fontweight='bold',
+                       bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", edgecolor='black', linewidth=1.5))
+                ax.set_title(f'{label}', fontsize=14, fontweight='bold')
                 ax.axis('off')
                 continue
             
-            x = renewable_impact_data[x_col]
-            y = renewable_impact_data[metric]
+            # Prepare data for box plots (group by renewable fraction)
+            plot_data = []
+            plot_positions = []
             
-            # Scatter plot
-            ax.scatter(x, y, alpha=0.6, s=50, label='Test Scenario', color='steelblue')
+            for frac_idx, frac in enumerate(unique_fracs):
+                mask = (renewable_impact_data[x_col] == frac)
+                values = renewable_impact_data.loc[mask, metric].dropna().values
+                
+                if len(values) > 0:
+                    plot_data.append(values)
+                    plot_positions.append(frac_idx)
             
-            # Fit trendline
-            z = np.polyfit(x, y, 1)
-            p = np.poly1d(z)
-            ax.plot(x.sort_values(), p(x.sort_values()), "r--", linewidth=2.5, 
-                   label=f'Trend: y={z[0]:.4g}x + {z[1]:.4g}')
+            # Create professional box plots
+            if plot_data:
+                bp = ax.boxplot(plot_data, positions=plot_positions, widths=0.6,
+                               patch_artist=True, showmeans=True, meanline=False,
+                               boxprops=dict(facecolor=primary_color, alpha=0.7, linewidth=1.5),
+                               medianprops=dict(color='white', linewidth=2),
+                               meanprops=dict(marker='D', markerfacecolor='gold', 
+                                            markeredgecolor='black', markersize=8, markeredgewidth=1),
+                               whiskerprops=dict(linewidth=1.5),
+                               capprops=dict(linewidth=1.5),
+                               flierprops=dict(marker='o', markersize=6, alpha=0.6, 
+                                             markerfacecolor='darkred', markeredgecolor='black'))
             
-            ax.set_title(f'{label}', fontsize=13, fontweight='bold')
-            ax.set_xlabel('Renewable Energy Fraction', fontsize=11)
-            ax.set_ylabel(label, fontsize=11)
-            ax.legend(fontsize=9, loc='best')
-            ax.grid(True, alpha=0.3)
+            # Calculate and plot trend line (using median values)
+            medians = []
+            x_vals = []
+            for frac in unique_fracs:
+                mask = (renewable_impact_data[x_col] == frac)
+                values = renewable_impact_data.loc[mask, metric].dropna().values
+                if len(values) > 0:
+                    medians.append(np.median(values))
+                    x_vals.append(frac)
+            
+            if len(x_vals) > 1:
+                try:
+                    z = np.polyfit(x_vals, medians, 1)
+                    p = np.poly1d(z)
+                    x_sorted = np.sort(x_vals)
+                    ax.plot(x_sorted, p(x_sorted), '--', linewidth=3, 
+                           color=trend_color, alpha=0.9, label=f'Trend: y={z[0]:.4g}x + {z[1]:.4g}',
+                           zorder=10)
+                except:
+                    pass
+            
+            # Professional formatting
+            ax.set_title(f'{label}', fontsize=14, fontweight='bold', pad=15)
+            ax.set_xlabel('Renewable Energy Fraction', fontsize=12, fontweight='bold')
+            ax.set_ylabel(label, fontsize=12, fontweight='bold')
+            ax.set_xticks(unique_fracs)
+            ax.set_xticklabels([f'{f:.1f}' for f in unique_fracs], fontsize=11)
+            ax.tick_params(axis='both', which='major', labelsize=10)
+            ax.legend(fontsize=10, loc='best', framealpha=0.95, edgecolor='black', linewidth=1)
+            ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, axis='y')
+            ax.set_axisbelow(True)  # Grid behind plots
             
         except KeyError as e:
             # If metric not available, show placeholder
             ax.text(0.5, 0.5, f'{label}\nnot available', 
                    transform=ax.transAxes, ha='center', va='center',
-                   fontsize=12, bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray"))
-            ax.set_title(f'{label}', fontsize=13, fontweight='bold')
+                   fontsize=14, fontweight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", edgecolor='black', linewidth=1.5))
+            ax.set_title(f'{label}', fontsize=14, fontweight='bold')
             ax.axis('off')
     
-    # Overall title
-    fig.suptitle(f'Renewable Impact Analysis - {model_name}', fontsize=16, fontweight='bold', y=0.995)
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
     
-    # Save combined plot directly in model folder (not in renewable_impacts subfolder)
+    # Save combined plot directly in model folder
     model_dir = config.get_model_eval_dir(num_buses, model_name)
     os.makedirs(model_dir, exist_ok=True)
     save_path = os.path.join(model_dir, 'ri_combined.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
     plt.close()
-    
-    # Note: No longer creating individual plots or renewable_impacts folder
 
 
 def create_model_comparison_plot(all_results: list, save_path: str = None):
@@ -402,10 +449,12 @@ def create_comparative_renewable_plots(all_renewable_data: Dict[str, pd.DataFram
 def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.DataFrame], 
                                            config: Any, num_buses: int, all_tested_models: list = None):
     """
-    Create comparative renewable impact plots for physics-informed models only.
-    Non-physics models are excluded from renewable impact analysis as these 
-    metrics are not applicable to them. Subplot layout dynamically adjusts 
-    to the number of physics-informed models.
+    Create IMPROVED comparative renewable impact plots using box plots for discrete renewable fractions.
+    All models shown on same plot for direct comparison with consistent Y-axis.
+    
+    Creates two types of plots:
+    1. Individual metric plots (all models together with box plots)
+    2. Combined overview (2x2 grid of all MOOPF metrics)
     
     Args:
         all_renewable_data: Dictionary mapping model_name -> renewable_impact_dataframe
@@ -439,93 +488,210 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
         'power_flow': 'Power Flow'
     }
     
-    # Use only physics-informed models
-    model_names = physics_models
-    num_models = len(model_names)
+    # Get unique renewable fractions (discrete values like 0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+    all_fracs = set()
+    for data_df in all_renewable_data.values():
+        if 'renewable_fraction' in data_df.columns:
+            all_fracs.update(data_df['renewable_fraction'].unique())
+    unique_fracs = sorted(list(all_fracs))
     
-    # Calculate optimal subplot layout based on number of physics models
-    def calculate_subplot_layout(n_models):
-        """Calculate optimal rows and columns for n_models subplots"""
-        if n_models == 1:
-            return 1, 1
-        elif n_models == 2:
-            return 1, 2
-        elif n_models <= 4:
-            return 2, 2
-        elif n_models <= 6:
-            return 2, 3
-        elif n_models <= 9:
-            return 3, 3
-        else:
-            # For more than 9 models, use 3x4 grid and limit to 12
-            return 3, 4
+    # Professional color palette for models (matching data_profile_story quality)
+    colors = plt.cm.Set2(np.linspace(0, 1, len(physics_models)))
+    trend_color = '#d62728'  # Professional red for trends
     
-    nrows, ncols = calculate_subplot_layout(num_models)
-    
-    # Create a separate plot for each metric
+    # ============================================================================
+    # TYPE 1: Individual metric plots (all models together with box plots)
+    # ============================================================================
     for metric, metric_label in metrics.items():
-        # Dynamic figure size based on layout
-        fig_width = ncols * 5  # 5 inches per column
-        fig_height = nrows * 4  # 4 inches per row
+        fig, ax = plt.subplots(figsize=(14, 8))
         
-        fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height))
-        fig.suptitle(f'{metric_label} vs Renewable Fraction - {num_buses}-bus System', fontsize=16)
+        # Prepare data for box plots: group by renewable fraction and model
+        plot_data = []
+        plot_positions = []
+        plot_labels = []
+        plot_colors_list = []
         
-        # Handle different subplot layouts
-        if num_models == 1:
-            axes = [axes]  # Make it iterable
-        elif nrows == 1 or ncols == 1:
-            axes = axes.flatten() if num_models > 1 else [axes]
-        else:
-            axes = axes.flatten()
+        # Position offset for each model at each renewable fraction
+        width = 0.15  # Width of each box
+        model_offset = np.linspace(-width * (len(physics_models) - 1) / 2, 
+                                   width * (len(physics_models) - 1) / 2, 
+                                   len(physics_models))
         
-        for idx, model_name in enumerate(model_names):
-            ax = axes[idx]
-            data_df = all_renewable_data[model_name]
+        for frac_idx, frac in enumerate(unique_fracs):
+            for model_idx, model_name in enumerate(physics_models):
+                data_df = all_renewable_data[model_name]
+                if metric in data_df.columns:
+                    # Get all values for this model at this renewable fraction
+                    mask = (data_df['renewable_fraction'] == frac)
+                    values = data_df.loc[mask, metric].dropna().values
+                    
+                    if len(values) > 0:
+                        plot_data.append(values)
+                        plot_positions.append(frac_idx + model_offset[model_idx])
+                        plot_labels.append(model_name if frac_idx == 0 else '')  # Label only first time
+                        plot_colors_list.append(colors[model_idx])
+        
+        # Create professional box plots
+        if plot_data:
+            bp = ax.boxplot(plot_data, positions=plot_positions, widths=width*0.8,
+                           patch_artist=True, showmeans=True, meanline=False,
+                           medianprops=dict(color='white', linewidth=2),
+                           meanprops=dict(marker='D', markerfacecolor='gold', 
+                                        markeredgecolor='black', markersize=7, markeredgewidth=1),
+                           whiskerprops=dict(linewidth=1.5),
+                           capprops=dict(linewidth=1.5),
+                           flierprops=dict(marker='o', markersize=5, alpha=0.5))
             
-            if metric in data_df.columns:
-                x = data_df['renewable_fraction']
-                y = data_df[metric]
-                
-                # Plot scatter points
-                ax.scatter(x, y, alpha=0.7, s=50, label='Data Points')
-                
-                # Fit and plot trendline
-                if len(x) > 1:  # Need at least 2 points for trendline
-                    try:
-                        z = np.polyfit(x, y, 1)
-                        p = np.poly1d(z)
-                        x_sorted = np.sort(x)
-                        ax.plot(x_sorted, p(x_sorted), 'r--', linewidth=2, 
-                               label=f'Trend: y={z[0]:.3f}x + {z[1]:.3f}')
-                    except np.linalg.LinAlgError:
-                        print(f"Warning: Could not fit trendline for {model_name} {metric}")
-                
-                ax.set_title(f'{model_name}', fontsize=12, fontweight='bold')
-                ax.set_xlabel('Renewable Energy Fraction', fontsize=10)
-                ax.set_ylabel(metric_label, fontsize=10)
-                ax.legend(fontsize=8)
-                ax.grid(True, alpha=0.3)
-            else:
-                # If metric not available in physics model, show message
-                ax.text(0.5, 0.5, f'{metric}\nnot available', 
-                       transform=ax.transAxes, ha='center', va='center',
-                       fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"))
-                ax.set_title(f'{model_name}', fontsize=12, fontweight='bold')
+            # Color the boxes professionally
+            for patch, color in zip(bp['boxes'], plot_colors_list):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+                patch.set_edgecolor('black')
+                patch.set_linewidth(1.5)
         
-        # Remove any unused subplots (only if we have more subplot spaces than models)
-        total_subplots = nrows * ncols
-        if total_subplots > num_models:
-            for idx in range(num_models, total_subplots):
-                axes[idx].remove()
+        # Add trend lines for each model (using median values)
+        for model_idx, model_name in enumerate(physics_models):
+            data_df = all_renewable_data[model_name]
+            if metric in data_df.columns:
+                medians = []
+                x_vals = []
+                for frac in unique_fracs:
+                    mask = (data_df['renewable_fraction'] == frac)
+                    values = data_df.loc[mask, metric].dropna().values
+                    if len(values) > 0:
+                        medians.append(np.median(values))
+                        x_vals.append(frac)
+                
+                if len(x_vals) > 1:
+                    try:
+                        z = np.polyfit(x_vals, medians, 1)
+                        p = np.poly1d(z)
+                        x_sorted = np.sort(x_vals)
+                        ax.plot(x_sorted, p(x_sorted), '--', linewidth=3, 
+                               color=colors[model_idx], alpha=0.9, label=model_name,
+                               zorder=10)
+                    except:
+                        pass
+        
+        # Professional formatting (matching data_profile_story style)
+        ax.set_xlabel('Renewable Energy Fraction', fontsize=13, fontweight='bold')
+        ax.set_ylabel(metric_label, fontsize=13, fontweight='bold')
+        ax.set_title(f'{metric_label} vs Renewable Fraction - {num_buses}-bus System', 
+                    fontsize=16, fontweight='bold', pad=20)
+        ax.set_xticks(unique_fracs)
+        ax.set_xticklabels([f'{f:.1f}' for f in unique_fracs], fontsize=12)
+        ax.tick_params(axis='both', which='major', labelsize=11)
+        ax.legend(loc='best', fontsize=10, framealpha=0.95, edgecolor='black', 
+                 linewidth=1, ncol=2 if len(physics_models) > 3 else 1)
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, axis='y')
+        ax.set_axisbelow(True)  # Grid behind plots
         
         plt.tight_layout()
         
-        # Save the plot - concise filename
-        clean_metric_name = metric.replace('normalized_', '').replace('_', '')[:6]  # Short: carbon, voltag, powerl, powerf
+        # Save individual metric plot with professional quality
+        clean_metric_name = metric.replace('normalized_', '').replace('_', '')[:6]
         save_path = os.path.join(bus_dir, f"ri_{clean_metric_name}.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
         plt.close()
+    
+    # ============================================================================
+    # TYPE 2: Combined overview (2x2 grid of all MOOPF metrics)
+    # ============================================================================
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+    fig.suptitle(f'MOOPF Objectives vs Renewable Fraction - {num_buses}-bus System', 
+                fontsize=16, fontweight='bold')
+    
+    for idx, (metric, metric_label) in enumerate(metrics.items()):
+        ax = axes[idx]
+        
+        # Prepare data for box plots
+        plot_data = []
+        plot_positions = []
+        plot_colors_list = []
+        
+        width = 0.15
+        model_offset = np.linspace(-width * (len(physics_models) - 1) / 2, 
+                                   width * (len(physics_models) - 1) / 2, 
+                                   len(physics_models))
+        
+        for frac_idx, frac in enumerate(unique_fracs):
+            for model_idx, model_name in enumerate(physics_models):
+                data_df = all_renewable_data[model_name]
+                if metric in data_df.columns:
+                    mask = (data_df['renewable_fraction'] == frac)
+                    values = data_df.loc[mask, metric].dropna().values
+                    if len(values) > 0:
+                        plot_data.append(values)
+                        plot_positions.append(frac_idx + model_offset[model_idx])
+                        plot_colors_list.append(colors[model_idx])
+        
+        # Create professional box plots
+        if plot_data:
+            bp = ax.boxplot(plot_data, positions=plot_positions, widths=width*0.8,
+                           patch_artist=True, showmeans=True, meanline=False,
+                           medianprops=dict(color='white', linewidth=2),
+                           meanprops=dict(marker='D', markerfacecolor='gold', 
+                                        markeredgecolor='black', markersize=6, markeredgewidth=1),
+                           whiskerprops=dict(linewidth=1.5),
+                           capprops=dict(linewidth=1.5),
+                           flierprops=dict(marker='o', markersize=4, alpha=0.5))
+            
+            # Color the boxes professionally
+            for patch, color in zip(bp['boxes'], plot_colors_list):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+                patch.set_edgecolor('black')
+                patch.set_linewidth(1.5)
+        
+        # Add trend lines for each model
+        for model_idx, model_name in enumerate(physics_models):
+            data_df = all_renewable_data[model_name]
+            if metric in data_df.columns:
+                medians = []
+                x_vals = []
+                for frac in unique_fracs:
+                    mask = (data_df['renewable_fraction'] == frac)
+                    values = data_df.loc[mask, metric].dropna().values
+                    if len(values) > 0:
+                        medians.append(np.median(values))
+                        x_vals.append(frac)
+                
+                if len(x_vals) > 1:
+                    try:
+                        z = np.polyfit(x_vals, medians, 1)
+                        p = np.poly1d(z)
+                        x_sorted = np.sort(x_vals)
+                        ax.plot(x_sorted, p(x_sorted), '--', linewidth=2.5, 
+                               color=colors[model_idx], alpha=0.9, zorder=10)
+                    except:
+                        pass
+        
+        # Professional formatting
+        ax.set_xlabel('Renewable Energy Fraction', fontsize=11, fontweight='bold')
+        ax.set_ylabel(metric_label, fontsize=11, fontweight='bold')
+        ax.set_title(metric_label, fontsize=12, fontweight='bold', pad=12)
+        ax.set_xticks(unique_fracs)
+        ax.set_xticklabels([f'{f:.1f}' for f in unique_fracs], fontsize=10)
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, axis='y')
+        ax.set_axisbelow(True)  # Grid behind plots
+    
+    # Add professional legend only once
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=colors[i], alpha=0.7, edgecolor='black', 
+                            linewidth=1.5, label=physics_models[i]) 
+                       for i in range(len(physics_models))]
+    fig.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, 0.02), 
+              ncol=len(physics_models), fontsize=11, framealpha=0.95, 
+              edgecolor='black', linewidth=1)
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.98])
+    
+    # Save combined overview with professional quality
+    save_path = os.path.join(bus_dir, "ri_moopf_overview.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white', edgecolor='none')
+    plt.close()
         
 
 
