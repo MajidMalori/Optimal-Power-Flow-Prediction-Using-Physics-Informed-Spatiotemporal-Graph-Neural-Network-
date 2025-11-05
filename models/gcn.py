@@ -61,5 +61,4 @@ class GCN(BaseModel):
         
         # Single head: Combined output
         out = self.output_layer(x)  # [batch_size, num_buses, 2]
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
         return out

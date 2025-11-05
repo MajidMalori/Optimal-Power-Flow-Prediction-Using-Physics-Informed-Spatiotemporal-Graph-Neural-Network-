@@ -1,5 +1,3 @@
-# In models/ResnetPIGCLSTM.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +6,6 @@ from .base_model import BaseModel
 class ResnetPIGCLSTM(BaseModel):
     """
     A Physics-Informed Graph Convolutional LSTM with Residual Connections.
-    This version is corrected to handle an unbatched, static adjacency matrix
     and expand it internally, following the provided design guide.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float,
@@ -23,7 +20,6 @@ class ResnetPIGCLSTM(BaseModel):
 
         self.phi = phi
         self.embedding_dim = embedding_dim
-        # Note: rnn_layers, num_buses, hidden_dim are stored in BaseModel
 
         # Learnable node embeddings to create an adaptive graph
         self.node_embedding1 = nn.Parameter(torch.randn(self.num_buses, embedding_dim))
@@ -114,6 +110,5 @@ class ResnetPIGCLSTM(BaseModel):
         # Apply the final linear transformation.
         # Single head: Combined output
         final_output_per_node = self.output_transform(last_step_per_node)
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
         # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
         return final_output_per_node

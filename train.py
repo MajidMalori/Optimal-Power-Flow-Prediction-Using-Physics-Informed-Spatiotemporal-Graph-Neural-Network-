@@ -121,17 +121,16 @@ def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
     
     # If free memory is less than minimum required, fallback to CPU
     if free_memory_gb < min_free_memory_gb:
-        print(f"WARNING: GPU memory insufficient ({free_memory_gb:.2f} GB < {min_free_memory_gb} GB), falling back to CPU")
+        print(f"Warning: GPU memory insufficient ({free_memory_gb:.2f} GB < {min_free_memory_gb} GB), falling back to CPU")
         return torch.device('cpu'), 'insufficient_gpu_memory'
     
     return torch.device('cuda'), 'gpu_available'
 
-# Fix matplotlib threading issues by setting backend before any plotting imports
+# Set matplotlib backend before any plotting imports
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend to prevent threading issues
 import matplotlib.pyplot as plt
 
-# --- Project-specific modules ---
 from utils.data_loader import load_power_system_data, create_data_loaders
 from utils.metrics import PowerSystemLoss
 from utils.data_validation import validate_data_before_training
@@ -331,13 +330,13 @@ def main():
                         renewable_fractions=_renewable_fractions
                     )
                 except Exception as e:
-                    print(f"  ⚠️  Warning: Could not generate data profile story: {e}")
+                    print(f"  Warning: Could not generate data profile story: {e}")
                     import traceback
                     traceback.print_exc()
             
             bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:
-            print(f"[CRITICAL ERROR] {e}")
+            print(f"Error: {e}")
             continue
 
         for model_name in bus_models_to_test:
@@ -406,7 +405,7 @@ def main():
                     if torch.cuda.is_available():
                         memory_info = check_gpu_memory()
                         if memory_info['free'] < 1024**3:  # Less than 1GB free
-                            print("WARNING: Low GPU memory, clearing cache...")
+                            print("Warning: Low GPU memory, clearing cache...")
                             clear_gpu_memory()
                     
                     # Create model with error handling for OOM
@@ -477,7 +476,7 @@ def main():
                         **test_metrics,  # Final test performance for reporting
                         'val_metrics': val_metrics,  # Validation metrics used for optimization
                         'total_loss': total_loss,  # Based on validation metrics
-                        'training_mse': val_metrics['mse'],  # FIXED: Store normalized training MSE
+                        'training_mse': val_metrics['mse'],
                         'training_history': trainer.get_training_history(),
                         'model_state': model_state,  # May be None for large models
                         'model_config': run_config  

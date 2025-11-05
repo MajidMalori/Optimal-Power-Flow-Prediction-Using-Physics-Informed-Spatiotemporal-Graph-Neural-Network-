@@ -1,12 +1,10 @@
-# File: models/base_model.py
-
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 class BaseModel(nn.Module, ABC):
-    def __init__(self, feature_dim: int, hidden_dim: int, output_dim: int, num_gc_layers: int, num_buses: int, rnn_type: Optional[str] = None, rnn_layers: int = 0, physics_informed: bool = False, dropout: float = 0.1):
+    def __init__(self, feature_dim: int, hidden_dim: int, output_dim: int, num_gc_layers: int, num_buses: int, rnn_type: str = None, rnn_layers: int = 0, physics_informed: bool = False, dropout: float = 0.1):
         super().__init__()
         self.feature_dim = feature_dim
         self.hidden_dim = hidden_dim

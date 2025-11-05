@@ -29,7 +29,6 @@ class adaptiveGCN(nn.Module):
         self.output_layer = nn.Linear(hidden_dim, num_output_features)
 
     def forward(self, x, static_adj):
-        # ... (forward pass logic as corrected before) ...
         batch_size = x.size(0)
         learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
         
@@ -55,10 +54,4 @@ class adaptiveGCN(nn.Module):
 
         output = self.output_layer(h)  # [batch_size, num_buses, 2]
         
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-        # OPF mode: Output shape [batch_size, num_buses, 2] = bus-type dependent unknowns
-        # - PQ buses: V (≥0), θ (any) | PV buses: Q (any), θ (any) | Slack buses: P (any), Q (any)
-        # - If model predicts invalid values, physics loss will penalize it
-        # - This exposes the root cause instead of hiding it with ReLU
-        
-        return output  # [batch_size, num_buses, 2]
+        return output

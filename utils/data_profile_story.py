@@ -51,7 +51,7 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         # Features: [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         n_samples, n_buses, n_features = features.shape
         
-        # CRITICAL: Denormalize features to check actual values (not normalized)
+        # Denormalize features to check actual values
         # Normalized features can be negative, which is why we see negative loads
         # Convert numpy to torch tensor for denormalize, then back to numpy
         import torch
@@ -124,7 +124,7 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         # Expected pattern check
         max_hour = np.argmax([np.nanmean([np.mean(np.sum(p_load[hours == h], axis=1)) for _ in range(1)]) for h in range(hours_per_day)])
         if max_hour not in [17, 18, 19]:
-            print(f"  ⚠️  WARNING: Load peak is at hour {max_hour}, not at expected evening peak!")
+            print(f"  Warning: Load peak is at hour {max_hour}, not at expected evening peak!")
         
         # 2. Total Renewable Generation
         ax = axes[0, 1]
@@ -163,12 +163,12 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         ax.grid(True, alpha=0.3)
         
         # Check renewable pattern
-        # NOTE: p_ren includes both wind AND solar, so patterns are mixed
+        # p_ren includes both wind and solar, so patterns are mixed
         # Solar peaks at noon, but wind can be high at night
         ren_max_hour = np.argmax([np.nanmean([np.mean(np.sum(p_ren[hours == h], axis=1)) for _ in range(1)]) for h in range(hours_per_day)])
         
         # Check if renewables are zero at night
-        # NOTE: Wind can generate at night, so this is expected
+        # Wind can generate at night, so this is expected
         night_hours = [0, 1, 2, 3, 4, 20, 21, 22, 23]
         night_ren_mean = np.mean([np.mean(np.sum(p_ren[hours == h], axis=1)) for h in night_hours if np.any(hours == h)])
         print(f"  Night renewable generation (hours 0-4, 20-23): {night_ren_mean:.4f} MW")
@@ -304,7 +304,7 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         return issues
         
     except Exception as e:
-        print(f"✗ Error analyzing {case_name}: {e}")
+        print(f"Error analyzing {case_name}: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -333,11 +333,11 @@ def main():
     print("DATA PROFILE ANALYSIS COMPLETE")
     print(f"{'='*80}")
     if all_issues:
-        print(f"\n⚠️  Total issues found: {len(all_issues)}")
+        print(f"\nTotal issues found: {len(all_issues)}")
         for issue in all_issues:
             print(f"  • {issue}")
     else:
-        print("\n✓ No major issues detected in data profiles!")
+        print("\nNo major issues detected in data profiles!")
 
 
 if __name__ == "__main__":

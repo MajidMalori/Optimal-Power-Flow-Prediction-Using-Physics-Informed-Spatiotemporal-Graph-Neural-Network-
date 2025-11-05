@@ -1,5 +1,3 @@
-# In trainers/model_trainer.py
-
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -35,12 +33,8 @@ class PowerSystemTrainer(BaseTrainer):
 
     def _train_epoch(self, train_loader):
         self.model.train()
-        # --- START CORRECTION: Initialize trackers for each loss component ---
         epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_vm': 0, 'mse_va': 0, 'power_violation': 0, 'voltage_violation': 0}
-        # --- END CORRECTION ---
         
-        
-        # Calculate gradient accumulation steps based on system size
         accumulation_steps = self._get_gradient_accumulation_steps()
         effective_batch_size = self.config.BATCH_SIZE * accumulation_steps
         
@@ -94,53 +88,28 @@ class PowerSystemTrainer(BaseTrainer):
                 # CPU training without mixed precision
                 outputs = self.model(features, adjacency_input)  # [batch, buses, 2]
                 
-                # DEBUG: Check output shape before passing to loss
-                if outputs.shape != targets.shape:
-                    print(f"[DEBUG] Shape mismatch: outputs={outputs.shape}, targets={targets.shape}")
-                    # Try to fix common issues
-                    if outputs.dim() == 3 and outputs.shape[-1] != 2:
-                        # If output is [batch, buses, wrong_dim], try to reshape
-                        batch_size, num_buses = outputs.shape[0], outputs.shape[1]
-                        if outputs.numel() == batch_size * num_buses * 2:
-                            # Can be reshaped to [batch, buses, 2]
-                            outputs = outputs.view(batch_size, num_buses, 2)
-                            print(f"[DEBUG] Reshaped outputs to {outputs.shape}")
-                        else:
-                            print(f"[DEBUG] Cannot reshape: outputs.numel()={outputs.numel()}, expected={batch_size * num_buses * 2}")
-                
-                # ETH Zurich Technique 4: Separate VM/VA backward passes (if enabled)
                 use_separate_backward = getattr(self.config, 'USE_SEPARATE_VM_VA_BACKWARD', False)
-                
-                # Get bus types from batch (OPF: bus-type-dependent unknowns)
-                bus_types = batch.get('bus_types', None)  # [batch, buses] or None
-                
-                # OPF: Disable separate backward passes (unknowns vary by bus type)
-                # For OPF, bus_types is not None, so we disable separate backward
+                bus_types = batch.get('bus_types', None)
                 use_separate_backward = use_separate_backward and (bus_types is None)
                 
                 loss_dict = self.criterion(
-                    outputs,      # Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
-                    targets,      # True unknowns [batch, buses, 2] (OPF: bus-type dependent)
-                    features,     # Measured power (use as measurements)
+                    outputs,
+                    targets,
+                    features,
                     ybus,
-                    bus_types=bus_types,  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
-                    return_components=use_separate_backward  # Request separate components if enabled (disabled for OPF)
+                    bus_types=bus_types,
+                    return_components=use_separate_backward
                 )
                 
                 if use_separate_backward and 'mse_vm_loss' in loss_dict:
-                    # ETH Zurich approach: Separate backward passes for VM, VA, and physics
                     mse_vm_loss = loss_dict['mse_vm_loss'] / accumulation_steps
                     mse_va_loss = loss_dict['mse_va_loss'] / accumulation_steps
                     physics_loss = loss_dict['physics_loss'] / accumulation_steps
                     
-                    # Backward pass for VM (retain graph for subsequent backpasses)
                     mse_vm_loss.backward(retain_graph=True)
-                    # Backward pass for VA (retain graph for physics)
                     mse_va_loss.backward(retain_graph=True)
-                    # Backward pass for physics (no need to retain graph)
                     physics_loss.backward()
                 else:
-                    # Standard single backward pass
                     total_loss = loss_dict['total_loss'] / accumulation_steps
                     total_loss.backward()
                 
@@ -160,19 +129,12 @@ class PowerSystemTrainer(BaseTrainer):
             epoch_losses['power_violation'] += loss_dict['power_violation'].item()
             epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
 
-            # Update progress bar with running averages
             if self.is_physics_informed:
-                # Display: total, mse, p_vio, v_viol (clean, single line)
-                # Note: mse is raw MSE (actual prediction error)
-                # total uses weighted MSE component, so total can be < raw MSE initially
-                # This is normal with learnable uncertainty weighting (Kendall et al.)
                 avg_mse = epoch_losses['mse']/(batch_idx+1)
-                # Use weighted MSE if available (for consistency with total), otherwise raw MSE
                 if 'mse_weighted' in epoch_losses:
-                    avg_mse_weighted = epoch_losses['mse_weighted']/(batch_idx+1)
                     pbar.set_postfix(OrderedDict([
                         ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
-                        ('mse', f"{avg_mse:.7f}"),  # Raw MSE (actual error)
+                        ('mse', f"{avg_mse:.7f}"),
                         ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),
                         ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")
                     ]))
@@ -186,12 +148,10 @@ class PowerSystemTrainer(BaseTrainer):
             else:
                 pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")
             
-            # Periodic memory cleanup for large systems (reduced frequency)
             if batch_idx % 100 == 0 and self.config.NUM_BUSES >= 57:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            # --- END CORRECTION ---
 
         # Return the average of all loss components
         num_batches = len(train_loader)
@@ -199,17 +159,15 @@ class PowerSystemTrainer(BaseTrainer):
         return {
             'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
-            'mse_vm': epoch_losses['mse_vm'] / num_batches,  # ETH Zurich: Separate VM loss
-            'mse_va': epoch_losses['mse_va'] / num_batches,  # ETH Zurich: Separate VA loss
+            'mse_vm': epoch_losses['mse_vm'] / num_batches,
+            'mse_va': epoch_losses['mse_va'] / num_batches,
             'power_violation': epoch_losses['power_violation'] / num_batches,
             'voltage_violation': epoch_losses['voltage_violation'] / num_batches
         }
 
     def _val_epoch(self, val_loader):
         self.model.eval()
-        # --- START CORRECTION: Initialize trackers for each loss component ---
         epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_vm': 0, 'mse_va': 0, 'power_violation': 0, 'voltage_violation': 0}
-        # --- END CORRECTION ---
         
         
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
@@ -241,21 +199,18 @@ class PowerSystemTrainer(BaseTrainer):
                     outputs = self.model(features, adjacency_input)
                 
                 
-                # Get bus types from batch (OPF: bus-type-dependent unknowns)
-                bus_types = batch.get('bus_types', None)  # [batch, buses] or None
+                bus_types = batch.get('bus_types', None)
                 
-                # --- START CORRECTION: Process the dictionary of losses ---
                 loss_dict = self.criterion(
-                    outputs,      # Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
-                    targets,      # True unknowns [batch, buses, 2] (OPF: bus-type dependent)
-                    features,     # Measured power (use as measurements)
+                    outputs,
+                    targets,
+                    features,
                     ybus,
-                    bus_types=bus_types  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
+                    bus_types=bus_types
                 )
                 
-                # Update running totals for the epoch
                 epoch_losses['total_loss'] += loss_dict['total_loss'].item()
-                epoch_losses['mse'] += loss_dict['mse'].item()  # Raw MSE
+                epoch_losses['mse'] += loss_dict['mse'].item()
                 if 'mse_weighted' in loss_dict:
                     epoch_losses['mse_weighted'] = epoch_losses.get('mse_weighted', 0.0) + loss_dict['mse_weighted'].item()
                 epoch_losses['mse_vm'] += loss_dict.get('mse_vm', 0.0) if isinstance(loss_dict.get('mse_vm', 0.0), float) else loss_dict.get('mse_vm', torch.tensor(0.0)).item()
@@ -263,15 +218,11 @@ class PowerSystemTrainer(BaseTrainer):
                 epoch_losses['power_violation'] += loss_dict['power_violation'].item()
                 epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
                 
-                # Update progress bar with running averages
                 if self.is_physics_informed:
-                    # Display: total, mse (raw), p_vio, v_viol (clean, single line)
-                    # Note: total uses weighted MSE (learnable uncertainty), so total can be < raw MSE
-                    # This is normal - total = weighted_MSE + weighted_power + weighted_voltage + regularization
                     avg_mse = epoch_losses['mse']/(batch_idx+1)
                     pbar.set_postfix(OrderedDict([
                         ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
-                        ('mse', f"{avg_mse:.7f}"),  # Raw MSE (actual prediction error)
+                        ('mse', f"{avg_mse:.7f}"),
                         ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),
                         ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")
                     ]))
@@ -284,8 +235,8 @@ class PowerSystemTrainer(BaseTrainer):
         return {
             'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
-            'mse_vm': epoch_losses['mse_vm'] / num_batches,  # ETH Zurich: Separate VM loss
-            'mse_va': epoch_losses['mse_va'] / num_batches,  # ETH Zurich: Separate VA loss
+            'mse_vm': epoch_losses['mse_vm'] / num_batches,
+            'mse_va': epoch_losses['mse_va'] / num_batches,
             'power_violation': epoch_losses['power_violation'] / num_batches,
             'voltage_violation': epoch_losses['voltage_violation'] / num_batches
         }

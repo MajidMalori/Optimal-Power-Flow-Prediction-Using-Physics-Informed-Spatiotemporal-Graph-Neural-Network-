@@ -50,7 +50,6 @@ class PIGCLSTM(BaseModel):
         # --- End: Components from adaptiveGCN ---
         
         # The size of the vector fed into the LSTM is the flattened representation of all node embeddings.
-        # CRITICAL FIX: Limit LSTM size to prevent CUDA memory issues
         lstm_io_size = hidden_dim * num_buses
         
         # More aggressive memory optimization for all system sizes
@@ -135,7 +134,6 @@ class PIGCLSTM(BaseModel):
         last_step_output = lstm_out[:, -1, :]
         
         # 6. Reshape the final time step's output to per-node features.
-        # CRITICAL FIX: Handle reduced LSTM output size for memory efficiency
         if self.lstm_projection is not None:
             # For larger systems with reduced LSTM size, project back to the original size
             projected_output = self.lstm_projection(last_step_output)
@@ -147,6 +145,5 @@ class PIGCLSTM(BaseModel):
         # 7. Apply the final transformation to get the desired output shape.
         # Single head: Combined output
         final_output_per_node = self.output_transform(last_step_per_node)
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
         # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
         return final_output_per_node

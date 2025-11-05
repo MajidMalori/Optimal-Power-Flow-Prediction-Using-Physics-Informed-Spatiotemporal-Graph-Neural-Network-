@@ -80,7 +80,6 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         # --- 2a. Fitness Evaluation and Global Best Update ---
         fitness_all = np.full(num_agents, np.inf)
         for i in range(num_agents):
-            # ROOT CAUSE DETECTION: Track if clipping occurs (indicates boundary issues)
             original_pos = positions[i, :].copy()
             positions[i, :] = np.clip(positions[i, :], lower_bound, upper_bound)
             was_clipped = not np.allclose(original_pos, positions[i, :])
@@ -197,7 +196,6 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
         'NUM_GC_LAYERS': gc_layers_range
     }
     
-    # Note: Loss weights are learnable (Kendall et al., CVPR 2018) - no hyperparameter tuning needed
     # The model automatically learns optimal loss weights via backpropagation
     
     # Add sequential model parameters with adaptive ranges
@@ -237,7 +235,6 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
     Returns:
         Dictionary of model keyword arguments
     """
-    # CRITICAL FIX: Use INPUT_DIM (10) for feature_dim, NOT FEATURE_DIM which equals OUTPUT_DIM (2)
     input_dim = getattr(model_config, 'INPUT_DIM', 10)  # Default to 10 for pure state estimation
     model_kwargs = {
         'feature_dim': input_dim,  # Input dimension (10 measurements), NOT output dimension (2 voltages)

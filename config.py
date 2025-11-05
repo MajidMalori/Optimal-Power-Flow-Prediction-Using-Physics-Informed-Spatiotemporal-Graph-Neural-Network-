@@ -2,17 +2,12 @@ import os
 import torch
 from datetime import datetime
 
-
-# =============================================================================
-# TRAINING ARGUMENTS CONFIGURATION
-# =============================================================================
-
 class Args:
     """
     Training arguments and configuration.
     Centralized location for all training-related parameters.
     
-    ⚙️ QUICK ACCESS - Modify these for your experiments
+    QUICK ACCESS - Modify these for your experiments
     """
     # === MODEL & SYSTEM CONFIGURATION ===
     test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
@@ -40,12 +35,11 @@ class Args:
     # │ Recommended    │  10080    │ 420  │ 252 days  │ 84 days  │ 84 days  ← ✓ │
     # │ Heavy train    │  12000    │ 500  │ 300 days  │ 100 days │ 100 days     │
     # └────────────────┴───────────┴──────┴───────────┴──────────┴──────────────┘
-    # NOTE: All values ensure complete 24-hour day cycles in train/val/test splits.
     #       Timesteps must be multiples of 120 (5 days × 24 hours) for 60/20/20 split.
     #       Use calculate_timesteps.py to compute custom configurations.
     
     # Time-series data configuration
-    hours_per_day = 24      # Number of hours in a day (fixed at 24)
+    hours_per_day = 24
     sequence_length = 5     # Sequence length for LSTM/GRU models (past N hours to predict current)
     
     # === MODEL CAPACITY CONFIGURATION ===
@@ -61,7 +55,6 @@ class Args:
     # │ 118-bus │ H:64-128, GC:2-8   │ H:96-160, GC:4-9     │ H:128-256, GC:6-12  │
     # └─────────┴────────────────────┴──────────────────────┴─────────────────────┘
     # H=Hidden_dim, GC=GC_layers, E=Embedding_dim
-    # Note: Wider ranges allow MoSOA to find optimal values without being restricted
     #
     CAPACITY_33_BUS = 'normal'   # 33-bus: normal is sufficient
     CAPACITY_57_BUS = 'normal'   # 57-bus: normal is sufficient  
@@ -85,20 +78,11 @@ class Args:
     # Worker configuration (auto-configured based on device if set to 'auto')
     data_workers = 'auto'         # Number of data loading workers
 
-
-# =============================================================================
-# MAIN CONFIGURATION CLASS
-# =============================================================================
-
 class Config:
     """
     Main configuration class for the project.
     Contains global settings and nested classes for model-specific hyperparameters.
     """
-    
-    # =============================================================================
-    # CONFIGURABLE PARAMETERS - Modify these for your experiments
-    # =============================================================================
     
     # --- Device & System Configuration ---
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -132,20 +116,13 @@ class Config:
     # S_BASE_MVA is determined dynamically based on system type in metrics.py
     # Case33: 10 MVA, Case57/118: 100 MVA
     
-    # =============================================================================
-    # LOSS WEIGHTING METHOD: Learnable Uncertainty Weighting (Kendall et al., CVPR 2018)
-    # =============================================================================
-    # State-of-the-art method with theoretical grounding (Bayesian interpretation)
+    # Loss weighting method: Learnable Uncertainty Weighting (Kendall et al., CVPR 2018)
     # Automatically learns optimal weights via backpropagation
     # Paper: "Multi-Task Learning Using Uncertainty to Weigh Losses"
     # No configuration needed - always uses learnable uncertainty weighting
 
     
-    # ETH Zurich Technique 4: Separate VM/VA backward passes
-    # WARNING: Experimental feature - may affect training stability
-    # When True: VM and VA gradients computed separately before physics gradients
-    # When False: Standard single backward pass (recommended for most cases)
-    USE_SEPARATE_VM_VA_BACKWARD = False  # Disabled by default (advanced users only)
+    USE_SEPARATE_VM_VA_BACKWARD = False
     
     
     # --- Data Mode Configuration (Set during __init__ from Args) ---
@@ -170,10 +147,6 @@ class Config:
         'sequential_only': ['PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU'],  # Sequential models only (LSTM/GRU)
         'all': ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']  # Everything
     }
-    
-    # =============================================================================
-    # MODEL CONFIGURATION TEMPLATE
-    # =============================================================================
     
     class _ModelConfig:
         """
@@ -218,7 +191,7 @@ class Config:
                     'large': (96, 160)     # Wider range: 96-160 (was 86-106)
                 },
                 118: {
-                    'normal': (64, 128),   # FIXED: Wider range includes 128 (was 32-64)
+                    'normal': (64, 128),
                     'medium': (96, 160),   # Wider range: 96-160 (was 86-106)
                     'large': (128, 256)    # Wider range: 128-256 (was 115-141)
                 }
@@ -339,11 +312,6 @@ class Config:
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
-
-    # =============================================================================
-    # MODEL-SPECIFIC CONFIGURATIONS
-    # =============================================================================
-    
     GCNConfig = _ModelConfig()
     
     AdaptivePIGCNConfig = _ModelConfig()
@@ -408,10 +376,6 @@ class Config:
     ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)
     ResnetPIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
     ResnetPIGCLSTMConfig.get_sequential_ranges = get_sequential_ranges
-
-    # =============================================================================
-    # PROPERTIES
-    # =============================================================================
     
     @property
     def CURRENT_RUN_DIR(self):
@@ -443,10 +407,6 @@ class Config:
             'ResnetPIGCLSTM': self.ResnetPIGCLSTMConfig
         }
     
-    # =============================================================================
-    # INITIALIZATION
-    # =============================================================================
-
     def __init__(self, data_mode='train', save_results=True, test_timesteps=100, clear_results=False, 
                  hours_per_day=24, sequence_length=5):
         """Initializes directories and sets up experimental run structure."""
@@ -462,9 +422,9 @@ class Config:
             try:
                 print(f"\n[Clear Results] Deleting experimental_results folder...")
                 shutil.rmtree(self.EXPERIMENTAL_RESULTS_DIR)
-                print(f"[Clear Results] ✓ Successfully deleted: {self.EXPERIMENTAL_RESULTS_DIR}")
+                print(f"[Clear Results] Successfully deleted: {self.EXPERIMENTAL_RESULTS_DIR}")
             except Exception as e:
-                print(f"[Clear Results] ✗ Warning: Could not delete experimental_results folder: {e}")
+                print(f"[Clear Results] Warning: Could not delete experimental_results folder: {e}")
         
         # Initialize DATA_MODE_TIMESTEPS with default values
         self.DATA_MODE_TIMESTEPS = {'train': 10000, 'test': test_timesteps}
@@ -504,20 +464,6 @@ class Config:
             
             # Create run metadata
             self._create_run_metadata()
-    
-    # =============================================================================
-    # STATIC METHODS - Configuration Helpers
-    # =============================================================================
-    
-    @staticmethod
-    def get_adaptive_batch_size(num_buses):
-        """Return appropriate batch size based on system size to prevent OOM"""
-        if num_buses <= 33:
-            return 32  # Reduced from 64
-        elif num_buses <= 57:
-            return 16  # Reduced from 32
-        else:
-            return 8   # Reduced from 16
     
     @staticmethod
     def get_model_class_map():
@@ -572,10 +518,6 @@ class Config:
         """Check if model uses adaptive graph features."""
         return model_name in ['PIGCLSTM', 'PIGCGRU', 'adaptiveGCN', 'AdaptivePIGCN', 'ResnetPIGCGRU', 'ResnetPIGCLSTM']
     
-    # =============================================================================
-    # INSTANCE METHODS - Path & Directory Helpers
-    # =============================================================================
-    
     def get_evaluation_path(self, filename):
         """Constructs a path in the evaluation directory."""
         return os.path.join(self.EVALUATION_DIR, filename)
@@ -607,10 +549,6 @@ class Config:
     def get_summary_path(self, num_buses: int, model_name: str) -> str:
         """Returns the summary CSV path for a specific model."""
         return os.path.join(self.get_model_eval_dir(num_buses, model_name), "summary.csv")
-    
-    # =============================================================================
-    # INSTANCE METHODS - Run Management (Private)
-    # =============================================================================
     
     def _initialize_run_timestamp(self):
         """Initialize the run timestamp - always create new timestamp for each run."""
@@ -676,10 +614,6 @@ class Config:
         metadata_file = os.path.join(self.CURRENT_RUN_DIR, 'run_metadata.json')
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
-    
-    # =============================================================================
-    # INSTANCE METHODS - Run Management (Public)
-    # =============================================================================
     
     def finalize_run(self, run_summary: dict = None):
         """Finalize the current run by updating latest_run and logging."""

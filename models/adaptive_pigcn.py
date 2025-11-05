@@ -15,8 +15,6 @@ class StateGraphLayer(nn.Module):
         output = self.linear(support) # Transformation
         return output
 
-# --- Corrected and Refactored AdaptivePIGCN ---
-
 class AdaptivePIGCN(BaseModel):
     def __init__(self, feature_dim: int = 10, hidden_dim: int = 64,
                  num_gc_layers: int = 3, num_buses: int = 118, dropout: float = 0.3,
@@ -60,8 +58,6 @@ class AdaptivePIGCN(BaseModel):
         
         # --- Graph Convolution Layers (shared between both heads if twin) ---
         self.gc_layers = nn.ModuleList()
-        # First layer: input_dim (10) -> hidden_dim
-        # CRITICAL: Use self.input_dim (feature_dim=10), NOT self.output_dim (2)
         assert self.input_dim == feature_dim, f"Input dim mismatch: {self.input_dim} != {feature_dim}"
         self.gc_layers.append(StateGraphLayer(self.input_dim, hidden_dim))
         # Subsequent layers: hidden_dim -> hidden_dim
@@ -138,16 +134,5 @@ class AdaptivePIGCN(BaseModel):
         # Single head: Combined output [batch, buses, 2]
         # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
         x = self.output_layer(x)  # Should be [batch_size, num_buses, 2]
-        
-        # DEBUG: Check output shape
-        if x.shape[-1] != 2:
-            print(f"[DEBUG AdaptivePIGCN] Unexpected output shape: {x.shape}, expected last dim=2")
-            print(f"[DEBUG AdaptivePIGCN] output_layer: {self.output_layer}, output_dim={self.output_dim}")
-            print(f"[DEBUG AdaptivePIGCN] x before output_layer: {x.shape if hasattr(x, 'shape') else 'N/A'}")
-        
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
-        # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
-        # - If model predicts invalid values, physics loss will penalize it
-        # - This exposes the root cause instead of hiding it with ReLU
         
         return x

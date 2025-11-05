@@ -271,7 +271,7 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
     Uses professional box plots matching data_profile_story quality.
     """
     if renewable_impact_data.empty:
-        print(f"ℹ  No renewable impact data to plot for {model_name}")
+        print(f"No renewable impact data to plot for {model_name}")
         return
         
     # Update metrics dictionary to match column names in renewable_impact_data

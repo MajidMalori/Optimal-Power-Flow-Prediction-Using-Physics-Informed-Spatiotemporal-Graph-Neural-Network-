@@ -50,7 +50,6 @@ class PIGCGRU(BaseModel):
         # --- End: Components from adaptiveGCN ---
         
         # The size of the vector fed into the GRU is the flattened representation of all node embeddings.
-        # CRITICAL FIX: Limit GRU size to prevent CUDA memory issues
         gru_io_size = hidden_dim * num_buses
         # For larger systems, use a more memory-efficient GRU size
         if num_buses >= 57:
@@ -125,7 +124,6 @@ class PIGCGRU(BaseModel):
         last_step_output = gru_out[:, -1, :]
         
         # 6. Reshape the final time step's output to per-node features.
-        # CRITICAL FIX: Handle reduced GRU output size for memory efficiency
         if self.gru_projection is not None:
             # For larger systems with reduced GRU size, project back to the original size
             projected_output = self.gru_projection(last_step_output)
@@ -137,6 +135,5 @@ class PIGCGRU(BaseModel):
         # 7. Apply the final transformation to get the desired output shape.
         # Single head: Combined output
         final_output_per_node = self.output_transform(last_step_per_node)
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
         # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
         return final_output_per_node

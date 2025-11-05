@@ -204,9 +204,7 @@ def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybu
         outputs_denorm_mse = normalizer.denormalize(outputs_for_mse)
         targets_denorm_mse = normalizer.denormalize(targets_for_mse)
         
-        # CRITICAL FIX: Voltages are ALREADY in per-unit (vm_pu) and radians (va_rad)
-        # Do NOT divide by S_BASE^2 - that's only for power normalization!
-        # MSE is already in correct units: per-unit^2 for voltage magnitude, rad^2 for angle
+        # Voltages are already in per-unit and radians
         mse_physical = F.mse_loss(outputs_denorm_mse, targets_denorm_mse).item()
         mse = mse_physical  # Already in per-unit^2 (vm) + rad^2 (va)
         rmse = torch.sqrt(torch.tensor(mse)).item()
@@ -293,7 +291,6 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
         else:
             raise ValueError(f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, expected {expected_size}")
     
-    # FIXED: Use normalized data for MoSOA (same as training)
     # This ensures consistent evaluation scale between training and optimization
     all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None
     return compute_metrics_normalized(all_outputs_tensor, all_targets_tensor, all_ybus_tensor, config, normalizer, bus_types=all_bus_types_tensor)
@@ -330,7 +327,6 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 else:
                     raise ValueError(f"Unexpected flattened output size: {outputs_norm.shape[1]}, expected {expected_size}")
             
-            # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
             outputs_phys = normalizer.denormalize(outputs_norm)  # [batch, buses, 2] = [vm, va]
             # Handle sequential models: features can be [batch, seq_len, buses, features]
@@ -374,12 +370,11 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
 
             if is_physics_informed:
                 # Calculate test MSE for physics-informed models (consistent with training)
-                # CRITICAL FIX: Voltages ALREADY in per-unit - don't divide by S_BASE^2!
                 targets = batch['targets'].to(device)
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                test_mse = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
+                test_mse = mse_physical
                 
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
@@ -397,7 +392,7 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                mse_normalized = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
+                mse_normalized = mse_physical
                 all_results.append({
                     'mse_score': mse_normalized.item()  # MSE in per-unit squared (consistent with training)
                 })
@@ -431,7 +426,6 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
                 num_features = 2  # OPF mode: 2 unknowns per bus (varies by bus type)
                 outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
             
-            # FIXED: Use normalized data for MOOPF evaluation (same as training)
             # Only denormalize for physics calculations that require physical units
             outputs_phys = normalizer.denormalize(outputs_norm)  # [batch, buses, 2] = [vm, va]
             # Handle sequential models: features can be [batch, seq_len, buses, features]
@@ -475,12 +469,11 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
 
             if is_physics_informed:
                 # Calculate test MSE for physics-informed models (consistent with training)
-                # CRITICAL FIX: Voltages ALREADY in per-unit - don't divide by S_BASE^2!
                 targets = batch['targets'].to(device)
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                test_mse = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
+                test_mse = mse_physical
                 
                 moopf_score = (w_loss * norm_loss + w_vdev * norm_vdev + w_carbon * emissions['normalized'])
                 all_results.append({
@@ -498,52 +491,12 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
                 targets_phys = normalizer.denormalize(targets)
                 mse_physical = F.mse_loss(outputs_phys, targets_phys)
                 s_base_mva = physics_calculator.s_base_mva
-                mse_normalized = mse_physical  # CRITICAL FIX: Voltages already in per-unit, don't divide by S_BASE^2!
+                mse_normalized = mse_physical
                 all_results.append({
                     'mse_score': mse_normalized.item()  # MSE in per-unit squared (consistent with training)
                 })
 
     return pd.DataFrame(all_results), pd.DataFrame(renewable_impact_data)
-
-
-def create_iteration_wise_results(iteration_details: List[Dict], param_keys: List[str], 
-                                 config: Any, model_name: str) -> pd.DataFrame:
-    """
-    Create iteration-wise results DataFrame showing best configuration per iteration.
-    
-    Args:
-        iteration_details: List of iteration details from MoSOA
-        param_keys: List of parameter names
-        config: Configuration object
-        model_name: Name of the model
-        
-    Returns:
-        DataFrame with iteration-wise best configurations
-    """
-    iteration_results = []
-    
-    for details in iteration_details:
-        if details['best_position'] is not None:
-            # Convert position to parameter dictionary
-            params = {key: val for key, val in zip(param_keys, details['best_position'])}
-            
-            # Convert integer parameters
-            for k in ['HIDDEN_DIM', 'NUM_GC_LAYERS', 'SEQUENCE_LENGTH', 'RNN_LAYERS', 'EMBEDDING_DIM']:
-                if k in params:
-                    params[k] = int(round(params[k]))
-            
-            # Create result row
-            result_row = {
-                'model_name': model_name,
-                'iteration': details['iteration'],
-                'iteration_best_score': details['best_score'],
-                'global_best_score': details['global_best_score'],
-                'num_evaluations': details['num_valid_evaluations'],
-                **params  # Add all hyperparameters
-            }
-            iteration_results.append(result_row)
-    
-    return pd.DataFrame(iteration_results)
 
 
 def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any], 
@@ -663,7 +616,7 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
         except Exception as e:
             print(f"  Warning: Could not create renewable impact plots for {model_name}: {e}")
     else:
-        print(f"ℹ  Skipping renewable impact plots for non-physics-informed model: {model_name}")
+        print(f"Skipping renewable impact plots for non-physics-informed model: {model_name}")
 
 
 def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any = None):
@@ -785,7 +738,6 @@ def print_model_summary(best_run: Dict[str, Any], moopf_results: pd.DataFrame,
     print(f" BEST MODEL SUMMARY: {model_name} on {num_buses}-bus system")
     print(f"{'='*60}")
     print(f" Best Hyperparameters: {best_run.get('HIDDEN_DIM', 'N/A')} hidden_dim, {best_run.get('NUM_GC_LAYERS', 'N/A')} GC layers")
-    # FIXED: Use normalized MSE from training history instead of denormalized test MSE
     training_mse = best_run.get('training_mse', best_run.get('mse', 'N/A'))
     print(f" Training Performance: MSE = {training_mse:.6g}")
     

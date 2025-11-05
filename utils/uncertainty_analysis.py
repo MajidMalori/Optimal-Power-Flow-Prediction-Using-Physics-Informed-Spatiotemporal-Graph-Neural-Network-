@@ -91,7 +91,6 @@ def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray,
     errors_combined = np.sqrt(errors_feat0**2 + errors_feat1**2)  # [n_samples, n_buses]
     
     # Get unique renewable fractions
-    # IMPORTANT: Round to 1 decimal place to avoid floating point precision issues
     # This ensures keys like 0.2 don't become 0.19999999 or 0.20000001
     renewable_fractions_rounded = np.round(renewable_fractions, decimals=1)
     unique_fractions = np.unique(renewable_fractions_rounded)
@@ -141,7 +140,6 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
     fig = plt.figure(figsize=(18, 12))
     gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
     
-    # FIXED: Expect all 6 standard renewable fractions
     expected_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     available_fractions = set(uncertainty_data.keys())
     
@@ -227,7 +225,6 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     """
     fig, ax = plt.subplots(figsize=(14, 8))
     
-    # FIXED: Use only available fractions, handle missing gracefully
     fractions = sorted(uncertainty_data.keys())
     
     if not fractions:

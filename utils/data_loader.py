@@ -1,5 +1,3 @@
-# In utils/data_loader.py
-
 import os
 import torch
 import numpy as np
@@ -16,7 +14,7 @@ class PowerSystemNormalizer:
     - Features (inputs): 10 measurements [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
     - Targets (outputs): 2 unknowns per bus, bus-type dependent [PQ: V,θ | PV: Q,θ | Slack: P,Q]
     
-    CRITICAL: All targets are in consistent units for proper normalization:
+    All targets are in consistent units for proper normalization:
     - V: per-unit (0.95-1.05)
     - θ: radians (-0.5 to 0.5)
     - P, Q: per-unit (converted from MW/MVar by dividing by S_BASE)
@@ -310,7 +308,7 @@ def load_power_system_data(config, case_name):
         if static_adjacency_matrix.ndim != 2 or static_adjacency_matrix.shape[0] != static_adjacency_matrix.shape[1]:
              raise ValueError(f"Conversion to dense matrix failed. Final shape is not square: {static_adjacency_matrix.shape}.")
     except Exception as e:
-        print(f"\n[CRITICAL ERROR] Failed during adjacency matrix loading and conversion: {e}")
+        print(f"\nError: Failed during adjacency matrix loading and conversion: {e}")
         raise
 
     all_features, all_ybus, all_targets = [], [], []
@@ -318,12 +316,9 @@ def load_power_system_data(config, case_name):
     all_energy_coeffs, all_carbon_coeffs = [], []
     all_renewable_fractions = []  # Track renewable fractions for each data file
     
-    # Note: Generation components are now included in the features/targets matrices
     
     for f_path in feature_files:
-        # --- START CORRECTION: Update filenames to match new saved data ---
         ybus_path = f_path.replace('features', 'ybus_matrices')
-        # --- END CORRECTION ---
         targets_path = f_path.replace('features', 'targets')
         energy_path = f_path.replace('features', 'time_energy_coeffs').replace('.npy', '.txt')
         carbon_path = f_path.replace('features', 'time_carbon_coeffs').replace('.npy', '.txt')
@@ -376,31 +371,27 @@ def load_power_system_data(config, case_name):
                 all_bus_types.append(np.load(bus_types_path))
             else:
                 # Fallback: If bus_types not found, assume all PQ buses (backward compatibility)
-                print(f"[Warning] bus_types file not found: {bus_types_path}. Assuming all PQ buses.")
+                print(f"Warning: bus_types file not found: {bus_types_path}. Assuming all PQ buses.")
                 all_bus_types.append(np.zeros((num_timesteps, num_buses), dtype=np.int32))
             
             all_energy_coeffs.append(np.loadtxt(energy_path))
             all_carbon_coeffs.append(np.loadtxt(carbon_path))
             
-            # Note: Generation components are now included in the features/targets matrices
             
             # Create renewable fraction array for this data file
             renewable_fractions_for_file = np.full(features_data.shape[0], renewable_fraction)
             all_renewable_fractions.append(renewable_fractions_for_file)
         except FileNotFoundError as e:
-            print(f"\n[CRITICAL ERROR] A required data file is missing: {e.filename}")
+            print(f"\nError: A required data file is missing: {e.filename}")
             print("Please ensure you have run 'gen_meas_best.py' to generate all necessary data files.")
             raise e
 
-    # --- START CORRECTION: Concatenate all data arrays along the time axis ---
     concatenated_features = np.concatenate(all_features, axis=0)
     concatenated_targets = np.concatenate(all_targets, axis=0)
     concatenated_bus_types = np.concatenate(all_bus_types, axis=0) if all_bus_types else None
     concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0)
     concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0)
     concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0)
-    
-    # Note: Generation components are now included in the features/targets matrices
     
     # Handle Ybus - merge lazy loading data or concatenate pre-loaded arrays
     if all(isinstance(yb, dict) and 'lazy' in yb for yb in all_ybus):
@@ -417,12 +408,11 @@ def load_power_system_data(config, case_name):
         concatenated_ybus = np.concatenate(all_ybus, axis=0)
     else:
         raise ValueError("Mixed Ybus formats detected - all scenarios must use the same format (lazy or pre-loaded)")
-    # --- END CORRECTION ---
 
     # Create normalizer with BOTH features and targets (for pure state estimation)
     normalizer = PowerSystemNormalizer(concatenated_features, concatenated_targets)
     features_norm = normalizer.normalize(concatenated_features)
-    targets_norm = normalizer.normalize(concatenated_targets)  # CRITICAL: Normalize targets too!
+    targets_norm = normalizer.normalize(concatenated_targets)
     print(f"[Data] Loaded {len(feature_files)} scenarios -> {concatenated_features.shape[0]} samples")
     print(f"[Data] Features shape: {concatenated_features.shape} (measurements: {concatenated_features.shape[-1]} dims)")
     print(f"[Data] Targets shape: {concatenated_targets.shape} (unknowns: {concatenated_targets.shape[-1]} dims)")

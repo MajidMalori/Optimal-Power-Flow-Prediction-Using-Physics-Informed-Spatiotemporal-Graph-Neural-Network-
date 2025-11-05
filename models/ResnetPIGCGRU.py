@@ -1,5 +1,3 @@
-# In models/ResnetPIGCGRU.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,7 +6,7 @@ from .base_model import BaseModel
 class ResnetPIGCGRU(BaseModel):
     """
     A Physics-Informed Graph Convolutional GRU with Residual Connections.
-    This version is corrected to handle an unbatched, static adjacency matrix,
+,
     expand it internally, and properly manage hidden states across stacked GRU layers.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float,
@@ -23,7 +21,6 @@ class ResnetPIGCGRU(BaseModel):
 
         self.phi = phi
         self.embedding_dim = embedding_dim
-        # Note: rnn_layers, num_buses, hidden_dim are stored in BaseModel
 
         # Learnable node embeddings for the adaptive graph
         self.node_embedding1 = nn.Parameter(torch.randn(self.num_buses, embedding_dim))
@@ -106,6 +103,5 @@ class ResnetPIGCGRU(BaseModel):
         
         # Single head: Combined output
         final_output_per_node = self.output_transform(last_step_per_node)
-        # ROOT CAUSE DETECTION: NO CLIPPING - Let physics loss handle constraints
         # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
         return final_output_per_node

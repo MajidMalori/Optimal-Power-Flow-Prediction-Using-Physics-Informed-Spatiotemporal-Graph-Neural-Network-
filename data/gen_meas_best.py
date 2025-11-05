@@ -1,12 +1,10 @@
-# File: data/gen_meas_best.py
-
 import os
 import traceback
 import json
 import warnings
 import sys
 
-# Aggressively suppress numba/pandapower warnings and print statements
+# Suppress numba/pandapower warnings
 warnings.filterwarnings('ignore', message='.*numba.*')
 warnings.filterwarnings('ignore', message='.*Please install numba.*')
 warnings.filterwarnings('ignore', message='.*numba cannot be imported.*')
@@ -36,9 +34,7 @@ import networkx as nx
 import copy
 from datetime import datetime
 
-# =============================================================================
 # SECTION 1: CONFIGURATION
-# =============================================================================
 CONFIG = {
     "random_seed": 42,  # For reproducibility - set to None for non-deterministic behavior
     "test_cases": ["case33", "case57", "case118"],  # Focus on larger systems since 33-bus is confirmed working
@@ -61,14 +57,12 @@ CONFIG = {
     "hours_per_day": 24,  # Number of hours in a day
     "num_days": None,  # Will be calculated from time_steps and hours_per_day
     
-    # Weather-driven renewable variability (NEW FIX for realistic uncertainty)
+    # Weather-driven renewable variability
     "use_weather_driven_renewables": True,  # True: Weather-based variability (realistic), False: Deterministic time-of-day patterns (legacy)
     "seed": 42,  # Random seed for weather simulation (reproducibility)
 }
 
-# =============================================================================
 # SECTION 2: HELPER FUNCTIONS
-# =============================================================================
 
 def get_daily_load_profile(hour: int, season: str = 'summer') -> float:
     """
@@ -148,8 +142,6 @@ def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_stat
     # Season factor (summer stronger, winter weaker)
     season_factor = 0.85 + 0.15 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
     
-    # WEATHER-DRIVEN VARIABILITY (replaces fixed 0.7-1.0 range)
-    # This is the KEY FIX for realistic renewable uncertainty
     if weather_state is None:
         # If no weather state provided, randomly choose (backwards compatible)
         weather_state = np.random.choice(['clear', 'partly_cloudy', 'cloudy', 'storm'], 
@@ -180,7 +172,6 @@ def get_wind_generation_profile(hour: int, day: int = 0, weather_state: str = No
     Returns:
         Wind generation multiplier (0 = calm, 1 = maximum wind output)
     """
-    # WEATHER-DRIVEN MODEL (replaces fixed time-of-day patterns)
     # Wind is primarily weather-driven, NOT time-driven
     
     if weather_state is None:
@@ -525,7 +516,6 @@ def identify_bus_types(net: pp.pandapowerNet) -> np.ndarray:
     
     # Identify PV buses (conventional generators with voltage control)
     # PV buses have gen connected (not ext_grid, not just load/sgen)
-    # Note: If a gen hits Q limits during power flow, pandapower may convert it to PQ,
     # but we use static classification for training data consistency
     gen_buses = set(net.gen.bus.values)
     for bus_idx in gen_buses:
@@ -541,7 +531,7 @@ def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarr
     - PV bus: Predict [Q, θ] (unknowns, V is known/specified)
     - Slack bus: Predict [P, Q] (unknowns, V and θ are known/specified)
     
-    CRITICAL: All targets are normalized to per-unit for consistent scaling:
+    All targets are normalized to per-unit for consistent scaling:
     - V: Already in per-unit (vm_pu)
     - θ: In radians (typically -0.5 to 0.5)
     - P, Q: Converted to per-unit by dividing by net.sn_mva
@@ -595,9 +585,7 @@ def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarr
     
     return targets
 
-# =============================================================================
 # SECTION 3: SIMULATION AND SAVING
-# =============================================================================
 
 def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     """
@@ -616,7 +604,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     time_energy_coeffs = np.zeros(time_steps)
     time_carbon_coeffs = np.zeros(time_steps)
     
-    # Note: Generation components are now included in the feature/target matrices
     # No need for separate storage
     
     # Sparse Ybus storage: base + contingencies only
@@ -662,7 +649,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     solar_gens = net.sgen[net.sgen.type == 'solar'] if 'type' in net.sgen.columns else pd.DataFrame()
     wind_gens = net.sgen[net.sgen.type == 'wind'] if 'type' in net.sgen.columns else pd.DataFrame()
     
-    # FIXED CAPACITY SCALING (prevents generation-load imbalance)
     # Key insight: Total renewable capacity should be sized to serve peak load, not per-generator
     # At 100% renewable fraction, total capacity should be ~80-90% of peak load (realistic with diversity)
     
@@ -1123,9 +1109,7 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
             print(f"Saving array data to '{filename}'...")
             np.save(filename, data, allow_pickle=True)
 
-# =============================================================================
 # SECTION 4: MAIN EXECUTION BLOCK
-# =============================================================================
 if __name__ == "__main__":
     import sys
     import random

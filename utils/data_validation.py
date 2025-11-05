@@ -385,14 +385,14 @@ def monitor_data_generation_progress_per_system(config, stop_event):
             # Check if we're done
             if current_count >= total_expected_files:
                 pbar.update(total_expected_files - pbar.n)  # Complete the bar
-                pbar.set_description("✓ Data generation complete")
+                pbar.set_description("Data generation complete")
                 pbar.close()
                 return
             
             time.sleep(0.2)  # Check every 0.2 seconds
             
     except KeyboardInterrupt:
-        pbar.set_description("⚠ Interrupted")
+        pbar.set_description("Interrupted")
         pbar.close()
         raise
     finally:
@@ -431,7 +431,7 @@ def clean_existing_data(config, aggressive=True):
             print(f"Performing aggressive cleanup: removing entire directory...")
             shutil.rmtree(data_dir)
             os.makedirs(data_dir, exist_ok=True)
-            print(f"✓ Successfully cleaned and recreated: {data_dir}")
+            print(f"Successfully cleaned and recreated: {data_dir}")
             print("   All previous data has been completely removed.\n")
             return
         except Exception as e:
@@ -467,7 +467,7 @@ def clean_existing_data(config, aggressive=True):
                 print(f"WARNING: Could not remove {filepath}: {e}")
     
     if files_removed > 0:
-        print(f"✓ Removed {files_removed} data files from {config.DATA_MODE} folder.")
+        print(f"Removed {files_removed} data files from {config.DATA_MODE} folder.")
         print("   Ready for fresh data generation.\n")
     else:
         print("No existing data files found to clean.\n")
@@ -506,14 +506,14 @@ def generate_data_if_missing(config) -> bool:
     if not data_exist:
         needs_regeneration = True
         regeneration_reason.append(f"Missing {len(missing_files)} data files")
-        print(f"\n❌ VALIDATION FAILED: {len(missing_files)} files missing")
+        print(f"\nValidation failed: {len(missing_files)} files missing")
         print("   Examples:")
         for i, file in enumerate(missing_files[:5]):
             print(f"      - {file}")
         if len(missing_files) > 5:
             print(f"      ... and {len(missing_files) - 5} more files")
     else:
-        print("\n✓ All files present")
+        print("\nAll files present")
         
         # Even if files exist, validate consistency
         is_consistent, consistency_reason = check_data_consistency(config)
@@ -521,14 +521,14 @@ def generate_data_if_missing(config) -> bool:
         if not is_consistent:
             needs_regeneration = True
             regeneration_reason.append(consistency_reason)
-            print(f"❌ VALIDATION FAILED: {consistency_reason}")
+            print(f"Validation failed: {consistency_reason}")
         else:
-            print(f"✓ Data consistent: {consistency_reason}")
+            print(f"Data consistent: {consistency_reason}")
     
     # STEP 3: If data is valid, skip generation
     if not needs_regeneration:
         print("\n" + "="*80)
-        print("✓ DATA VALIDATION PASSED - Using existing data")
+        print("Data validation passed - Using existing data")
         print("="*80)
         return True
     
@@ -553,19 +553,18 @@ def generate_data_if_missing(config) -> bool:
         remaining_files.extend(glob.glob(os.path.join(data_dir, pattern)))
     
     if remaining_files:
-        print(f"\n⚠ WARNING: {len(remaining_files)} files still remain after cleanup:")
+        print(f"\nWarning: {len(remaining_files)} files still remain after cleanup:")
         for f in remaining_files[:5]:
             print(f"   - {os.path.basename(f)}")
         print("   Waiting for filesystem sync...")
         time.sleep(2)
     else:
-        print("✓ Cleanup verified: All old data removed")
+        print("Cleanup verified: All old data removed")
     
-    # CRITICAL: Synchronization delay before starting progress monitoring
     # This ensures file deletion is complete and filesystem is ready
     print("   Synchronizing filesystem (2 seconds)...")
     time.sleep(2)
-    print("✓ Filesystem synchronized\n")
+    print("Filesystem synchronized\n")
     
     # STEP 5: Generate fresh data with tqdm progress bar
     print(f"{'='*80}")
@@ -576,7 +575,7 @@ def generate_data_if_missing(config) -> bool:
         data_gen_script = os.path.join("data", "gen_meas_best.py")
         
         if not os.path.exists(data_gen_script):
-            print(f"❌ ERROR: Data generation script not found: {data_gen_script}")
+            print(f"Error: Data generation script not found: {data_gen_script}")
             return False
         
         # Run data generation with tqdm progress monitoring
@@ -624,7 +623,7 @@ def generate_data_if_missing(config) -> bool:
             print(result.stderr)
         
         if result.returncode != 0:
-            print(f"\n❌ ERROR: Data generation failed (exit code {result.returncode})")
+            print(f"\nError: Data generation failed (exit code {result.returncode})")
             return False
         
         # STEP 6: Verify generation was successful
@@ -635,28 +634,28 @@ def generate_data_if_missing(config) -> bool:
         data_exist_after, remaining_missing = check_data_files_exist(config)
         
         if data_exist_after:
-            print("✓ All required files successfully generated")
+            print("All required files successfully generated")
             
             # Double-check consistency
             is_consistent_after, reason_after = check_data_consistency(config)
             if is_consistent_after:
-                print(f"✓ Generated data is consistent: {reason_after}")
+                print(f"Generated data is consistent: {reason_after}")
                 print(f"\n{'='*80}")
-                print("✓✓✓ DATA GENERATION SUCCESSFUL ✓✓✓")
+                print("Data generation successful")
                 print(f"{'='*80}\n")
                 return True
             else:
-                print(f"❌ Generated data has consistency issues: {reason_after}")
+                print(f"Generated data has consistency issues: {reason_after}")
                 return False
         else:
-            print(f"❌ Generation incomplete: {len(remaining_missing)} files still missing")
+            print(f"Generation incomplete: {len(remaining_missing)} files still missing")
             print("   Examples:")
             for missing in remaining_missing[:5]:
                 print(f"      - {missing}")
             return False
             
     except Exception as e:
-        print(f"\n❌ ERROR: Exception during data generation: {e}")
+        print(f"\nError: Exception during data generation: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -729,11 +728,10 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
             if frac in all_data[num_buses]:
                 stats = all_data[num_buses][frac]
                 has_cont_fail = len(stats['failed_with_contingency']) > 0
-                icon = "⚠" if has_cont_fail else "✓"
+                status = "W" if has_cont_fail else "OK"
                 rate = stats['success_rate']
                 
-                # Simple display showing just icon and success rate
-                cell = f"{icon} {rate:5.1f}%"
+                cell = f"{status} {rate:5.1f}%"
                 
                 # Pad to fixed width
                 row += f"| {cell:<{col_width-3}} "
@@ -746,7 +744,7 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
     
     # Check if ANY data was found
     if total_timesteps == 0:
-        print("\n⚠ WARNING: No convergence data found!")
+        print("\nWarning: No convergence data found!")
         print("  Data may not have been generated yet.")
         print("  Data will be generated automatically if missing.")
         print("="*80)
@@ -847,9 +845,6 @@ def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
         except Exception as e:
             print(f"Warning: Could not display convergence analysis: {e}")
         
-        # Note: Data profile story is now generated automatically during training
-        # when GENERATE_DATA_PROFILE_STORY=True in config
-        # This provides professional graphs telling the story of your data
         print("\nReady for training!")
     else:
         print("\nData validation failed!")
