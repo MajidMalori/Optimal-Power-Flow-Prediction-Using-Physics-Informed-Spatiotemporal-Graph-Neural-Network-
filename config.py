@@ -16,7 +16,8 @@ class Args:
     seed = 42
     
     # === DATA CONFIGURATION ===
-    data_mode = 'test'  # Options: 'train' or 'test'
+    data_mode = 'train'  # Options: 'train' or 'test'
+    train_timesteps = 12000  # Number of timesteps for train mode (500 days = 300+100+100 for 60/20/20 split)
     test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
     
     # Data profile story configuration
@@ -127,7 +128,7 @@ class Config:
     
     # --- Data Mode Configuration (Set during __init__ from Args) ---
     # DATA_MODE and DATA_MODE_TIMESTEPS are set dynamically in __init__()
-    # Modify Args.data_mode and Args.test_timesteps at the top of this file instead
+    # Modify Args.data_mode, Args.train_timesteps, and Args.test_timesteps at the top of this file instead
     
     # --- Project Structure ---
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -407,7 +408,7 @@ class Config:
             'ResnetPIGCLSTM': self.ResnetPIGCLSTMConfig
         }
     
-    def __init__(self, data_mode='train', save_results=True, test_timesteps=100, clear_results=False, 
+    def __init__(self, data_mode='train', save_results=True, train_timesteps=None, test_timesteps=100, clear_results=False, 
                  hours_per_day=24, sequence_length=5):
         """Initializes directories and sets up experimental run structure."""
         # Set save_results flag
@@ -426,8 +427,10 @@ class Config:
             except Exception as e:
                 print(f"[Clear Results] Warning: Could not delete experimental_results folder: {e}")
         
-        # Initialize DATA_MODE_TIMESTEPS with default values
-        self.DATA_MODE_TIMESTEPS = {'train': 10000, 'test': test_timesteps}
+        # Initialize DATA_MODE_TIMESTEPS - use Args values if not provided, fallback to defaults
+        if train_timesteps is None:
+            train_timesteps = Args.train_timesteps
+        self.DATA_MODE_TIMESTEPS = {'train': train_timesteps, 'test': test_timesteps}
         
         # Set data mode and validate
         self.DATA_MODE = data_mode

@@ -203,6 +203,7 @@ def main():
     base_config = Config(
         data_mode=args.data_mode, 
         save_results=args.save_results, 
+        train_timesteps=Args.train_timesteps,
         test_timesteps=args.test_timesteps, 
         clear_results=args.clear_results,
         hours_per_day=args.hours_per_day,
