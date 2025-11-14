@@ -53,21 +53,22 @@ def _plot_training_history_impl(history: Dict[str, list], model_name: str, confi
     fig1, axes1 = plt.subplots(2, 2, figsize=(14, 10))
     fig1.suptitle(f'Training History - {model_name}', fontsize=16, fontweight='bold')
     
-    # Top-left: Total Loss
-    axes1[0, 0].plot(history['train_total_loss'] if is_physics_informed else history['train_mse'], 
-                     label='Train', linewidth=2)
-    axes1[0, 0].plot(history['val_total_loss'] if is_physics_informed else history['val_mse'], 
-                     label='Validation', linewidth=2)
-    axes1[0, 0].set_title('Total Loss', fontweight='bold')
+    # Top-left: RMSE (for all models - more interpretable than total loss)
+    # Professional practice: Show components separately, not total (different units)
+    train_rmse = [mse**0.5 for mse in history['train_mse']]
+    val_rmse = [mse**0.5 for mse in history['val_mse']]
+    axes1[0, 0].plot(train_rmse, label='Train', linewidth=2)
+    axes1[0, 0].plot(val_rmse, label='Validation', linewidth=2)
+    axes1[0, 0].set_title('RMSE', fontweight='bold')
     axes1[0, 0].set_xlabel('Epoch')
-    axes1[0, 0].set_ylabel('Loss')
+    axes1[0, 0].set_ylabel('RMSE')
     axes1[0, 0].legend()
     axes1[0, 0].grid(True, alpha=0.3)
     
-    # Top-right: Combined MSE
+    # Top-right: MSE (Prediction Error)
     axes1[0, 1].plot(history['train_mse'], label='Train', linewidth=2)
     axes1[0, 1].plot(history['val_mse'], label='Validation', linewidth=2)
-    axes1[0, 1].set_title('Combined MSE', fontweight='bold')
+    axes1[0, 1].set_title('MSE (Prediction Error)', fontweight='bold')
     axes1[0, 1].set_xlabel('Epoch')
     axes1[0, 1].set_ylabel('MSE')
     axes1[0, 1].legend()
@@ -104,16 +105,19 @@ def _plot_training_history_impl(history: Dict[str, list], model_name: str, confi
         axes1[1, 1].legend()
         axes1[1, 1].grid(True, alpha=0.3)
     else:
-        # For non-physics models, show learning rate
-        if 'learning_rates' in history and len(history['learning_rates']) > 0:
-            axes1[1, 1].plot(history['learning_rates'], linewidth=2, color='purple')
-            axes1[1, 1].set_title('Learning Rate Schedule', fontweight='bold')
+        # For non-physics models, show MSE breakdown by variable (if available)
+        if 'train_mse_var1' in history and 'train_mse_var2' in history:
+            axes1[1, 1].plot(history['train_mse_var1'], label='Train Var1', linewidth=2, color='blue')
+            axes1[1, 1].plot(history['train_mse_var2'], label='Train Var2', linewidth=2, color='red')
+            axes1[1, 1].plot(history['val_mse_var1'], label='Val Var1', linewidth=2, color='blue', linestyle='--')
+            axes1[1, 1].plot(history['val_mse_var2'], label='Val Var2', linewidth=2, color='red', linestyle='--')
+            axes1[1, 1].set_title('MSE by Variable', fontweight='bold')
             axes1[1, 1].set_xlabel('Epoch')
-            axes1[1, 1].set_ylabel('Learning Rate')
-            axes1[1, 1].set_yscale('log')
+            axes1[1, 1].set_ylabel('MSE')
+            axes1[1, 1].legend()
             axes1[1, 1].grid(True, alpha=0.3)
         else:
-            axes1[1, 1].text(0.5, 0.5, 'Learning rate\ndata not available', 
+            axes1[1, 1].text(0.5, 0.5, 'MSE breakdown\nnot available', 
                            ha='center', va='center', fontsize=12,
                            bbox=dict(boxstyle='round', facecolor='lightgray'))
             axes1[1, 1].axis('off')
@@ -133,12 +137,23 @@ def _plot_training_history_impl(history: Dict[str, list], model_name: str, confi
     # Check if learnable uncertainty tracking is available
     has_learnable_uncertainty = ('sigma_data' in history and len(history['sigma_data']) > 0)
     
+    # Check if heteroscedastic mode is enabled
+    use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False) if config else False
+    
     # Top-left: Learnable Uncertainty (σ)
     if has_learnable_uncertainty:
-        axes2[0, 0].plot(history['sigma_data'], label='σ_data', linewidth=2, color='purple')
-        axes2[0, 0].plot(history['sigma_power'], label='σ_power', linewidth=2, color='red')
-        axes2[0, 0].plot(history['sigma_voltage'], label='σ_voltage', linewidth=2, color='blue')
-        axes2[0, 0].set_title('Learnable Uncertainty (σ)', fontweight='bold')
+        if use_heteroscedastic:
+            # Heteroscedastic mode: Data loss uses natural parametrization (per-sample, not a single σ)
+            # Only plot physics loss sigmas (Kendall-style weights)
+            axes2[0, 0].plot(history['sigma_power'], label='σ_power (Kendall)', linewidth=2, color='red')
+            axes2[0, 0].plot(history['sigma_voltage'], label='σ_voltage (Kendall)', linewidth=2, color='blue')
+            axes2[0, 0].set_title('Learnable Uncertainty (σ) - Physics Losses', fontweight='bold')
+        else:
+            # Homoscedastic mode: All losses use Kendall-style weights
+            axes2[0, 0].plot(history['sigma_data'], label='σ_data', linewidth=2, color='purple')
+            axes2[0, 0].plot(history['sigma_power'], label='σ_power', linewidth=2, color='red')
+            axes2[0, 0].plot(history['sigma_voltage'], label='σ_voltage', linewidth=2, color='blue')
+            axes2[0, 0].set_title('Learnable Uncertainty (σ)', fontweight='bold')
         axes2[0, 0].set_xlabel('Epoch')
         axes2[0, 0].set_ylabel('σ (uncertainty)')
         axes2[0, 0].legend()
@@ -166,16 +181,20 @@ def _plot_training_history_impl(history: Dict[str, list], model_name: str, confi
                         bbox=dict(boxstyle='round', facecolor='lightgray'))
         axes2[0, 1].axis('off')
     
-    # Bottom-left: Learning Rate Schedule
-    if 'learning_rates' in history and len(history['learning_rates']) > 0:
-        axes2[1, 0].plot(history['learning_rates'], linewidth=2, color='purple')
-        axes2[1, 0].set_title('Learning Rate Schedule', fontweight='bold')
+    # Bottom-left: Power and Voltage Violations (if physics-informed)
+    if is_physics_informed and 'train_power_violation' in history:
+        axes2[1, 0].plot(history['train_power_violation'], label='Train Power', linewidth=2, color='red')
+        axes2[1, 0].plot(history['val_power_violation'], label='Val Power', linewidth=2, color='red', linestyle='--')
+        axes2[1, 0].plot(history['train_voltage_violation'], label='Train Voltage', linewidth=2, color='blue')
+        axes2[1, 0].plot(history['val_voltage_violation'], label='Val Voltage', linewidth=2, color='blue', linestyle='--')
+        axes2[1, 0].set_title('Physics Violations', fontweight='bold')
         axes2[1, 0].set_xlabel('Epoch')
-        axes2[1, 0].set_ylabel('Learning Rate')
-        axes2[1, 0].set_yscale('log')
+        axes2[1, 0].set_ylabel('Violation')
+        axes2[1, 0].legend()
         axes2[1, 0].grid(True, alpha=0.3)
+        axes2[1, 0].set_yscale('log')
     else:
-        axes2[1, 0].text(0.5, 0.5, 'Learning rate\ndata not available', 
+        axes2[1, 0].text(0.5, 0.5, 'Physics violations\nnot available', 
                         ha='center', va='center', fontsize=12,
                         bbox=dict(boxstyle='round', facecolor='lightgray'))
         axes2[1, 0].axis('off')
@@ -362,7 +381,7 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
             ax.set_xticks(unique_fracs)
             ax.set_xticklabels([f'{f:.1f}' for f in unique_fracs], fontsize=11)
             ax.tick_params(axis='both', which='major', labelsize=10)
-            ax.legend(fontsize=10, loc='best', framealpha=0.95, edgecolor='black', linewidth=1)
+            ax.legend(fontsize=10, loc='best', framealpha=0.95, edgecolor='black', frameon=True)
             ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, axis='y')
             ax.set_axisbelow(True)  # Grid behind plots
             
@@ -582,7 +601,7 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
         ax.set_xticklabels([f'{f:.1f}' for f in unique_fracs], fontsize=12)
         ax.tick_params(axis='both', which='major', labelsize=11)
         ax.legend(loc='best', fontsize=10, framealpha=0.95, edgecolor='black', 
-                 linewidth=1, ncol=2 if len(physics_models) > 3 else 1)
+                 frameon=True, ncol=2 if len(physics_models) > 3 else 1)
         ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.8, axis='y')
         ax.set_axisbelow(True)  # Grid behind plots
         
@@ -684,7 +703,7 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
                        for i in range(len(physics_models))]
     fig.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, 0.02), 
               ncol=len(physics_models), fontsize=11, framealpha=0.95, 
-              edgecolor='black', linewidth=1)
+              edgecolor='black', frameon=True)
     
     plt.tight_layout(rect=[0, 0.05, 1, 0.98])
     

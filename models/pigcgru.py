@@ -10,7 +10,7 @@ class PIGCGRU(BaseModel):
     into a sequential GRU framework to capture spatio-temporal dynamics.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float, 
-                 embedding_dim: int = 16, phi: float = 0.5, **kwargs):
+                 embedding_dim: int = 16, phi: float = 0.5, use_heteroscedastic: bool = False, **kwargs):
         """
         Args:
             feature_dim (int): The number of input features for each node.
@@ -21,9 +21,13 @@ class PIGCGRU(BaseModel):
             dropout (float): The dropout rate.
             embedding_dim (int): The dimensionality of the node embeddings for the adaptive matrix.
             phi (float): The interpolation coefficient for blending physical and learned graphs (0 <= phi <= 1).
+            use_heteroscedastic (bool): If True, output 4 features (predictions + uncertainties)
         """
-        # Pure state estimation: output only voltage [vm, va]
-        output_dim = 2  # Only voltage magnitude and angle 
+        # Homoscedastic: output bus-type dependent unknowns [batch, buses, 2]
+        # Heteroscedastic: output [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        self.use_heteroscedastic = use_heteroscedastic
+        output_dim = 4 if use_heteroscedastic else 2
         super().__init__(
             feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim, 
             num_gc_layers=num_gc_layers, num_buses=num_buses, rnn_type='GRU', 
@@ -76,9 +80,11 @@ class PIGCGRU(BaseModel):
             self.gru_projection = None
         
         # Output Layer
-        # Single head: Combined output [batch, buses, 2]
-        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
-        self.output_transform = nn.Linear(hidden_dim, 2)  # Output: 2 features per bus
+        # Homoscedastic: [batch, buses, 2] = predictions only
+        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        output_features = 4 if use_heteroscedastic else 2
+        self.output_transform = nn.Linear(hidden_dim, output_features)
         self.dropout_layer = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
@@ -133,7 +139,8 @@ class PIGCGRU(BaseModel):
             last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
         
         # 7. Apply the final transformation to get the desired output shape.
-        # Single head: Combined output
+        # Homoscedastic: [batch, buses, 2] = predictions only
+        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
         final_output_per_node = self.output_transform(last_step_per_node)
-        # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
         return final_output_per_node

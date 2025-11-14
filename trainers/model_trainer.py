@@ -3,10 +3,8 @@ import numpy as np
 from tqdm import tqdm
 from collections import OrderedDict
 from .base_trainer import BaseTrainer
-from torch_geometric.utils import to_dense_adj
+# Removed to_dense_adj import - adjacency is always dense for time-series data
 import gc
-from torch.cuda.amp import autocast, GradScaler
-
 class PowerSystemTrainer(BaseTrainer):
     """
     Specific trainer for power system models. Implements the logic for a single
@@ -17,12 +15,16 @@ class PowerSystemTrainer(BaseTrainer):
         super().__init__(model, criterion, optimizer, config, device)
         self.is_physics_informed = is_physics_informed
         
-        # Initialize mixed precision scaler for GPU training (only if enabled in config)
-        use_mixed_precision = getattr(config, 'USE_MIXED_PRECISION', True)
-        self.scaler = GradScaler() if (torch.cuda.is_available() and use_mixed_precision) else None
+        # PERFORMANCE: Cache GPU availability check (checked once at init, not in every loop)
+        self.use_cuda = device.type == 'cuda'
     
     def _get_gradient_accumulation_steps(self):
-        """Calculate gradient accumulation steps based on system size to reduce memory usage"""
+        """Calculate gradient accumulation steps based on system size and config flag"""
+        # If accumulation is disabled, return 1 (no accumulation)
+        if not getattr(self.config, 'USE_GRADIENT_ACCUMULATION', True):
+            return 1
+        
+        # Otherwise, use accumulation based on system size to reduce memory usage
         num_buses = self.config.NUM_BUSES
         if num_buses >= 118:
             return 4  # Large systems: accumulate 4 batches
@@ -33,7 +35,7 @@ class PowerSystemTrainer(BaseTrainer):
 
     def _train_epoch(self, train_loader):
         self.model.train()
-        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_vm': 0, 'mse_va': 0, 'power_violation': 0, 'voltage_violation': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
         
         accumulation_steps = self._get_gradient_accumulation_steps()
         effective_batch_size = self.config.BATCH_SIZE * accumulation_steps
@@ -46,112 +48,119 @@ class PowerSystemTrainer(BaseTrainer):
             targets = batch['targets'].to(self.device, non_blocking=True)
             ybus = batch['ybus_matrix'].to(self.device, non_blocking=True)
             
-            # Optimized adjacency matrix handling
-            adjacency_batch = batch['adjacency']
-            if isinstance(adjacency_batch, list):
-                # Pre-allocate tensor for better memory efficiency
-                batch_size = len(adjacency_batch)
-                adjacency_input = torch.zeros(batch_size, self.config.NUM_BUSES, self.config.NUM_BUSES, 
-                                            device=self.device, dtype=torch.float32)
-                for i, adj in enumerate(adjacency_batch):
-                    dense_adj = to_dense_adj(adj.to(self.device), max_num_nodes=self.config.NUM_BUSES).squeeze(0)
-                    adjacency_input[i] = dense_adj
-            else:
-                adjacency_input = adjacency_batch.to(self.device)
+            # Adjacency is always dense for time-series data - direct device transfer
+            adjacency_input = batch['adjacency'].to(self.device, non_blocking=True)
 
-            # Use mixed precision for forward pass
-            if self.scaler is not None:
-                with autocast():
-                    outputs = self.model(features, adjacency_input)  # [batch, buses, 2]
-                    
-                    # Get bus types from batch (OPF: bus-type-dependent unknowns)
-                    bus_types = batch.get('bus_types', None)  # [batch, buses] or None
-                    
-                    loss_dict = self.criterion(
-                        outputs,      # Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
-                        targets,      # True unknowns [batch, buses, 2] (OPF: bus-type dependent)
-                        features,     # Measured power (use as measurements)
-                        ybus,
-                        bus_types=bus_types  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
-                    )
-                    total_loss = loss_dict['total_loss'] / accumulation_steps  # Scale loss for accumulation
-
-                # Scale loss and backward pass
-                self.scaler.scale(total_loss).backward()
-                
-                # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % accumulation_steps == 0:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad()
-            else:
-                # CPU training without mixed precision
-                outputs = self.model(features, adjacency_input)  # [batch, buses, 2]
-                
-                use_separate_backward = getattr(self.config, 'USE_SEPARATE_VM_VA_BACKWARD', False)
-                bus_types = batch.get('bus_types', None)
-                use_separate_backward = use_separate_backward and (bus_types is None)
-                
-                loss_dict = self.criterion(
-                    outputs,
-                    targets,
-                    features,
-                    ybus,
-                    bus_types=bus_types,
-                    return_components=use_separate_backward
-                )
-                
-                if use_separate_backward and 'mse_vm_loss' in loss_dict:
-                    mse_vm_loss = loss_dict['mse_vm_loss'] / accumulation_steps
-                    mse_va_loss = loss_dict['mse_va_loss'] / accumulation_steps
-                    physics_loss = loss_dict['physics_loss'] / accumulation_steps
-                    
-                    mse_vm_loss.backward(retain_graph=True)
-                    mse_va_loss.backward(retain_graph=True)
-                    physics_loss.backward()
-                else:
-                    total_loss = loss_dict['total_loss'] / accumulation_steps
-                    total_loss.backward()
-                
-                # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % accumulation_steps == 0:
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
+            # Forward pass
+            outputs = self.model(features, adjacency_input)  # [batch, buses, 2] or [batch, buses, 4] if heteroscedastic
             
-            # Update running totals for the epoch (use unscaled loss for reporting)
-            epoch_losses['total_loss'] += loss_dict['total_loss'].item()
-            # Track both raw and weighted MSE for clarity
-            epoch_losses['mse'] += loss_dict['mse'].item()  # Raw MSE
-            if 'mse_weighted' in loss_dict:
-                epoch_losses['mse_weighted'] = epoch_losses.get('mse_weighted', 0.0) + loss_dict['mse_weighted'].item()
-            epoch_losses['mse_vm'] += loss_dict.get('mse_vm', 0.0) if isinstance(loss_dict.get('mse_vm', 0.0), float) else loss_dict.get('mse_vm', torch.tensor(0.0)).item()
-            epoch_losses['mse_va'] += loss_dict.get('mse_va', 0.0) if isinstance(loss_dict.get('mse_va', 0.0), float) else loss_dict.get('mse_va', torch.tensor(0.0)).item()
-            epoch_losses['power_violation'] += loss_dict['power_violation'].item()
-            epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
+            bus_types = batch.get('bus_types', None)
+            
+            # Clear batch dict immediately (data already on device)
+            del batch
+            
+            loss_dict = self.criterion(
+                outputs,
+                targets,
+                features,
+                ybus,
+                bus_types=bus_types,
+                return_components=False
+            )
+            
+            # Add Empirical Bayes regularization if enabled (from paper Section 4.3)
+            total_loss = loss_dict['total_loss']
+            if hasattr(self, 'eb_optimizer') and self.eb_optimizer is not None:
+                eb_reg = self.eb_optimizer.get_regularization_loss()
+                total_loss = total_loss + eb_reg
+            
+            total_loss = total_loss / accumulation_steps
+            total_loss.backward()
+            
+            # Extract values BEFORE deleting tensors - optimized .item() calls
+            total_loss_val = loss_dict['total_loss'].item()
+            total_loss_denorm_val = loss_dict.get('total_loss_denorm', loss_dict['total_loss']).item()
+            mse_val = loss_dict['mse'].item()
+            power_viol_val = loss_dict['power_violation'].item()
+            voltage_viol_val = loss_dict['voltage_violation'].item()
+            # Optimize mse_var extraction - single conditional check
+            mse_var1_val = loss_dict.get('mse_var1', 0.0)
+            mse_var2_val = loss_dict.get('mse_var2', 0.0)
+            if isinstance(mse_var1_val, torch.Tensor):
+                mse_var1_val = mse_var1_val.item()
+            if isinstance(mse_var2_val, torch.Tensor):
+                mse_var2_val = mse_var2_val.item()
+            
+            # MEMORY CLEARING: Delete intermediate tensors after use
+            # SAFETY ANALYSIS:
+            # - outputs, loss_dict, total_loss: Safe to delete AFTER backward() because:
+            #   * PyTorch autograd stores computation graph in parameter.grad attributes
+            #   * The backward() call has already computed gradients, inputs no longer needed
+            # - features, targets, ybus, adjacency_input: Safe to delete AFTER backward() because:
+            #   * Gradients are stored in parameter.grad, not in input tensors
+            #   * We delete AFTER optimizer.step() to be extra safe (though not strictly necessary)
+            # - For gradient accumulation: We keep inputs until optimizer.step() for safety,
+            #   but could delete after backward() if memory is critical (current approach is safer)
+            del outputs, loss_dict, total_loss
+            
+            # Only step optimizer after accumulating gradients
+            if (batch_idx + 1) % accumulation_steps == 0:
+                self.optimizer.step()
+                
+                # Step OneCycleLR scheduler after each optimizer step (per-batch, not per-epoch)
+                if hasattr(self, 'scheduler') and self.scheduler is not None:
+                    if hasattr(self, 'scheduler_type') and self.scheduler_type == 'OneCycleLR':
+                        self.scheduler.step()  # OneCycleLR steps per-batch
+                
+                self.optimizer.zero_grad()
+                # Clear input tensors after optimizer step (safe: gradients already computed and applied)
+                del features, targets, ybus, adjacency_input
+                if bus_types is not None:
+                    del bus_types
+            # NOTE: For gradient accumulation, we keep inputs until optimizer.step().
+            # This is safe but uses slightly more memory. Could delete after backward() if needed.
+            
+            # Update running totals (using extracted Python values, not tensors)
+            epoch_losses['total_loss'] += total_loss_val  # Normalized (for optimization)
+            epoch_losses['total_loss_denorm'] = epoch_losses.get('total_loss_denorm', 0.0) + total_loss_denorm_val  # Denormalized (for display)
+            epoch_losses['mse'] += mse_val
+            epoch_losses['mse_var1'] += mse_var1_val
+            epoch_losses['mse_var2'] += mse_var2_val
+            epoch_losses['power_violation'] += power_viol_val
+            epoch_losses['voltage_violation'] += voltage_viol_val
 
             if self.is_physics_informed:
                 avg_mse = epoch_losses['mse']/(batch_idx+1)
+                # Professional reporting: Show components separately (different units)
+                # - MSE: per-unit² (denormalized)
+                # - Power violation: RMSE (per-unit)
+                # - Voltage violation: RMSE (per-unit)
+                # Do NOT sum them (different units)
                 if 'mse_weighted' in epoch_losses:
                     pbar.set_postfix(OrderedDict([
-                        ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
-                        ('mse', f"{avg_mse:.7f}"),
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),
-                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")
+                        ('mse', f"{avg_mse:.7f}"),  # Denormalized MSE (per-unit²)
+                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),  # RMSE (per-unit)
+                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")  # RMSE (per-unit)
                     ]))
                 else:
                     pbar.set_postfix(OrderedDict([
-                        ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
-                        ('mse', f"{avg_mse:.7f}"),
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),
-                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")
+                        ('mse', f"{avg_mse:.7f}"),  # Denormalized MSE (per-unit²)
+                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),  # RMSE (per-unit)
+                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")  # RMSE (per-unit)
                     ]))
             else:
-                pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")
+                # For non-physics models (GCN), only show MSE (total_loss = MSE for non-physics)
+                pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")  # Denormalized (physical units)
             
-            if batch_idx % 100 == 0 and self.config.NUM_BUSES >= 57:
+            # AGGRESSIVE MEMORY CLEARING: More frequent for larger systems
+            # Clear cache every N batches based on system size to prevent memory accumulation
+            # PERFORMANCE: Only clear if using CUDA (checked once at init, not every batch)
+            clear_frequency = 50 if self.config.NUM_BUSES >= 118 else (100 if self.config.NUM_BUSES >= 57 else 200)
+            if batch_idx % clear_frequency == 0 and batch_idx > 0:  # Skip first batch (idx=0)
                 gc.collect()
-                if torch.cuda.is_available():
+                if self.use_cuda:  # Use cached value, not repeated torch.cuda.is_available() call
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()  # Ensure all operations complete before clearing
 
         # Return the average of all loss components
         num_batches = len(train_loader)
@@ -159,15 +168,15 @@ class PowerSystemTrainer(BaseTrainer):
         return {
             'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
-            'mse_vm': epoch_losses['mse_vm'] / num_batches,
-            'mse_va': epoch_losses['mse_va'] / num_batches,
+            'mse_var1': epoch_losses['mse_var1'] / num_batches,
+            'mse_var2': epoch_losses['mse_var2'] / num_batches,
             'power_violation': epoch_losses['power_violation'] / num_batches,
             'voltage_violation': epoch_losses['voltage_violation'] / num_batches
         }
 
     def _val_epoch(self, val_loader):
         self.model.eval()
-        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_vm': 0, 'mse_va': 0, 'power_violation': 0, 'voltage_violation': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
         
         
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
@@ -179,24 +188,11 @@ class PowerSystemTrainer(BaseTrainer):
                 ybus = batch['ybus_matrix'].to(self.device)
                 
                 # Optimized adjacency matrix handling (validation)
-                adjacency_batch = batch['adjacency']
-                if isinstance(adjacency_batch, list):
-                    # Pre-allocate tensor for better memory efficiency
-                    batch_size = len(adjacency_batch)
-                    adjacency_input = torch.zeros(batch_size, self.config.NUM_BUSES, self.config.NUM_BUSES, 
-                                                device=self.device, dtype=torch.float32)
-                    for i, adj in enumerate(adjacency_batch):
-                        dense_adj = to_dense_adj(adj.to(self.device), max_num_nodes=self.config.NUM_BUSES).squeeze(0)
-                        adjacency_input[i] = dense_adj
-                else:
-                    adjacency_input = adjacency_batch.to(self.device)
+                # Adjacency is always dense for time-series data - direct device transfer
+                adjacency_input = batch['adjacency'].to(self.device, non_blocking=True)
 
-                # Use mixed precision for validation forward pass
-                if self.scaler is not None:
-                    with autocast():
-                        outputs = self.model(features, adjacency_input)
-                else:
-                    outputs = self.model(features, adjacency_input)
+                # Forward pass
+                outputs = self.model(features, adjacency_input)
                 
                 
                 bus_types = batch.get('bus_types', None)
@@ -209,25 +205,32 @@ class PowerSystemTrainer(BaseTrainer):
                     bus_types=bus_types
                 )
                 
-                epoch_losses['total_loss'] += loss_dict['total_loss'].item()
+                epoch_losses['total_loss'] += loss_dict['total_loss'].item()  # Normalized (for optimization)
+                total_loss_denorm_val = loss_dict.get('total_loss_denorm', loss_dict['total_loss']).item()
+                epoch_losses['total_loss_denorm'] = epoch_losses.get('total_loss_denorm', 0.0) + total_loss_denorm_val  # Denormalized (for display)
                 epoch_losses['mse'] += loss_dict['mse'].item()
-                if 'mse_weighted' in loss_dict:
+                if 'mse_weighted' in loss_dict and loss_dict['mse_weighted'] is not None:
                     epoch_losses['mse_weighted'] = epoch_losses.get('mse_weighted', 0.0) + loss_dict['mse_weighted'].item()
-                epoch_losses['mse_vm'] += loss_dict.get('mse_vm', 0.0) if isinstance(loss_dict.get('mse_vm', 0.0), float) else loss_dict.get('mse_vm', torch.tensor(0.0)).item()
-                epoch_losses['mse_va'] += loss_dict.get('mse_va', 0.0) if isinstance(loss_dict.get('mse_va', 0.0), float) else loss_dict.get('mse_va', torch.tensor(0.0)).item()
+                epoch_losses['mse_var1'] += loss_dict.get('mse_var1', 0.0) if isinstance(loss_dict.get('mse_var1', 0.0), float) else loss_dict.get('mse_var1', torch.tensor(0.0)).item()
+                epoch_losses['mse_var2'] += loss_dict.get('mse_var2', 0.0) if isinstance(loss_dict.get('mse_var2', 0.0), float) else loss_dict.get('mse_var2', torch.tensor(0.0)).item()
                 epoch_losses['power_violation'] += loss_dict['power_violation'].item()
                 epoch_losses['voltage_violation'] += loss_dict['voltage_violation'].item()
                 
                 if self.is_physics_informed:
                     avg_mse = epoch_losses['mse']/(batch_idx+1)
+                    # Professional reporting: Show components separately (different units)
+                    # - MSE: per-unit² (denormalized)
+                    # - Power violation: RMSE (per-unit)
+                    # - Voltage violation: RMSE (per-unit)
+                    # Do NOT sum them (different units)
                     pbar.set_postfix(OrderedDict([
-                        ('total', f"{epoch_losses['total_loss']/(batch_idx+1):.7f}"),
-                        ('mse', f"{avg_mse:.7f}"),
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),
-                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")
+                        ('mse', f"{avg_mse:.7f}"),  # Denormalized MSE (per-unit²)
+                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),  # RMSE (per-unit)
+                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")  # RMSE (per-unit)
                     ]))
                 else:
-                    pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")
+                    # For non-physics models (GCN), only show MSE (total_loss = MSE for non-physics)
+                    pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")  # Denormalized (physical units)
         
         # Return the average of all loss components
         num_batches = len(val_loader)
@@ -235,8 +238,8 @@ class PowerSystemTrainer(BaseTrainer):
         return {
             'loss': epoch_losses['total_loss'] / num_batches,
             'mse': epoch_losses['mse'] / num_batches,
-            'mse_vm': epoch_losses['mse_vm'] / num_batches,
-            'mse_va': epoch_losses['mse_va'] / num_batches,
+            'mse_var1': epoch_losses['mse_var1'] / num_batches,
+            'mse_var2': epoch_losses['mse_var2'] / num_batches,
             'power_violation': epoch_losses['power_violation'] / num_batches,
             'voltage_violation': epoch_losses['voltage_violation'] / num_batches
         }

@@ -9,7 +9,8 @@ class GCN(BaseModel):
                  hidden_dim: int = 64,
                  num_gc_layers: int = 3,
                  num_buses: int = 118,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 use_heteroscedastic: bool = False):
         """
         Simple GCN for OPF prediction.
         
@@ -19,9 +20,13 @@ class GCN(BaseModel):
             num_gc_layers: Number of graph convolution layers
             num_buses: Number of buses in the system
             dropout: Dropout rate
+            use_heteroscedastic: If True, output 4 features (predictions + uncertainties)
         """
-        # Pure state estimation: only predict voltage [vm, va]
-        output_features_per_bus = 2
+        # Homoscedastic: output bus-type dependent unknowns [batch, buses, 2]
+        # Heteroscedastic: output [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        self.use_heteroscedastic = use_heteroscedastic
+        output_features_per_bus = 4 if use_heteroscedastic else 2
         output_dim = num_buses * output_features_per_bus
         
         super().__init__(
@@ -37,9 +42,10 @@ class GCN(BaseModel):
         self.dropout_layer = nn.Dropout(dropout)
         
         # Output Layer
-        # Single head: Combined output [batch, buses, 2]
-        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
-        self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)  # 2 features per bus
+        # Homoscedastic: [batch, buses, 2] = predictions only
+        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor):
         """
@@ -59,6 +65,8 @@ class GCN(BaseModel):
             x = torch.relu(gc_layer(x, adj))
             x = self.dropout_layer(x)
         
-        # Single head: Combined output
-        out = self.output_layer(x)  # [batch_size, num_buses, 2]
+        # Homoscedastic: [batch, buses, 2] = predictions only
+        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        out = self.output_layer(x)  # [batch_size, num_buses, output_features_per_bus]
         return out

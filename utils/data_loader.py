@@ -26,14 +26,14 @@ class PowerSystemNormalizer:
             features: Input measurements [samples, buses, 10] (in MW/MVar, pu, rad)
             targets: Output unknowns [samples, buses, 2] (all in pu or radians for consistent scaling)
         """
-        # Normalize features (measurements)
-        self.feature_mean = np.mean(features, axis=(0, 1))  # [10]
-        self.feature_std = np.std(features, axis=(0, 1))    # [10]
+        # Normalize features (measurements) - use float32 for memory efficiency
+        self.feature_mean = np.mean(features, axis=(0, 1), dtype=np.float32).astype(np.float32)  # [10]
+        self.feature_std = np.std(features, axis=(0, 1), dtype=np.float32).astype(np.float32)    # [10]
         self.feature_std[self.feature_std == 0] = 1.0
         
-        # Normalize targets (voltages)
-        self.target_mean = np.mean(targets, axis=(0, 1))    # [2]
-        self.target_std = np.std(targets, axis=(0, 1))      # [2]
+        # Normalize targets (voltages) - use float32 for memory efficiency
+        self.target_mean = np.mean(targets, axis=(0, 1), dtype=np.float32).astype(np.float32)    # [2]
+        self.target_std = np.std(targets, axis=(0, 1), dtype=np.float32).astype(np.float32)      # [2]
         self.target_std[self.target_std == 0] = 1.0
         
         # Legacy support: Use feature stats as default
@@ -91,7 +91,13 @@ class PowerSystemNormalizer:
             mean_np = self.feature_mean[:num_features] if num_features <= len(self.feature_mean) else self.mean[:num_features]
             std_np = self.feature_std[:num_features] if num_features <= len(self.feature_std) else self.std[:num_features]
         
+        # Ensure float32 for memory efficiency (reduce memory by 50% vs float64)
+        data_np = data_np.astype(np.float32) if data_np.dtype != np.float32 else data_np
+        mean_np = mean_np.astype(np.float32) if mean_np.dtype != np.float32 else mean_np
+        std_np = std_np.astype(np.float32) if std_np.dtype != np.float32 else std_np
+        
         result = (data_np - mean_np) / std_np
+        result = result.astype(np.float32)  # Ensure float32 output
         
         # Convert back to tensor if input was a tensor
         if was_tensor:
@@ -245,7 +251,7 @@ class PowerSystemDataset(Dataset):
         time_carbon = self.time_carbon_coeffs[target_idx]
         renewable_fraction = self.renewable_fractions[target_idx]
 
-        # PURE STATE ESTIMATION: Targets only have [vm, va] (2 features)
+        # OPF: Targets have 2 features per bus (OPF unknowns, bus-type dependent)
         # Extract generation components from FEATURES (measurements), not targets
         # Features format: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
         if features_tensor.dim() == 3:
@@ -386,12 +392,13 @@ def load_power_system_data(config, case_name):
             print("Please ensure you have run 'gen_meas_best.py' to generate all necessary data files.")
             raise e
 
-    concatenated_features = np.concatenate(all_features, axis=0)
-    concatenated_targets = np.concatenate(all_targets, axis=0)
-    concatenated_bus_types = np.concatenate(all_bus_types, axis=0) if all_bus_types else None
-    concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0)
-    concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0)
-    concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0)
+    # Convert to float32 for memory efficiency (50% memory reduction vs float64)
+    concatenated_features = np.concatenate(all_features, axis=0).astype(np.float32)
+    concatenated_targets = np.concatenate(all_targets, axis=0).astype(np.float32)
+    concatenated_bus_types = np.concatenate(all_bus_types, axis=0).astype(np.int32) if all_bus_types else None
+    concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0).astype(np.float32)
+    concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0).astype(np.float32)
+    concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0).astype(np.float32)
     
     # Handle Ybus - merge lazy loading data or concatenate pre-loaded arrays
     if all(isinstance(yb, dict) and 'lazy' in yb for yb in all_ybus):
@@ -409,7 +416,7 @@ def load_power_system_data(config, case_name):
     else:
         raise ValueError("Mixed Ybus formats detected - all scenarios must use the same format (lazy or pre-loaded)")
 
-    # Create normalizer with BOTH features and targets (for pure state estimation)
+    # Create normalizer with BOTH features and targets
     normalizer = PowerSystemNormalizer(concatenated_features, concatenated_targets)
     features_norm = normalizer.normalize(concatenated_features)
     targets_norm = normalizer.normalize(concatenated_targets)
@@ -478,14 +485,20 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
             continue
         
         # Split THIS fraction's data into train/val/test
+        # Ensure no data loss: train + val + test = total (all indices used)
         n_frac = len(valid_frac_indices)
         n_train = int(config.TRAIN_SPLIT * n_frac)
         n_val = int(config.VAL_SPLIT * n_frac)
+        n_test = n_frac - n_train - n_val  # Remaining goes to test (ensures no data loss)
         
         # Contiguous splits WITHIN each fraction (preserves temporal order)
         frac_train = valid_frac_indices[:n_train]
         frac_val = valid_frac_indices[n_train:n_train + n_val]
-        frac_test = valid_frac_indices[n_train + n_val:]
+        frac_test = valid_frac_indices[n_train + n_val:n_train + n_val + n_test]  # Explicit end index
+        
+        # Verify no data loss for this fraction
+        assert len(frac_train) + len(frac_val) + len(frac_test) == n_frac, \
+            f"Data loss detected for fraction {frac}: {len(frac_train)}+{len(frac_val)}+{len(frac_test)} != {n_frac}"
         
         train_indices.extend(frac_train)
         val_indices.extend(frac_val)
@@ -495,6 +508,21 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     train_indices = sorted(train_indices)
     val_indices = sorted(val_indices)
     test_indices = sorted(test_indices)
+    
+    # Verify NO DATA LOSS: train + val + test = total dataset size
+    total_split_size = len(train_indices) + len(val_indices) + len(test_indices)
+    assert total_split_size == dataset_size, \
+        f"Data loss detected: {len(train_indices)}+{len(val_indices)}+{len(test_indices)} = {total_split_size} != {dataset_size}"
+    
+    # Verify split ratios match config (within rounding tolerance)
+    train_ratio = len(train_indices) / dataset_size
+    val_ratio = len(val_indices) / dataset_size
+    test_ratio = len(test_indices) / dataset_size
+    expected_train = config.TRAIN_SPLIT
+    expected_val = config.VAL_SPLIT
+    expected_test = 1.0 - config.TRAIN_SPLIT - config.VAL_SPLIT
+    
+    print(f"[Data Split] Train: {len(train_indices)} ({train_ratio:.1%}), Val: {len(val_indices)} ({val_ratio:.1%}), Test: {len(test_indices)} ({test_ratio:.1%}) | Expected: {expected_train:.1%}/{expected_val:.1%}/{expected_test:.1%} | Zero loss: {total_split_size}=={dataset_size} [OK]")
     
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, val_indices)
@@ -507,24 +535,25 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
     
     # OPTIMIZED DataLoader settings for memory efficiency
+    num_workers = min(config.NUM_WORKERS, 4)  # Cap at 4 workers
     train_dataloader_kwargs = {
         'batch_size': config.BATCH_SIZE,
         'shuffle': shuffle_train,  # Dynamic based on model type
-        'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
+        'num_workers': num_workers,
         'collate_fn': collate_fn_to_use,
         'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
-        'persistent_workers': True,  # Keep workers alive
-        'prefetch_factor': 2,  # Prefetch 2 batches per worker
+        'persistent_workers': num_workers > 0,  # Only if using workers
+        'prefetch_factor': 2 if num_workers > 0 else None,  # Only if using workers
     }
     
     val_test_dataloader_kwargs = {
         'batch_size': config.BATCH_SIZE,
         'shuffle': False,  # Never shuffle val/test
-        'num_workers': min(config.NUM_WORKERS, 4),  # Cap at 4 workers
+        'num_workers': num_workers,
         'collate_fn': collate_fn_to_use,
         'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
-        'persistent_workers': True,  # Keep workers alive
-        'prefetch_factor': 2,  # Prefetch 2 batches per worker
+        'persistent_workers': num_workers > 0,  # Only if using workers
+        'prefetch_factor': 2 if num_workers > 0 else None,  # Only if using workers
     }
     
     train_loader = DataLoader(train_dataset, **train_dataloader_kwargs)

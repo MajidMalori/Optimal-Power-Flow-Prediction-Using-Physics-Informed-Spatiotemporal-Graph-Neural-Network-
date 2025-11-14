@@ -24,9 +24,11 @@ def _init_positions(num_agents: int, dim: int, upper_bound: np.ndarray, lower_bo
     if isinstance(lower_bound, (int, float)): 
         lower_bound = np.full(dim, lower_bound)
     
-    positions = np.zeros((num_agents, dim))
-    for i in range(dim):
-        positions[:, i] = np.random.uniform(lower_bound[i], upper_bound[i], num_agents)
+    # Vectorized initialization: generate all positions at once using broadcasting
+    # Shape: (num_agents, dim) - each row is an agent, each column is a dimension
+    lower_expanded = np.tile(lower_bound, (num_agents, 1))  # (num_agents, dim)
+    upper_expanded = np.tile(upper_bound, (num_agents, 1))  # (num_agents, dim)
+    positions = np.random.uniform(lower_expanded, upper_expanded, size=(num_agents, dim))
     return positions
 
 
@@ -117,21 +119,29 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         w = (w_max - w_min) * (1 - np.cos(np.pi / 2 * (l / max_iterations))) + w_min
         beta = beta_max * np.exp(-lambda_val * (l / max_iterations))
         
-        # --- 2c. Update Agent Positions ---
-        for i in range(num_agents):
-            B = 2 * (A**2) * np.random.rand()
-            Ms = B * (best_position - positions[i, :])
-            Ds = np.abs(Ms)
-            
-            k = np.random.uniform(0, 2 * np.pi)
-            r = u * np.exp(k * v)
-            spiral_attack = Ds * r * np.cos(2 * np.pi * k)
-
-            rand_agent_idx = np.random.randint(0, num_agents)
-            p_rand = positions[rand_agent_idx, :]
-            perturbation = beta * (p_rand - positions[i, :])
-            
-            positions[i, :] = spiral_attack + (w * best_position) + perturbation
+        # --- 2c. Update Agent Positions (Vectorized) ---
+        # Vectorized update for all agents simultaneously
+        num_agents_actual = positions.shape[0]
+        
+        # B: (num_agents,) - random values for each agent
+        B = 2 * (A**2) * np.random.rand(num_agents_actual)
+        # Ms: (num_agents, dim) - difference vectors
+        Ms = B[:, np.newaxis] * (best_position - positions)  # Broadcasting
+        Ds = np.abs(Ms)  # (num_agents, dim)
+        
+        # k: (num_agents,) - random angles for each agent
+        k = np.random.uniform(0, 2 * np.pi, size=num_agents_actual)
+        r = u * np.exp(k * v)  # (num_agents,)
+        # Spiral attack: (num_agents, dim) - element-wise multiplication with broadcasting
+        spiral_attack = Ds * r[:, np.newaxis] * np.cos(2 * np.pi * k)[:, np.newaxis]
+        
+        # Random agent selection for perturbation: (num_agents,)
+        rand_agent_indices = np.random.randint(0, num_agents_actual, size=num_agents_actual)
+        p_rand = positions[rand_agent_indices, :]  # (num_agents, dim)
+        perturbation = beta * (p_rand - positions)  # (num_agents, dim)
+        
+        # Update all positions at once: (num_agents, dim)
+        positions = spiral_attack + (w * best_position) + perturbation
         
         # Track iteration details
         iteration_details.append({
@@ -193,7 +203,8 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
     
     param_bounds = {
         'HIDDEN_DIM': hidden_range, 
-        'NUM_GC_LAYERS': gc_layers_range
+        'NUM_GC_LAYERS': gc_layers_range,
+        # LEARNING_RATE removed from hyperparameter tuning - now controlled by adaptive scheduler
     }
     
     # The model automatically learns optimal loss weights via backpropagation
@@ -221,7 +232,7 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
 
 def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: int, 
                        is_sequential: bool, uses_adaptive_graph: bool, model_name: str = None,
-                       is_opf_mode: bool = True) -> Dict[str, Any]:
+                       is_opf_mode: bool = True, config: Any = None) -> Dict[str, Any]:
     """
     Create model keyword arguments from optimized parameters.
     
@@ -231,11 +242,12 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
         num_buses: Number of buses in the system
         is_sequential: Whether model is sequential
         uses_adaptive_graph: Whether model uses adaptive graph features
+        config: Main config object (for heteroscedastic mode)
         
     Returns:
         Dictionary of model keyword arguments
     """
-    input_dim = getattr(model_config, 'INPUT_DIM', 10)  # Default to 10 for pure state estimation
+    input_dim = getattr(model_config, 'INPUT_DIM', 10)  # Default to 10 measurements
     model_kwargs = {
         'feature_dim': input_dim,  # Input dimension (10 measurements), NOT output dimension (2 voltages)
         'hidden_dim': int(params['HIDDEN_DIM']),
@@ -252,6 +264,10 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
             'embedding_dim': int(params['EMBEDDING_DIM']),
             'phi': float(params['PHI'])
         })
+    
+    # Add heteroscedastic mode flag if config is provided
+    if config is not None:
+        model_kwargs['use_heteroscedastic'] = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
     
     # Twin heads removed: Not compatible with OPF mode (different bus types have different unknowns)
     
@@ -312,6 +328,8 @@ def process_optimization_params(param_keys: List[str], param_values: np.ndarray)
             params['PHI'] = 0.5  # Default to balanced mixing
         else:
             params['PHI'] = np.clip(float(phi_val), 0.0, 1.0)
+    
+    # LEARNING_RATE validation removed - now controlled by adaptive scheduler (ReduceLROnPlateau)
     
     return params
 
@@ -395,10 +413,10 @@ def trial_based_search(num_trials: int, lower_bound: np.ndarray, upper_bound: np
         # Latin Hypercube Sampling for better space coverage
         positions = _latin_hypercube_sampling(num_trials, dim, lower_bound, upper_bound)
     else:
-        # Random sampling (default)
-        positions = np.zeros((num_trials, dim))
-        for i in range(dim):
-            positions[:, i] = np.random.uniform(lower_bound[i], upper_bound[i], num_trials)
+        # Random sampling (default) - vectorized
+        lower_expanded = np.tile(lower_bound, (num_trials, 1))  # (num_trials, dim)
+        upper_expanded = np.tile(upper_bound, (num_trials, 1))  # (num_trials, dim)
+        positions = np.random.uniform(lower_expanded, upper_expanded, size=(num_trials, dim))
     
     # Run trials sequentially (ONE training run per trial)
     pbar = tqdm(range(num_trials), desc="Trial Progress")
@@ -444,19 +462,24 @@ def _latin_hypercube_sampling(num_samples: int, dim: int,
     
     This ensures samples are more evenly distributed than pure random sampling.
     """
-    # Generate Latin Hypercube samples in [0, 1]
+    # Generate Latin Hypercube samples in [0, 1] - vectorized
     samples = np.zeros((num_samples, dim))
     
+    # Vectorized interval generation: (num_samples, dim)
+    intervals_start = np.linspace(0, 1, num_samples + 1)[:-1]  # (num_samples,)
+    intervals_end = np.linspace(0, 1, num_samples + 1)[1:]  # (num_samples,)
+    
+    # Generate samples for all dimensions at once
     for d in range(dim):
-        # Divide [0,1] into num_samples equal intervals
-        intervals = np.linspace(0, 1, num_samples + 1)
         # Randomly sample within each interval
-        samples[:, d] = np.random.uniform(intervals[:-1], intervals[1:])
+        samples[:, d] = np.random.uniform(intervals_start, intervals_end)
         # Shuffle to avoid correlation between dimensions
         np.random.shuffle(samples[:, d])
     
-    # Scale to actual bounds
-    for d in range(dim):
-        samples[:, d] = samples[:, d] * (upper_bound[d] - lower_bound[d]) + lower_bound[d]
+    # Vectorized scaling to actual bounds: (num_samples, dim)
+    bound_ranges = upper_bound - lower_bound  # (dim,)
+    bound_ranges_expanded = np.tile(bound_ranges, (num_samples, 1))  # (num_samples, dim)
+    lower_expanded = np.tile(lower_bound, (num_samples, 1))  # (num_samples, dim)
+    samples = samples * bound_ranges_expanded + lower_expanded
     
     return samples

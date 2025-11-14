@@ -1,5 +1,5 @@
 """
-Uncertainty Quantification and Visualization for Power System State Estimation.
+Uncertainty Quantification and Visualization for Power System OPF.
 Generates spatial and temporal uncertainty visualizations for trained models.
 """
 
@@ -57,6 +57,78 @@ def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, D
         pos = nx.spring_layout(G, seed=42, k=1, iterations=100)
     
     return net, G, pos
+
+
+def calculate_predicted_uncertainty_metrics(model_outputs: np.ndarray, renewable_fractions: np.ndarray,
+                                            min_sigma: float = 0.01, max_sigma: float = 10.0) -> Dict:
+    """
+    Calculate PREDICTED uncertainty metrics from model outputs (heteroscedastic mode).
+    
+    This extracts the model's predicted uncertainties (log_sigma values) and analyzes them
+    spatially and temporally. This is different from calculate_uncertainty_metrics which
+    uses actual error statistics.
+    
+    Args:
+        model_outputs: Shape [n_samples, n_buses, 4] - Model outputs in heteroscedastic mode
+                      [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
+        renewable_fractions: Shape [n_samples] - renewable fraction for each sample
+        min_sigma: Minimum sigma value for clamping
+        max_sigma: Maximum sigma value for clamping
+    
+    Returns:
+        Dictionary containing predicted uncertainty metrics for each renewable fraction
+    """
+    # Extract predicted uncertainties
+    log_sigma_var1 = model_outputs[:, :, 2]  # [n_samples, n_buses]
+    log_sigma_var2 = model_outputs[:, :, 3]  # [n_samples, n_buses]
+    
+    # Convert to sigma (standard deviation) using natural parametrization
+    # σ² = -1/(2η2), so σ = sqrt(-1/(2η2))
+    # Since log_sigma = 0.5 * log(σ²), we have: σ = exp(log_sigma)
+    sigma_var1 = np.exp(log_sigma_var1)
+    sigma_var2 = np.exp(log_sigma_var2)
+    
+    # NO CLAMPING: Paper (Immer et al., NeurIPS 2023) does not clamp sigma values
+    # Clamping can bias results and is not theoretically justified
+    # If sigma values are extreme, it indicates model calibration issues that should be addressed
+    
+    # Combined uncertainty: Use RMS (root mean square) for proper uncertainty combination
+    # RMS preserves units and is standard for combining uncertainties
+    # Alternative: Report var1 and var2 separately (more informative)
+    sigma_combined = np.sqrt((sigma_var1**2 + sigma_var2**2) / 2.0)  # [n_samples, n_buses] - RMS
+    
+    # Get unique renewable fractions
+    renewable_fractions_rounded = np.round(renewable_fractions, decimals=1)
+    unique_fractions = np.unique(renewable_fractions_rounded)
+    
+    uncertainty_data = {}
+    
+    for frac in unique_fractions:
+        mask = renewable_fractions_rounded == frac
+        frac_uncertainties = sigma_combined[mask]  # [n_frac_samples, n_buses]
+        
+        # Spatial predicted uncertainty: mean/std of predicted uncertainty over time for each bus
+        # This measures: "How uncertain does the model think it is at each bus location?"
+        spatial_predicted_uncertainty_mean = np.mean(frac_uncertainties, axis=0)  # [n_buses]
+        spatial_predicted_uncertainty_std = np.std(frac_uncertainties, axis=0)   # [n_buses]
+        
+        # Temporal predicted uncertainty: mean/std of predicted uncertainty across buses for each timestep
+        # This measures: "How uncertain does the model think it is at each time point?"
+        temporal_predicted_uncertainty_mean = np.mean(frac_uncertainties, axis=1)  # [n_frac_samples]
+        temporal_predicted_uncertainty_std = np.std(frac_uncertainties, axis=1)   # [n_frac_samples]
+        
+        uncertainty_data[round(float(frac), 1)] = {
+            'spatial_predicted_mean': spatial_predicted_uncertainty_mean,
+            'spatial_predicted_std': spatial_predicted_uncertainty_std,
+            'temporal_predicted_mean': temporal_predicted_uncertainty_mean,
+            'temporal_predicted_std': temporal_predicted_uncertainty_std,
+            'mean_spatial_predicted': np.mean(spatial_predicted_uncertainty_mean),
+            'max_spatial_predicted': np.max(spatial_predicted_uncertainty_mean),
+            'mean_temporal_predicted': np.mean(temporal_predicted_uncertainty_mean),
+            'max_temporal_predicted': np.max(temporal_predicted_uncertainty_mean)
+        }
+    
+    return uncertainty_data
 
 
 def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray, 
@@ -223,7 +295,7 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         model_name: Optional model name for title
         config: Optional config object to check if using time-series mode
     """
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(12, 6))  # Match data profile story aspect ratio
     
     fractions = sorted(uncertainty_data.keys())
     
@@ -251,46 +323,56 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         missing_pct = [int(f*100) for f in missing_fractions]
         print(f"[Uncertainty] INFO: Test set missing renewable fractions: {missing_pct}% (reduced data or edge case)")
     
-    # Color map for different renewable fractions
+    # Color map for different renewable fractions (match data profile story style)
     colors = plt.cm.viridis(np.linspace(0, 1, len(fractions)))
     
     # Always use time-series mode (hours of day on x-axis)
     hours_per_day = getattr(config, 'HOURS_PER_DAY', 24) if config else 24
     
+    # Compute hourly statistics (mean and std) for each renewable fraction (match data profile style)
     for frac, color in zip(fractions, colors):
         temporal_unc = uncertainty_data[frac]['temporal']
         n_points = len(temporal_unc)
         
         # Map timesteps to hours of day (modulo 24) to show daily cycle pattern
         x_values = np.arange(n_points) % hours_per_day
-        # Sort by hour of day for cleaner visualization
-        sort_idx = np.argsort(x_values)
-        x_values_sorted = x_values[sort_idx]
-        temporal_unc_sorted = temporal_unc[sort_idx]
         
-        ax.plot(x_values_sorted, temporal_unc_sorted, 
-               label=f'{int(frac*100)}% Renewables (μ={uncertainty_data[frac]["mean_temporal"]:.4f})',
-               color=color, linewidth=2, alpha=0.8, marker='o', markersize=3)
+        # Compute hourly mean and std (match data profile story style)
+        hourly_mean = []
+        hourly_std = []
+        for h in range(hours_per_day):
+            hour_mask = (x_values == h)
+            if np.any(hour_mask):
+                hourly_mean.append(np.mean(temporal_unc[hour_mask]))
+                hourly_std.append(np.std(temporal_unc[hour_mask]))
+            else:
+                hourly_mean.append(np.nan)
+                hourly_std.append(np.nan)
+        
+        hourly_mean = np.array(hourly_mean)
+        hourly_std = np.array(hourly_std)
+        
+        # Plot with fill_between (match data profile story style)
+        ax.plot(range(hours_per_day), hourly_mean, 
+               label=f'{int(frac*100)}% Renewables',
+               color=color, linewidth=2)
+        ax.fill_between(range(hours_per_day), hourly_mean - hourly_std, 
+                       hourly_mean + hourly_std, color=color, alpha=0.2)
     
-    # Labels and title (always time-series format)
-    ax.set_xlabel('Hour of Day', fontsize=14, fontweight='bold')
-    # Set x-axis to show 0-23 hours
-    ax.set_xlim(-0.5, hours_per_day - 0.5)
-    ax.set_xticks(np.arange(0, hours_per_day, 3))  # Show every 3 hours
-    ax.set_xticklabels([f'{h}:00' for h in range(0, hours_per_day, 3)])  # Format as times
+    # Labels and title (match data profile story style)
+    ax.set_xlabel('Hour of Day', fontsize=11)
+    ax.set_xticks(range(0, hours_per_day, 3))
+    ax.set_xticklabels([f'{h:02d}:00' for h in range(0, hours_per_day, 3)])
+    ax.set_ylabel('Mean System Uncertainty σ_t (p.u.)', fontsize=11)
     
-    ax.set_ylabel('Mean System Uncertainty σ_t (p.u.)', fontsize=14, fontweight='bold')
-    
-    title = f'Temporal Uncertainty Curve - {case_name.upper()} (Daily Cycle)'
+    title = f'Temporal Uncertainty - {case_name.upper()}'
     if model_name:
         title += f' - {model_name}'
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
+    ax.set_title(title, fontsize=12, fontweight='bold')
     
-    # Legend
-    ax.legend(loc='best', fontsize=11, framealpha=0.9)
-    
-    # Grid
-    ax.grid(True, alpha=0.3, linestyle='--')
+    # Legend and grid (match data profile story style)
+    ax.legend(loc='best', fontsize=9)
+    ax.grid(True, alpha=0.3)
     
     # Tight layout
     plt.tight_layout()
@@ -304,7 +386,7 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
                                        renewable_fractions: np.ndarray, case_name: str,
                                        output_dir: str, model_name: str = "", config=None,
-                                       bus_types: np.ndarray = None):
+                                       bus_types: np.ndarray = None, model_outputs: np.ndarray = None):
     """
     Main function to generate all uncertainty visualizations.
     
@@ -317,13 +399,42 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
         model_name: Optional model name for titles and filenames
         config: Optional config object for time-series mode detection
         bus_types: Optional [n_samples, n_buses] bus type array for OPF mode
+        model_outputs: Optional [n_samples, n_buses, 4] - Full model outputs in heteroscedastic mode
+                      [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
     
     Returns:
         uncertainty_data: Dictionary with all calculated metrics
     """
-    # Calculate uncertainty metrics using both features (OPF mode)
-    # Uses Euclidean norm of errors across both features to capture uncertainty in predicted unknowns
-    uncertainty_data = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types)
+    # Calculate error statistics (what actually happened)
+    error_statistics = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types)
+    
+    # Calculate predicted uncertainties (what model thinks) if heteroscedastic mode
+    predicted_uncertainties = None
+    if model_outputs is not None:
+        use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False) if config else False
+        if use_heteroscedastic and model_outputs.shape[2] == 4:
+            min_sigma = getattr(config, 'HETEROSCEDASTIC_MIN_SIGMA', 0.01) if config else 0.01
+            max_sigma = getattr(config, 'HETEROSCEDASTIC_MAX_SIGMA', 10.0) if config else 10.0
+            predicted_uncertainties = calculate_predicted_uncertainty_metrics(
+                model_outputs, renewable_fractions, min_sigma=min_sigma, max_sigma=max_sigma
+            )
+    
+    # Use predicted uncertainties if available, otherwise fall back to error statistics
+    # Normalize keys for plotting functions (they expect 'spatial' and 'temporal')
+    if predicted_uncertainties is not None:
+        # Convert predicted uncertainty keys to match plotting function expectations
+        uncertainty_data = {}
+        for frac, data in predicted_uncertainties.items():
+            uncertainty_data[frac] = {
+                'spatial': data['spatial_predicted_mean'],  # Use mean predicted uncertainty
+                'temporal': data['temporal_predicted_mean'],  # Use mean predicted uncertainty
+                'mean_spatial': data['mean_spatial_predicted'],
+                'max_spatial': data['max_spatial_predicted'],
+                'mean_temporal': data['mean_temporal_predicted']
+            }
+    else:
+        # Use error statistics (already has correct keys)
+        uncertainty_data = error_statistics
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)

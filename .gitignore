@@ -6,6 +6,7 @@ data/time_series/
 # Legacy data folders (in case old structure still exists)
 data/train/
 data/test/
+keep/
 
 # Data files in root data folder
 data/*.npy

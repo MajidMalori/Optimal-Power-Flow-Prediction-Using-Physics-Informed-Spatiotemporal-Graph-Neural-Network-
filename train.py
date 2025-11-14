@@ -7,7 +7,6 @@ import copy
 import gc
 import signal
 import sys
-import psutil
 
 def check_gpu_memory():
     """Check available GPU memory and return status"""
@@ -39,14 +38,30 @@ def log_memory_usage(stage_name):
     # Memory logging disabled
     pass
 
-def get_adaptive_batch_size(num_buses, base_batch_size=32):
-    """Get adaptive batch size based on system size"""
-    if num_buses >= 118:
-        return max(1, base_batch_size // 4)  # Large systems: smaller batches
-    elif num_buses >= 57:
-        return max(1, base_batch_size // 2)  # Medium systems: medium batches
+def get_adaptive_batch_size(num_buses, base_batch_size=32, use_gradient_accumulation=True):
+    """
+    Get adaptive batch size based on system size and gradient accumulation setting.
+    
+    If gradient accumulation is enabled: Reduce batch size (memory efficient)
+    If gradient accumulation is disabled: Increase batch size to match effective batch (faster, more memory)
+    """
+    if use_gradient_accumulation:
+        # With accumulation: use smaller batches to save memory
+        if num_buses >= 118:
+            return max(1, base_batch_size // 4)  # Large systems: smaller batches
+        elif num_buses >= 57:
+            return max(1, base_batch_size // 2)  # Medium systems: medium batches
+        else:
+            return base_batch_size  # Small systems: full batches
     else:
-        return base_batch_size  # Small systems: full batches
+        # Without accumulation: use larger batches to match effective batch size
+        # This is faster but uses more memory (all gradients stored at once)
+        if num_buses >= 118:
+            return base_batch_size  # Large systems: full batch (was base_batch_size // 4 * 4)
+        elif num_buses >= 57:
+            return base_batch_size  # Medium systems: full batch (was base_batch_size // 2 * 2)
+        else:
+            return base_batch_size  # Small systems: full batches (no change)
 
 def cleanup_bus_system_data():
     """Clean up data between bus systems to free memory"""
@@ -236,14 +251,11 @@ def main():
     # Track all results for comprehensive summary
     all_results = []
     
-    # STEP 1: Print run information
+    # STEP 1: Concise run information (one line)
     run_info = base_config.get_run_info()
     actual_timesteps = base_config.DATA_MODE_TIMESTEPS[args.data_mode]
-    print(f"\nRUN: {run_info['run_id']} | Config: {args.test_config} | Mode: {args.data_mode.upper()} ({actual_timesteps} timesteps)")
-    print(f"Bus Systems: {bus_systems_to_test}")
-    print("="*80)
     
-    # STEP 2: Validate data before training (check files exist, generate if missing, show convergence)
+    # STEP 2: Validate data before training
     if not validate_data_before_training(base_config, bus_systems_to_test):
         print("Data validation failed. Exiting training.")
         return
@@ -254,10 +266,7 @@ def main():
     # === DEVICE AND PARALLEL CONFIGURATION ===
     device, device_reason = get_safe_device(args.force_cpu, min_free_memory_gb=2.0)
     is_gpu = device.type == 'cuda'
-    
-    # Configure hardware
     clear_gpu_memory()
-    log_memory_usage("Initial startup")
     
     def get_optimal_workers():
         if is_gpu and torch.cuda.is_available():
@@ -267,23 +276,15 @@ def main():
             import psutil
             cpu_count = psutil.cpu_count(logical=True)
             memory_gb = psutil.virtual_memory().total / (1024**3)
-            # For small systems (2-3 cores), use all cores. For larger, leave one for system.
-            if cpu_count >= 8:
-                workers = 4  # Cap at 4 for very large systems
-            elif cpu_count >= 4:
-                workers = cpu_count - 1  # Leave one for system
-            elif cpu_count >= 2:
-                workers = cpu_count  # Use all cores for 2-3 core systems
-            else:
-                workers = 1  # Single core fallback
+            workers = 4 if cpu_count >= 8 else (cpu_count - 1 if cpu_count >= 4 else (cpu_count if cpu_count >= 2 else 1))
             return memory_gb, f"CPU {cpu_count}c", workers
     
     hw_size, hw_name, data_workers = get_optimal_workers()
     data_workers = data_workers if args.data_workers == 'auto' else args.data_workers
     base_config.NUM_WORKERS = data_workers if args.parallel_data_loading else 0
     
-    print(f"{hw_name} ({hw_size:.1f} GB) | {base_config.NUM_WORKERS} workers")
-    print("="*80)
+    # Single concise line with all startup info
+    print(f"RUN: {run_info['run_id']} | {args.test_config} | {args.data_mode.upper()}({actual_timesteps}) | Buses: {bus_systems_to_test} | {hw_name}({hw_size:.1f}GB) | {base_config.NUM_WORKERS}w")
 
     # Get model configurations from config
     model_class_map = base_config.get_model_class_map()
@@ -300,7 +301,7 @@ def main():
             return
 
     # === MAIN TRAINING EXECUTION ===
-    print(f"\n TRAINING: {len(bus_systems_to_test)} bus systems {bus_systems_to_test}\n")
+    # Removed verbose training header - info already in startup line
     
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
@@ -320,8 +321,8 @@ def main():
             data_tuple = load_power_system_data(base_config, case_name)
             _features, _adjacency, _ybus_matrices, _targets, _bus_types, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
             
-            # Generate data profile story if enabled
-            if base_config.GENERATE_DATA_PROFILE_STORY:
+            # Generate data validation and profile story plots if enabled (saved in bus folders)
+            if base_config.PLOT_DATA_INFO:
                 try:
                     analyze_data_profiles(
                         config=base_config,
@@ -332,6 +333,18 @@ def main():
                     )
                 except Exception as e:
                     print(f"  Warning: Could not generate data profile story: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
+                # Generate convergence story if enabled (part of data story)
+                try:
+                    from utils.convergence_story import analyze_convergence_story
+                    analyze_convergence_story(
+                        config=base_config,
+                        case_name=case_name
+                    )
+                except Exception as e:
+                    print(f"  Warning: Could not generate convergence story: {e}")
                     import traceback
                     traceback.print_exc()
             
@@ -383,8 +396,22 @@ def main():
                     
                     # Check memory before model creation (monitoring disabled)
                     
-                    # Use adaptive batch size based on system size
-                    run_config.BATCH_SIZE = get_adaptive_batch_size(num_buses, run_config.BATCH_SIZE)
+                    # Use adaptive batch size based on system size and gradient accumulation setting
+                    use_accumulation = getattr(run_config, 'USE_GRADIENT_ACCUMULATION', True)
+                    run_config.BATCH_SIZE = get_adaptive_batch_size(
+                        num_buses, 
+                        run_config.BATCH_SIZE, 
+                        use_gradient_accumulation=use_accumulation
+                    )
+                    
+                    # Safety check: Cap batch size to prevent OOM (especially when accumulation is disabled)
+                    # For 118-bus systems, limit to 128 to prevent memory issues
+                    if num_buses >= 118 and not use_accumulation:
+                        max_safe_batch = 128  # Conservative limit for 118-bus without accumulation
+                        if run_config.BATCH_SIZE > max_safe_batch:
+                            print(f"  Warning: Batch size {run_config.BATCH_SIZE} may cause OOM for {num_buses}-bus. Capping to {max_safe_batch}")
+                            run_config.BATCH_SIZE = max_safe_batch
+                    
                     log_memory_usage(f"Before loading {num_buses}-bus data")
                     
                     loaders = create_data_loaders(
@@ -395,11 +422,11 @@ def main():
                     train_loader, val_loader, test_loader = loaders
 
                     # Create model with optimized parameters
-                    # Detect OPF mode: check if bus_types exist (OPF) vs None (state estimation)
+                    # OPF mode: bus_types are required
                     is_opf_mode = (_bus_types is not None)
                     model_kwargs = create_model_kwargs(
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph, 
-                        model_name=model_name, is_opf_mode=is_opf_mode
+                        model_name=model_name, is_opf_mode=is_opf_mode, config=run_config
                     )
                     
                     # Check memory before model creation
@@ -440,7 +467,13 @@ def main():
                         is_gcn=(not is_physics_informed)
                     ).to(device)
                     
-                    optimizer = torch.optim.Adam(model.parameters(), lr=run_config.LEARNING_RATE)
+                    # Create optimizer with learning rate and weight decay (if enabled)
+                    # CRITICAL: Include criterion.parameters() so learnable sigmas (log_sigma_power, log_sigma_voltage) can be optimized
+                    learning_rate = run_config.LEARNING_RATE  # No longer from hyperparameter tuning
+                    weight_decay = run_config.WEIGHT_DECAY if getattr(run_config, 'USE_WEIGHT_DECAY', False) else 0.0
+                    # Combine model and criterion parameters for optimization
+                    all_params = list(model.parameters()) + list(criterion.parameters())
+                    optimizer = torch.optim.Adam(all_params, lr=learning_rate, weight_decay=weight_decay)
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     
@@ -553,7 +586,7 @@ def main():
             is_opf_mode = (_bus_types is not None)
             model_kwargs_best = create_model_kwargs(
                 model_config, best_params, num_buses, is_sequential, uses_adaptive_graph, 
-                model_name=model_name, is_opf_mode=is_opf_mode
+                model_name=model_name, is_opf_mode=is_opf_mode, config=best_config
             )
 
             # Create data loaders for best model
@@ -595,8 +628,8 @@ def main():
                 model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
             )
             
-            # Generate uncertainty visualizations
-            if base_config.SAVE_RESULTS and base_config.DATA_MODE == 'test':
+            # Generate uncertainty visualizations (for both train and test modes)
+            if base_config.SAVE_RESULTS:
                 try:
                     # Get predictions with uncertainty data (silent generation)
                     _, uncertainty_data = evaluate_model_with_uncertainty(
@@ -621,6 +654,7 @@ def main():
                         output_dir=model_output_dir,
                         model_name=model_name,
                         config=best_config,  # Pass config for time-series mode detection
+                        model_outputs=uncertainty_data.get('model_outputs', None),  # Full outputs with uncertainties if heteroscedastic
                         bus_types=uncertainty_data.get('bus_types', None)  # Pass bus_types for OPF mode
                     )
                 except Exception as e:

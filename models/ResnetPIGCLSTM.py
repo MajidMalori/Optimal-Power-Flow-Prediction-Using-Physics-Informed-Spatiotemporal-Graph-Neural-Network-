@@ -9,9 +9,12 @@ class ResnetPIGCLSTM(BaseModel):
     and expand it internally, following the provided design guide.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float,
-                 embedding_dim: int = 16, phi: float = 0.5, **kwargs):
-        # Pure state estimation: output only voltage [vm, va]
-        output_dim = 2  # Only voltage magnitude and angle
+                 embedding_dim: int = 16, phi: float = 0.5, use_heteroscedastic: bool = False, **kwargs):
+        # Homoscedastic: output bus-type dependent unknowns [batch, buses, 2]
+        # Heteroscedastic: output [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        self.use_heteroscedastic = use_heteroscedastic
+        output_dim = 4 if use_heteroscedastic else 2
         super().__init__(feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim, num_gc_layers=num_gc_layers,
                          num_buses=num_buses, rnn_type='LSTM', rnn_layers=rnn_layers, physics_informed=True, dropout=dropout)
 
@@ -45,9 +48,11 @@ class ResnetPIGCLSTM(BaseModel):
             self.lstm_layer_norms.append(nn.LayerNorm(flattened_size))
 
         # Output Layer
-        # Single head: Combined output [batch, buses, 2]
-        # OPF mode: outputs vary by bus type (PQ: V,θ | PV: Q,θ | Slack: P,Q)
-        self.output_transform = nn.Linear(self.hidden_dim, 2)  # Output: 2 features per bus
+        # Homoscedastic: [batch, buses, 2] = predictions only
+        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        output_features = 4 if use_heteroscedastic else 2
+        self.output_transform = nn.Linear(self.hidden_dim, output_features)
         self.dropout_layer = nn.Dropout(self.dropout)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
@@ -108,7 +113,8 @@ class ResnetPIGCLSTM(BaseModel):
         last_step_per_node = last_step_output.view(batch_size, self.num_buses, self.hidden_dim)
         
         # Apply the final linear transformation.
-        # Single head: Combined output
+        # Homoscedastic: [batch, buses, 2] = predictions only
+        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
         final_output_per_node = self.output_transform(last_step_per_node)
-        # Output shape: [batch_size, num_buses, 2] = OPF unknowns (varies by bus type)
         return final_output_per_node

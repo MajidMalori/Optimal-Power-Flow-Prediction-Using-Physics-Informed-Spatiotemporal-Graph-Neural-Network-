@@ -7,7 +7,7 @@ import torch.nn.functional as F
 class adaptiveGCN(nn.Module):
     # ... (init function as before) ...
     def __init__(self, feature_dim, hidden_dim, num_gc_layers, num_buses, dropout,
-                 embedding_dim: int = 16, phi: float = 0.5):
+                 embedding_dim: int = 16, phi: float = 0.5, use_heteroscedastic: bool = False):
         super(adaptiveGCN, self).__init__()
 
         # ... (parameter initializations) ...
@@ -15,6 +15,7 @@ class adaptiveGCN(nn.Module):
         self.dropout = dropout
         self.phi = phi
         self.embedding_dim = embedding_dim
+        self.use_heteroscedastic = use_heteroscedastic
         self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
         self.node_embedding2 = nn.Parameter(torch.randn(num_buses, embedding_dim))
 
@@ -23,9 +24,10 @@ class adaptiveGCN(nn.Module):
         for _ in range(num_gc_layers - 1):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
 
-        # OPF Mode: Output 2 features per bus (unknowns vary by bus type)
-        # PQ buses: V, θ | PV buses: Q, θ | Slack buses: P, Q
-        num_output_features = 2
+        # Homoscedastic: Output 2 features per bus (predictions only)
+        # Heteroscedastic: Output 4 features per bus [η1_var1, η1_var2, f2_var1, f2_var2]
+        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        num_output_features = 4 if use_heteroscedastic else 2
         self.output_layer = nn.Linear(hidden_dim, num_output_features)
 
     def forward(self, x, static_adj):

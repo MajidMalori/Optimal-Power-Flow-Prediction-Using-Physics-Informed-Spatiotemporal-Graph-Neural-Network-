@@ -21,6 +21,8 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
                   device: torch.device, config: Any, normalizer: Any, 
                   is_sequential: bool) -> Dict[str, float]:
     """Evaluates the model on the test set and returns performance metrics."""
+    import torch.nn.functional as F
+    
     model.eval()
     all_outputs, all_targets = [], []
     all_ybus = []  # Add this to collect Ybus matrices
@@ -55,7 +57,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     all_targets_tensor = torch.cat(all_targets, dim=0)
     all_ybus_tensor = torch.cat(all_ybus, dim=0)
     all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None  # OPF: [batch, buses]
-
+    
     # Get num_buses dynamically from config without hardcoding
     if hasattr(config, 'NUM_BUSES'):
         num_buses = config.NUM_BUSES
@@ -64,20 +66,71 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     else:
         raise ValueError("Config must specify NUM_BUSES")
     
+    # Check if heteroscedastic mode is enabled
+    use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+    
+    if use_heteroscedastic:
+        # Heteroscedastic: 4 features per bus [η1_var1, η1_var2, f2_var1, f2_var2]
+        num_features = 4
+    else:
+        # Homoscedastic: 2 features per bus [var1_pred, var2_pred]
+        num_features = 2
+    
     # Handle shape consistency for different model types before denormalization
-    # PURE STATE ESTIMATION: Outputs are [batch, buses, 2] (vm, va) or flattened [batch, buses*2]
     if all_outputs_tensor.dim() == 2:
-        # If model outputs flattened format [batch_size, num_buses * 2] (pure state estimation)
+        # If model outputs flattened format [batch_size, num_buses * num_features]
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 2  # Pure state estimation: only vm and va
         expected_size = num_buses * num_features
         if all_outputs_tensor.shape[1] == expected_size:
             all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
         else:
             raise ValueError(
                 f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, "
-                f"expected {expected_size} (num_buses={num_buses} * num_features={num_features})"
+                f"expected {expected_size} (num_buses={num_buses} * num_features={num_features}, heteroscedastic={use_heteroscedastic})"
             )
+    elif all_outputs_tensor.dim() == 3:
+        # Already 3D: check if last dimension matches
+        if all_outputs_tensor.shape[-1] != num_features:
+            raise ValueError(
+                f"Output shape mismatch: got {all_outputs_tensor.shape[-1]} features, "
+                f"expected {num_features} (heteroscedastic={use_heteroscedastic})"
+            )
+    
+    # If heteroscedastic, convert natural parameters to predictions before denormalization
+    if use_heteroscedastic:
+        # Extract natural parameters
+        eta1_var1_raw = all_outputs_tensor[..., 0]  # [batch, buses]
+        eta1_var2_raw = all_outputs_tensor[..., 1]  # [batch, buses]
+        f2_var1_raw = all_outputs_tensor[..., 2]    # [batch, buses]
+        f2_var2_raw = all_outputs_tensor[..., 3]     # [batch, buses]
+        
+        # Get natural function type
+        natural_function = getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
+        softplus_beta = getattr(config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
+        
+        # Compute g+(f2)
+        if natural_function == 'exp':
+            g_plus_var1 = 0.5 * torch.exp(f2_var1_raw)
+            g_plus_var2 = 0.5 * torch.exp(f2_var2_raw)
+        elif natural_function == 'softplus':
+            g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
+            g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
+        else:
+            raise ValueError(f"Unknown natural function: {natural_function}")
+        
+        # Compute natural parameters
+        eta1_var1 = eta1_var1_raw
+        eta1_var2 = eta1_var2_raw
+        eta2_var1 = -g_plus_var1
+        eta2_var2 = -g_plus_var2
+        
+        # Convert to mean: μ = -η1/(2η2)
+        eps = 1e-8
+        mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)  # [batch, buses]
+        mu_var2 = -eta1_var2 / (2.0 * eta2_var2 + eps)  # [batch, buses]
+        
+        # Stack to get predictions [batch, buses, 2]
+        all_outputs_tensor = torch.stack([mu_var1, mu_var2], dim=-1)
     
     outputs_denorm = normalizer.denormalize(all_outputs_tensor)
     targets_denorm = normalizer.denormalize(all_targets_tensor)
@@ -143,25 +196,102 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
     else:
         raise ValueError("Config must specify NUM_BUSES")
     
-    # Handle shape consistency - PURE STATE ESTIMATION: 2 features (vm, va)
+    # Check if heteroscedastic mode is enabled
+    use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+    
+    # Handle shape consistency - OPF: 2 features (homoscedastic) or 4 features (heteroscedastic)
     if all_outputs_tensor.dim() == 2:
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 2  # Pure state estimation: only vm and va
+        if use_heteroscedastic:
+            num_features = 4  # Heteroscedastic: [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
+        else:
+            num_features = 2  # Homoscedastic: [var1_pred, var2_pred]
         expected_size = num_buses * num_features
         if all_outputs_tensor.shape[1] == expected_size:
             all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
         else:
             raise ValueError(f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, expected {expected_size}")
     
-    outputs_denorm = normalizer.denormalize(all_outputs_tensor)
+    # Extract predictions and uncertainties
+    if use_heteroscedastic:
+        # Heteroscedastic: outputs are [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+        # where η1 = f1 (direct), η2 = -g+(f2) with g+ being exp or softplus
+        
+        eta1_var1_raw = all_outputs_tensor[..., 0]  # [batch, buses] - η1 for variable 1
+        eta1_var2_raw = all_outputs_tensor[..., 1]  # [batch, buses] - η1 for variable 2
+        f2_var1_raw = all_outputs_tensor[..., 2]    # [batch, buses] - f2 for variable 1
+        f2_var2_raw = all_outputs_tensor[..., 3]      # [batch, buses] - f2 for variable 2
+        
+        # Get natural function type from config
+        natural_function = getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
+        softplus_beta = getattr(config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
+        
+        # Compute g+(f2) - positive function ensuring η2 < 0
+        import torch.nn.functional as F
+        if natural_function == 'exp':
+            g_plus_var1 = 0.5 * torch.exp(f2_var1_raw)
+            g_plus_var2 = 0.5 * torch.exp(f2_var2_raw)
+        elif natural_function == 'softplus':
+            g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
+            g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
+        else:
+            raise ValueError(f"Unknown natural function: {natural_function}")
+        
+        # Compute natural parameters: η1 = f1 (direct), η2 = -g+(f2) < 0
+        eta1_var1 = eta1_var1_raw
+        eta1_var2 = eta1_var2_raw
+        eta2_var1 = -g_plus_var1
+        eta2_var2 = -g_plus_var2
+        
+        # Convert to mean and variance: μ = -η1/(2η2), σ² = -1/(2η2)
+        eps = 1e-8
+        mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)  # [batch, buses]
+        mu_var2 = -eta1_var2 / (2.0 * eta2_var2 + eps)  # [batch, buses]
+        sigma2_var1 = -1.0 / (2.0 * eta2_var1 + eps)   # [batch, buses] - variance
+        sigma2_var2 = -1.0 / (2.0 * eta2_var2 + eps)   # [batch, buses] - variance
+        
+        # No clamping (paper doesn't use it)
+        # Variance can be any positive value from natural parametrization
+        
+        # Convert to predictions (mean) in normalized space
+        predictions_norm = torch.stack([mu_var1, mu_var2], dim=-1)  # [batch, buses, 2]
+        
+        # Denormalize predictions for metrics
+        predictions_denorm = normalizer.denormalize(predictions_norm)
+        
+        # Compute log_sigma for compatibility with uncertainty analysis
+        # log_sigma = 0.5 * log(sigma²)
+        sigma_var1 = torch.sqrt(sigma2_var1)
+        sigma_var2 = torch.sqrt(sigma2_var2)
+        log_sigma_norm = torch.stack([
+            0.5 * torch.log(sigma2_var1 + eps),
+            0.5 * torch.log(sigma2_var2 + eps)
+        ], dim=-1)  # [batch, buses, 2]
+        
+        # Store full outputs (with uncertainties) for predicted uncertainty analysis
+        # Format: [mean_var1, mean_var2, log_sigma_var1, log_sigma_var2] for compatibility
+        all_outputs_with_uncertainties = torch.stack([
+            mu_var1, mu_var2,
+            0.5 * torch.log(sigma2_var1 + eps),
+            0.5 * torch.log(sigma2_var2 + eps)
+        ], dim=-1).cpu().numpy()  # [n_samples, n_buses, 4]
+    else:
+        # Homoscedastic: outputs are [batch, buses, 2]
+        predictions_denorm = normalizer.denormalize(all_outputs_tensor)
+        all_outputs_with_uncertainties = None
+    
     targets_denorm = normalizer.denormalize(all_targets_tensor)
+    
+    # Get bus_types for compute_metrics (required for OPF mode)
+    all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None
 
-    # Compute metrics
-    metrics = compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config)
+    # Compute metrics (using predictions only)
+    metrics = compute_metrics(predictions_denorm, targets_denorm, all_ybus_tensor, config, bus_types=all_bus_types_tensor)
     
     # Prepare uncertainty data
     uncertainty_data = {
-        'predictions': outputs_denorm.cpu().numpy(),
+        'predictions': predictions_denorm.cpu().numpy(),
         'targets': targets_denorm.cpu().numpy(),
         'renewable_fractions': all_renewable_fractions_tensor.cpu().numpy()
     }
@@ -170,13 +300,60 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
     if all_bus_types_tensor is not None:
         uncertainty_data['bus_types'] = all_bus_types_tensor.cpu().numpy()
     
+    # Add full model outputs with uncertainties if heteroscedastic mode
+    if use_heteroscedastic and all_outputs_with_uncertainties is not None:
+        uncertainty_data['model_outputs'] = all_outputs_with_uncertainties  # [n_samples, n_buses, 4]
+    
     return metrics, uncertainty_data
 
 
 def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, 
                               config: object, normalizer: Any, bus_types: torch.Tensor = None) -> Dict[str, float]:
     """Computes metrics on normalized data (same scale as training) for MoSOA optimization."""
+    import torch.nn.functional as F
+    
     with torch.no_grad():
+        # Check if heteroscedastic mode is enabled
+        use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+        
+        # If heteroscedastic, convert natural parameters to predictions
+        if use_heteroscedastic and outputs.shape[-1] == 4:
+            # Heteroscedastic: outputs are [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+            # Need to convert to predictions [batch, buses, 2] = [μ_var1, μ_var2]
+            
+            eta1_var1_raw = outputs[..., 0]  # [batch, buses]
+            eta1_var2_raw = outputs[..., 1]  # [batch, buses]
+            f2_var1_raw = outputs[..., 2]    # [batch, buses]
+            f2_var2_raw = outputs[..., 3]    # [batch, buses]
+            
+            # Get natural function type
+            natural_function = getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
+            softplus_beta = getattr(config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
+            
+            # Compute g+(f2)
+            if natural_function == 'exp':
+                g_plus_var1 = 0.5 * torch.exp(f2_var1_raw)
+                g_plus_var2 = 0.5 * torch.exp(f2_var2_raw)
+            elif natural_function == 'softplus':
+                g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
+                g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
+            else:
+                raise ValueError(f"Unknown natural function: {natural_function}")
+            
+            # Compute natural parameters
+            eta1_var1 = eta1_var1_raw
+            eta1_var2 = eta1_var2_raw
+            eta2_var1 = -g_plus_var1
+            eta2_var2 = -g_plus_var2
+            
+            # Convert to mean: μ = -η1/(2η2)
+            eps = 1e-8
+            mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)  # [batch, buses]
+            mu_var2 = -eta1_var2 / (2.0 * eta2_var2 + eps)  # [batch, buses]
+            
+            # Stack to get predictions [batch, buses, 2]
+            outputs = torch.stack([mu_var1, mu_var2], dim=-1)
+        
         # Ensure outputs and targets have the same shape
         if outputs.dim() != targets.dim():
             if outputs.dim() == 2 and targets.dim() == 3:
@@ -281,15 +458,27 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
         raise ValueError("Config must specify NUM_BUSES")
     
     # Handle shape consistency for different model types
-    # OPF: 2 features (unknowns per bus type)
+    # Check if heteroscedastic mode is enabled
+    use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+    
+    if use_heteroscedastic:
+        # Heteroscedastic: 4 features per bus [η1_var1, η1_var2, f2_var1, f2_var2]
+        num_features = 4
+    else:
+        # Homoscedastic: 2 features per bus [var1_pred, var2_pred]
+        num_features = 2
+    
     if all_outputs_tensor.dim() == 2:
         batch_size = all_outputs_tensor.shape[0]
-        num_features = 2  # OPF: 2 unknowns per bus
         expected_size = num_buses * num_features
         if all_outputs_tensor.shape[1] == expected_size:
             all_outputs_tensor = all_outputs_tensor.view(batch_size, num_buses, num_features)
         else:
-            raise ValueError(f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, expected {expected_size}")
+            raise ValueError(f"Unexpected flattened output size: {all_outputs_tensor.shape[1]}, expected {expected_size} (num_buses={num_buses}, num_features={num_features}, heteroscedastic={use_heteroscedastic})")
+    elif all_outputs_tensor.dim() == 3:
+        # Already 3D: check if last dimension matches
+        if all_outputs_tensor.shape[-1] != num_features:
+            raise ValueError(f"Output shape mismatch: got {all_outputs_tensor.shape[-1]} features, expected {num_features} (heteroscedastic={use_heteroscedastic})")
     
     # This ensures consistent evaluation scale between training and optimization
     all_bus_types_tensor = torch.cat(all_bus_types, dim=0) if all_bus_types else None
@@ -318,9 +507,9 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             
             # Handle shape consistency for different model types
             if outputs_norm.dim() == 2:
-                # If model outputs flattened format [batch_size, num_buses * 2] (pure state estimation)
+                # If model outputs flattened format [batch_size, num_buses * 2]
                 batch_size = outputs_norm.shape[0]
-                num_features = 2  # Pure state estimation: only vm and va
+                num_features = 2  # OPF unknowns (2 per bus)
                 expected_size = num_buses * num_features
                 if outputs_norm.shape[1] == expected_size:
                     outputs_norm = outputs_norm.view(batch_size, num_buses, num_features)
@@ -336,15 +525,22 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
             features_phys = normalizer.denormalize(features)  # [batch, buses, 10] = [p_load, q_load, ...]
 
             if is_physics_informed:
+                # Get bus types from batch (OPF: bus-type-dependent unknowns)
+                bus_types = batch.get('bus_types', None)  # [batch, buses] or None
+                if bus_types is not None:
+                    bus_types = bus_types.to(device)
+                
                 # Calculate physics-based metrics for physics-informed models
-                # PURE STATE ESTIMATION: Pass voltages (2 features) and measurements (10 features) separately
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus)
-                norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                # Use measured power for carbon emissions calculation
+                # OPF: Pass predicted unknowns (2 features) and measurements (10 features) separately
+                # CRITICAL: Must pass bus_types for correct voltage state reconstruction
+                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus, bus_types=bus_types)
+                norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys, measurements=features_phys, bus_types=bus_types)
+                # Use PREDICTED state for carbon emissions calculation (model-dependent)
                 emissions = physics_calculator._compute_carbon_emissions(
-                    features_phys, time_carbon, time_energy, renewable_frac
+                    features_phys, time_carbon, time_energy, renewable_frac,
+                    voltages=outputs_phys, Ybus=ybus, bus_types=bus_types
                 )
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus)
+                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus, bus_types=bus_types)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
                 batch_size = features.shape[0]
@@ -420,6 +616,46 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
 
             outputs_norm = model(features, adj)
             
+            # Check if heteroscedastic mode is enabled
+            use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+            
+            # Handle heteroscedastic outputs: extract predictions from natural parameters
+            if use_heteroscedastic and outputs_norm.shape[-1] == 4:
+                # Heteroscedastic: outputs are [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+                # Extract natural parameters and convert to predictions
+                # F is already imported at module level
+                
+                eta1_var1_raw = outputs_norm[..., 0]  # [batch, buses]
+                eta1_var2_raw = outputs_norm[..., 1]  # [batch, buses]
+                f2_var1_raw = outputs_norm[..., 2]    # [batch, buses]
+                f2_var2_raw = outputs_norm[..., 3]     # [batch, buses]
+                
+                # Get natural function type
+                natural_function = getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
+                softplus_beta = getattr(config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
+                
+                # Compute g+(f2)
+                if natural_function == 'exp':
+                    g_plus_var1 = 0.5 * torch.exp(f2_var1_raw)
+                    g_plus_var2 = 0.5 * torch.exp(f2_var2_raw)
+                elif natural_function == 'softplus':
+                    g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
+                    g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
+                else:
+                    raise ValueError(f"Unknown natural function: {natural_function}")
+                
+                # Compute natural parameters
+                eta2_var1 = -g_plus_var1
+                eta2_var2 = -g_plus_var2
+                
+                # Convert to mean: μ = -η1/(2η2)
+                eps = 1e-8
+                mu_var1 = -eta1_var1_raw / (2.0 * eta2_var1 + eps)  # [batch, buses]
+                mu_var2 = -eta1_var2_raw / (2.0 * eta2_var2 + eps)  # [batch, buses]
+                
+                # Stack to get predictions [batch, buses, 2]
+                outputs_norm = torch.stack([mu_var1, mu_var2], dim=-1)
+            
             # Handle shape consistency for different model types
             if outputs_norm.dim() == 2:
                 batch_size = outputs_norm.shape[0]
@@ -435,15 +671,22 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
             features_phys = normalizer.denormalize(features)  # [batch, buses, 10] = [p_load, q_load, ...]
 
             if is_physics_informed:
+                # Get bus types from batch (OPF: bus-type-dependent unknowns)
+                bus_types = batch.get('bus_types', None)  # [batch, buses] or None
+                if bus_types is not None:
+                    bus_types = bus_types.to(device)
+                
                 # Calculate physics-based metrics for physics-informed models
-                # PURE STATE ESTIMATION: Pass voltages (2 features) and measurements (10 features) separately
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus)
-                norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys)
-                # Use measured power for carbon emissions calculation
+                # OPF: Pass predicted unknowns (2 features) and measurements (10 features) separately
+                # CRITICAL: Must pass bus_types for correct voltage state reconstruction
+                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus, bus_types=bus_types)
+                norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys, measurements=features_phys, bus_types=bus_types)
+                # Use PREDICTED state for carbon emissions calculation (model-dependent)
                 emissions = physics_calculator._compute_carbon_emissions(
-                    features_phys, time_carbon, time_energy, renewable_frac
+                    features_phys, time_carbon, time_energy, renewable_frac,
+                    voltages=outputs_phys, Ybus=ybus, bus_types=bus_types
                 )
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus)
+                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus, bus_types=bus_types)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
                 batch_size = features.shape[0]

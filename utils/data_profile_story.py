@@ -82,6 +82,10 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         # TOP ROW: Daily Load and Generation Profiles
         # ========================================================================
         
+        # Store data for consistent y-axis scaling
+        load_data_all = []
+        gen_data_all = []
+        
         # 1. Total Active Load (sum across all buses)
         ax = axes[0, 0]
         ax.set_title('Total Active Load (Sum across all buses)', fontweight='bold', fontsize=12)
@@ -93,6 +97,7 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
                 continue
             
             load_data = np.sum(p_load[mask], axis=1)  # Sum across buses
+            load_data_all.append(load_data)
             hourly_mean = []
             hourly_std = []
             
@@ -117,18 +122,11 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         ax.set_xticklabels([f'{h:02d}:00' for h in range(0, hours_per_day, 3)])
         ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
-        
-        # Set xlabel for top row
         axes[0, 0].set_xlabel('Hour of Day', fontsize=11)
         
-        # Expected pattern check
-        max_hour = np.argmax([np.nanmean([np.mean(np.sum(p_load[hours == h], axis=1)) for _ in range(1)]) for h in range(hours_per_day)])
-        if max_hour not in [17, 18, 19]:
-            print(f"  Warning: Load peak is at hour {max_hour}, not at expected evening peak!")
-        
-        # 2. Total Renewable Generation
+        # 2. Total Generation (Conventional + Renewable)
         ax = axes[0, 1]
-        ax.set_title('Total Renewable Generation (Sum across all buses)', fontweight='bold', fontsize=12)
+        ax.set_title('Total Generation (Conventional + Renewable)', fontweight='bold', fontsize=12)
         ax.set_ylabel('Generation (p.u.)', fontsize=11)
         
         for i, ren_frac in enumerate(unique_ren_fractions):
@@ -136,15 +134,17 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
             if not np.any(mask):
                 continue
             
-            ren_data = np.sum(p_ren[mask], axis=1)
+            # Total generation = conventional + renewable
+            total_gen = np.sum(p_conv[mask] + p_ren[mask], axis=1)  # Sum across buses
+            gen_data_all.append(total_gen)
             hourly_mean = []
             hourly_std = []
             
             for h in range(hours_per_day):
                 hour_mask = (hours[mask] == h)
                 if np.any(hour_mask):
-                    hourly_mean.append(np.mean(ren_data[hour_mask]))
-                    hourly_std.append(np.std(ren_data[hour_mask]))
+                    hourly_mean.append(np.mean(total_gen[hour_mask]))
+                    hourly_std.append(np.std(total_gen[hour_mask]))
                 else:
                     hourly_mean.append(np.nan)
                     hourly_std.append(np.nan)
@@ -161,27 +161,16 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         ax.set_xticklabels([f'{h:02d}:00' for h in range(0, hours_per_day, 3)])
         ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
-        
-        # Check renewable pattern
-        # p_ren includes both wind and solar, so patterns are mixed
-        # Solar peaks at noon, but wind can be high at night
-        ren_max_hour = np.argmax([np.nanmean([np.mean(np.sum(p_ren[hours == h], axis=1)) for _ in range(1)]) for h in range(hours_per_day)])
-        
-        # Check if renewables are zero at night
-        # Wind can generate at night, so this is expected
-        night_hours = [0, 1, 2, 3, 4, 20, 21, 22, 23]
-        night_ren_mean = np.mean([np.mean(np.sum(p_ren[hours == h], axis=1)) for h in night_hours if np.any(hours == h)])
-        print(f"  Night renewable generation (hours 0-4, 20-23): {night_ren_mean:.4f} MW")
-        print(f"    (Note: Wind generation can occur at night, so this is expected if wind is present)")
-        
-        # Set xlabel for top row
         axes[0, 1].set_xlabel('Hour of Day', fontsize=11)
+        
+        # Let each plot have its own y-axis scale for better visibility
         
         # ========================================================================
         # BOTTOM ROW: Data Variability and Integrity
         # ========================================================================
         
         # 3. Variability (Coefficient of Variation) across time
+        # CV = std/mean (standardized measure of dispersion)
         ax = axes[1, 0]
         ax.set_title('Coefficient of Variation (Std/Mean) across Time for Each Hour', fontweight='bold', fontsize=12)
         ax.set_ylabel('CV = Std/Mean', fontsize=11)
@@ -191,13 +180,14 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
             if not np.any(mask):
                 continue
             
-            ren_data = np.sum(p_ren[mask], axis=1)
+            # Use total generation (conventional + renewable) for CV calculation
+            total_gen = np.sum(p_conv[mask] + p_ren[mask], axis=1)
             hourly_cv = []
             
             for h in range(hours_per_day):
                 hour_mask = (hours[mask] == h)
                 if np.any(hour_mask):
-                    hour_data = ren_data[hour_mask]
+                    hour_data = total_gen[hour_mask]
                     mean_val = np.mean(hour_data)
                     if mean_val > 1e-6:  # Avoid division by zero
                         cv = np.std(hour_data) / mean_val
@@ -283,10 +273,22 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         # Layout for single figure
         fig.tight_layout(rect=[0, 0.03, 1, 0.97])
         
-        # Save to experimental results directory (respects current run directory)
-        if hasattr(config, 'CURRENT_RUN_DIR') and config.CURRENT_RUN_DIR:
-            output_dir = os.path.join(config.CURRENT_RUN_DIR, f"{case_name.replace('case', '')}bus")
-        else:
+        # Save to current run directory (in run_XXXXXX/XXbus folder, not experimental_results/XXbus)
+        # CURRENT_RUN_DIR is a property, so we need to check if timestamp is set
+        try:
+            # Check if timestamp is initialized (CURRENT_RUN_DIR depends on it)
+            if hasattr(config, '_CURRENT_RUN_TIMESTAMP') and config._CURRENT_RUN_TIMESTAMP:
+                current_run_dir = config.CURRENT_RUN_DIR
+                if current_run_dir and os.path.exists(os.path.dirname(current_run_dir)):
+                    output_dir = os.path.join(current_run_dir, f"{case_name.replace('case', '')}bus")
+                else:
+                    # Fallback if run directory doesn't exist yet
+                    output_dir = os.path.join(config.EXPERIMENTAL_RESULTS_DIR, f"{case_name.replace('case', '')}bus")
+            else:
+                # Timestamp not set yet, use experimental_results (shouldn't happen, but safe fallback)
+                output_dir = os.path.join(config.EXPERIMENTAL_RESULTS_DIR, f"{case_name.replace('case', '')}bus")
+        except (AttributeError, TypeError):
+            # Fallback if CURRENT_RUN_DIR property fails
             output_dir = os.path.join(config.EXPERIMENTAL_RESULTS_DIR, f"{case_name.replace('case', '')}bus")
         os.makedirs(output_dir, exist_ok=True)
         
@@ -295,11 +297,7 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
         
-        # Print summary statistics
-        print(f"\nSummary Statistics:")
-        print(f"  Total load range: {np.sum(p_load, axis=1).min():.4f} - {np.sum(p_load, axis=1).max():.4f} MW")
-        print(f"  Total renewable range: {np.sum(p_ren, axis=1).min():.4f} - {np.sum(p_ren, axis=1).max():.4f} MW")
-        print(f"  Renewable std/mean (overall CV): {np.std(p_ren) / (np.mean(p_ren) + 1e-6):.4f}")
+        # Summary statistics computed but not printed (plots show the data)
         
         return issues
         

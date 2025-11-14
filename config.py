@@ -11,8 +11,8 @@ class Args:
     """
     # === MODEL & SYSTEM CONFIGURATION ===
     test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = '118'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-    models_to_train = 'AdaptivePIGCN'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
+    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
+    models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
     seed = 42
     
     # === DATA CONFIGURATION ===
@@ -20,9 +20,11 @@ class Args:
     train_timesteps = 12000  # Number of timesteps for train mode (500 days = 300+100+100 for 60/20/20 split)
     test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
     
-    # Data profile story configuration
-    generate_data_profile_story = True  # True: Generate data profile story graphs, False: Skip (faster)
-    # Generates professional graphs telling the story of your data (load/generation profiles, integrity checks)
+    # Data plotting configuration
+    plot_data_info = True  # True: Generate data validation and profile story plots in bus folders, False: Skip (faster)
+    # When True, generates:
+    # - Data validation plots (if any) in each bus folder
+    # - Data profile story plots (load/generation profiles, integrity checks) in each bus folder
     
     # ┌──────────────────────────────────────────────────────────────────────────┐
     # │ TIMESTEP REFERENCE TABLE (60/20/20 split with complete 24-hour cycles)  │
@@ -47,19 +49,20 @@ class Args:
     # Control model size per bus system for experimentation
     # Options: 'normal' (conservative), 'medium' (balanced), 'large' (maximum capacity)
     #
-    # Capacity Presets (WIDENED RANGES for better MoSOA exploration):
+    # Capacity Presets (REDUCED RANGES for smaller, faster models):
     # ┌─────────┬────────────────────┬──────────────────────┬─────────────────────┐
     # │ System  │ normal             │ medium               │ large               │
     # ├─────────┼────────────────────┼──────────────────────┼─────────────────────┤
-    # │ 33-bus  │ H:32-96, GC:1-6    │ H:64-128, GC:3-7     │ H:96-160, GC:5-9    │
-    # │ 57-bus  │ H:32-96, GC:1-6    │ H:64-128, GC:3-7     │ H:96-160, GC:5-9    │
-    # │ 118-bus │ H:64-128, GC:2-8   │ H:96-160, GC:4-9     │ H:128-256, GC:6-12  │
+    # │ 33-bus  │ H:32-64, GC:1-4    │ H:48-96, GC:2-5     │ H:64-128, GC:3-7    │
+    # │ 57-bus  │ H:32-64, GC:1-4    │ H:48-96, GC:2-5     │ H:64-128, GC:3-7    │
+    # │ 118-bus │ H:64-128, GC:2-6   │ H:96-160, GC:4-9    │ H:128-256, GC:6-12  │
     # └─────────┴────────────────────┴──────────────────────┴─────────────────────┘
     # H=Hidden_dim, GC=GC_layers, E=Embedding_dim
+    # Reduced normal capacity: 33/57-bus capped at 64, 118-bus capped at 128
     #
-    CAPACITY_33_BUS = 'normal'   # 33-bus: normal is sufficient
-    CAPACITY_57_BUS = 'normal'   # 57-bus: normal is sufficient  
-    CAPACITY_118_BUS = 'medium'  # 118-bus: normal now includes 64-128 (covers 128)
+    CAPACITY_33_BUS = 'normal'   # 33-bus: reduced to H:32-64, GC:1-4 (was 32-96, 1-6)
+    CAPACITY_57_BUS = 'normal'   # 57-bus: reduced to H:32-64, GC:1-4 (was 32-96, 1-6)
+    CAPACITY_118_BUS = 'large'  # 118-bus: reduced to H:64-128, GC:2-6 (was 64-128, 2-8
     
     # === RESULTS SAVING CONFIGURATION ===
     save_results = True  # False: No files saved (console output only), True: Save all results
@@ -93,11 +96,44 @@ class Config:
     
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
-    LEARNING_RATE = 0.0005
-    NUM_EPOCHS = 5  # Testing medium vs large capacity (set to 200 for full training)
+    LEARNING_RATE = 0.0005  # Best from LR testing: 0.0005 works well for both GCN and AdaptivePIGCN  # Increased from 0.001 to help escape local minima (model was stuck at plateau)
+    NUM_EPOCHS = 10  # Testing medium vs large capacity (set to 200 for full training)
     EARLY_STOPPING_PATIENCE = 75  # Increased to prevent premature stopping on 118-bus
-    TRAIN_SPLIT = 0.6  # Changed to 0.6 for time-series (was 0.7)
-    VAL_SPLIT = 0.2    # Changed to 0.2 for time-series (was 0.15)
+    
+    # --- Gradient Accumulation Configuration ---
+    # Gradient accumulation simulates larger batch sizes without storing all gradients at once
+    # If False: Increases actual batch size (faster but uses more memory)
+    # If True: Uses smaller batches with accumulation (slower but uses less memory)
+    USE_GRADIENT_ACCUMULATION = False  # Set to False to disable and use larger batches (requires more memory)
+    
+    # --- Learning Rate Scheduler Configuration ---
+    # TEST RESULTS (Nov 2025): OneCycleLR causes up-down-up MSE pattern (scores: -75 to -99)
+    # Best configurations:
+    #   - GCN: StepLR + EB_On_Conservative (score: 69.49, decreasing: True, no overfitting)
+    #   - AdaptivePIGCN: CosineAnnealingLR + EB_On_Aggressive (score: 51.75, decreasing: True, no overfitting)
+    # RECOMMENDATION: Disable OneCycleLR, use StepLR for GCN, CosineAnnealingLR for AdaptivePIGCN
+    USE_LEARNING_RATE_SCHEDULER = False  # DISABLED: OneCycleLR causes instability. Use StepLR/CosineAnnealingLR instead.
+    ONECYCLE_MAX_LR = None  # None: Auto-calculate as 10x LEARNING_RATE (recommended)
+    ONECYCLE_PCT_START = 0.3  # 30% of cycle for warmup (increasing phase)
+    ONECYCLE_DIV_FACTOR = 25.0  # Initial LR = max_lr / div_factor (smooth start)
+    ONECYCLE_FINAL_DIV_FACTOR = 10000.0  # Final LR = max_lr / final_div_factor (very low at end)
+    
+    # Alternative scheduler settings (now implemented in trainer)
+    # Options: 'StepLR', 'CosineAnnealingLR', 'ExponentialLR', 'ReduceLROnPlateau', 'OneCycleLR', None
+    # The selected scheduler will be used for ALL models
+    # Recommended: 'StepLR' for GCN, 'CosineAnnealingLR' for AdaptivePIGCN (based on test results)
+    LR_SCHEDULER_TYPE = 'StepLR'  # Set to None to disable scheduler, or specify scheduler type
+    STEPLR_STEP_SIZE = 7  # Decay LR every N epochs
+    STEPLR_GAMMA = 0.5  # Multiply LR by gamma at each step
+    COSINEANNEALINGLR_T_MAX = 20  # Maximum number of iterations (epochs)
+    COSINEANNEALINGLR_ETA_MIN = 1e-6  # Minimum learning rate
+    
+    # --- Weight Decay (L2 Regularization) Configuration ---
+    USE_WEIGHT_DECAY = False  # True: Enable L2 regularization, False: Disable
+    WEIGHT_DECAY = 1e-5  # Weight decay coefficient (only used if USE_WEIGHT_DECAY=True)
+    
+    TRAIN_SPLIT = 0.6  
+    VAL_SPLIT = 0.2    
     
     # Mixed precision training (speeds up training but may reduce precision slightly)
     USE_MIXED_PRECISION = False  # True: Use float16 (faster), False: Use float32 (more accurate)
@@ -120,11 +156,63 @@ class Config:
     # Loss weighting method: Learnable Uncertainty Weighting (Kendall et al., CVPR 2018)
     # Automatically learns optimal weights via backpropagation
     # Paper: "Multi-Task Learning Using Uncertainty to Weigh Losses"
-    # No configuration needed - always uses learnable uncertainty weighting
+    USE_HETEROSCEDASTIC_UNCERTAINTY = True  # True: Heteroscedastic (input-dependent), False: Homoscedastic (learnable params)
+    
+    # Homoscedastic: Single learnable sigma per loss term (simpler, faster)
+    # Heteroscedastic: Model predicts uncertainty per sample (more expressive, requires model to output uncertainties)
+    
+    # Heteroscedastic loss formulation (only used if USE_HETEROSCEDASTIC_UNCERTAINTY=True)
+    # Natural Parametrization: Immer et al. (NeurIPS 2023) - "Effective Bayesian Heteroscedastic Regression"
+    # Paper: https://arxiv.org/abs/2306.17758, Citations: 27+ (as of Nov 2025)
+    # 
+    # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+    # Model outputs: [η1_var1, η1_var2, f2_var1, f2_var2] where η2 = -g+(f2)
+    # g+ is exp or softplus (ensures η2 < 0, avoiding negative log variance issues)
+    # 
+    # Key advantages:
+    # 1. Jointly concave objective (more stable optimization)
+    # 2. Simpler gradients: ∇η1 = μ - y, ∇η2 = σ² - (y² - μ²) (separate residuals)
+    # 3. No negative log variance issues (η2 < 0 by construction)
+    # 4. Better generalization (empirical Bayes regularization)
+    
+    # Natural parametrization function type
+    # Options: 'exp' (g+(x) = 0.5*exp(x)) or 'softplus' (g+(x) = (1/β)*log(1+exp(β*x)))
+    # getattr() explanation: getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
+    #   - Gets HETEROSCEDASTIC_NATURAL_FUNCTION from config if it exists
+    #   - If it doesn't exist, uses 'exp' as the default value
+    #   - This allows optional config parameters with sensible defaults
+    HETEROSCEDASTIC_NATURAL_FUNCTION = 'exp'  # 'exp' or 'softplus'
+    HETEROSCEDASTIC_SOFTPLUS_BETA = 1.0  # Only used if HETEROSCEDASTIC_NATURAL_FUNCTION='softplus'
+    
+    # Clamping for numerical stability (NOT in paper)
+    # Paper (Appendix E.2) does NOT use clamping - they compute natural parameters directly
+    # We add clamping to prevent: division by zero (η2 → 0), overflow (η2 → -∞)
+    # Set to False to match paper exactly (may have numerical issues)
+    HETEROSCEDASTIC_USE_CLAMPING = False  # True: Use clamping (not in paper), False: Match paper exactly
+    
+    # Violation weighting (NOT in paper - our addition for physics-informed models)
+    # Paper only does regression, not physics constraints
+    # If True: Weight violations using predicted uncertainties (BIV-style: violation/variance)
+    # If False: Use unweighted violations (match paper exactly - no physics constraints)
+    HETEROSCEDASTIC_WEIGHT_VIOLATIONS = True  # True: Weight violations (our addition), False: Unweighted (match paper)
+    
+    # Empirical Bayes (Section 4.3 from paper) - Automatic regularization via marginal likelihood optimization
+    # Paper: "Effective Bayesian Heteroscedastic Regression with Deep Neural Networks" (Immer et al., NeurIPS 2023)
+    # Automatically learns layer-wise prior precisions (δl) by maximizing marginal likelihood
+    # This provides automatic regularization and helps prevent overfitting
+    # TEST RESULTS (Nov 2025): EB significantly improves performance. Best configs use EB.
+    #   - GCN: EB_On_Conservative (burn_in=5, update_freq=5, steps=10, lr=0.001)
+    #   - AdaptivePIGCN: EB_On_Aggressive (burn_in=3, update_freq=3, steps=20, lr=0.01)
+    USE_EMPIRICAL_BAYES = True  # ENABLED: Test results show EB improves performance
+    # Conservative settings (best for GCN):
+    EB_BURN_IN_EPOCHS = 5  # Let model stabilize before starting EB optimization (reduced from 10)
+    EB_UPDATE_FREQUENCY = 50  # Update hyperparameters every N epochs (reduced from 20 for more frequent updates)
+    EB_HYPERPARAMETER_STEPS = 10  # Number of gradient steps for δ optimization (reduced from 20)
+    EB_HYPERPARAMETER_LR = 0.001  # Lower learning rate for δ optimization (conservative)
+    # Note: For AdaptivePIGCN, consider using aggressive settings (burn_in=3, update_freq=3, steps=20, lr=0.01)
+    
+    # HETEROSCEDASTIC_BETA removed - only BIV method is supported (no beta parameter needed)
 
-    
-    USE_SEPARATE_VM_VA_BACKWARD = False
-    
     
     # --- Data Mode Configuration (Set during __init__ from Args) ---
     # DATA_MODE and DATA_MODE_TIMESTEPS are set dynamically in __init__()
@@ -153,21 +241,22 @@ class Config:
         """
         Base template for all model configurations.
         
-        PURE STATE ESTIMATION APPROACH:
+        OPF APPROACH:
         - INPUT_DIM: Number of input features (measurements from sensors)
-        - OUTPUT_DIM: Number of output features (state variables to estimate)
+        - OUTPUT_DIM: Number of output features (OPF unknowns: 2 per bus, bus-type dependent)
         - FEATURE_DIM: Legacy name for OUTPUT_DIM (kept for backward compatibility)
         """
         # Input features (measurements): [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_partial, va_partial]
         INPUT_DIM = 10
         
-        # Output features (state to estimate): [vm, va] - voltage magnitude and angle
+        # Output features (OPF unknowns): 2 per bus (PQ: V,θ | PV: Q,θ | Slack: P,Q)
         OUTPUT_DIM = 2
         
         # Legacy field (kept for backward compatibility with older model code)
         FEATURE_DIM = OUTPUT_DIM  # This refers to the OUTPUT dimension
         
-        DROPOUT = 0.2
+        DROPOUT = 0.2  # Dropout rate (0.0 = disabled, 0.1-0.3 = typical, 0.5+ = aggressive)
+        # Higher dropout = stronger regularization = less overfitting but may underfit
         HIDDEN_DIM_RANGE = (16, 128)  # Default fallback
         NUM_GC_LAYERS_RANGE = (1, 5)
         
@@ -182,19 +271,19 @@ class Config:
             # Single values are converted to ranges with ±10% tolerance for optimization
             capacity_settings = {
                 33: {
-                    'normal': (32, 96),    # Wider range: 32-96 (was 32-64)
-                    'medium': (64, 128),   # Wider range: 64-128 (was 58-70)
-                    'large': (96, 160)     # Wider range: 96-160 (was 86-106)
+                    'normal': (32, 64),    # Reduced: 32-64 (was 32-96) - capped at 64
+                    'medium': (48, 96),    # Reduced: 48-96 (was 64-128)
+                    'large': (64, 128)     # Reduced: 64-128 (was 96-160) - capped at 128
                 },
                 57: {
-                    'normal': (32, 96),    # Wider range: 32-96 (was 32-64)
-                    'medium': (64, 128),   # Wider range: 64-128 (was 58-70)
-                    'large': (96, 160)     # Wider range: 96-160 (was 86-106)
+                    'normal': (32, 64),    # Reduced: 32-64 (was 32-96) - capped at 64
+                    'medium': (48, 96),    # Reduced: 48-96 (was 64-128)
+                    'large': (64, 128)     # Reduced: 64-128 (was 96-160) - capped at 128
                 },
                 118: {
-                    'normal': (64, 128),
-                    'medium': (96, 160),   # Wider range: 96-160 (was 86-106)
-                    'large': (128, 256)    # Wider range: 128-256 (was 115-141)
+                    'normal': (64, 128),   # Kept: 64-128 (capped at 128 as requested)
+                    'medium': (96, 160),   # Kept: 96-160
+                    'large': (128, 256)    # Kept: 128-256
                 }
             }
             
@@ -216,19 +305,19 @@ class Config:
             """
             capacity_settings = {
                 33: {
-                    'normal': (1, 6),     # Wider range: 1-6 (was 1-5)
-                    'medium': (3, 7),     # Wider range: 3-7 (was 4-6)
-                    'large': (5, 9)       # Wider range: 5-9 (was 5-7)
+                    'normal': (1, 4),     # Reduced: 1-4 (was 1-6)
+                    'medium': (2, 5),     # Reduced: 2-5 (was 3-7)
+                    'large': (3, 7)       # Reduced: 3-7 (was 5-9)
                 },
                 57: {
-                    'normal': (1, 6),     # Wider range: 1-6 (was 1-5)
-                    'medium': (3, 7),     # Wider range: 3-7 (was 4-6)
-                    'large': (5, 9)       # Wider range: 5-9 (was 5-7)
+                    'normal': (1, 4),     # Reduced: 1-4 (was 1-6)
+                    'medium': (2, 5),     # Reduced: 2-5 (was 3-7)
+                    'large': (3, 7)       # Reduced: 3-7 (was 5-9)
                 },
                 118: {
-                    'normal': (2, 8),     # Wider range: 2-8 (was 1-5)
-                    'medium': (4, 9),     # Wider range: 4-9 (was 5-7)
-                    'large': (6, 12)      # Wider range: 6-12 (was 7-9)
+                    'normal': (2, 6),     # Reduced: 2-6 (was 2-8)
+                    'medium': (4, 9),     # Kept: 4-9
+                    'large': (6, 12)      # Kept: 6-12
                 }
             }
             
@@ -250,19 +339,19 @@ class Config:
             """
             capacity_settings = {
                 33: {
-                    'normal': (8, 48),    # Wider range: 8-48 (was 8-32)
-                    'medium': (32, 64),   # Wider range: 32-64 (was 29-35)
-                    'large': (48, 96)     # Wider range: 48-96 (was 43-53)
+                    'normal': (8, 24),    # Reduced: 8-24 (was 8-48)
+                    'medium': (24, 48),   # Reduced: 24-48 (was 32-64)
+                    'large': (32, 64)     # Reduced: 32-64 (was 48-96) - capped at 64
                 },
                 57: {
-                    'normal': (8, 48),    # Wider range: 8-48 (was 8-32)
-                    'medium': (32, 64),   # Wider range: 32-64 (was 29-35)
-                    'large': (48, 96)     # Wider range: 48-96 (was 43-53)
+                    'normal': (8, 24),    # Reduced: 8-24 (was 8-48)
+                    'medium': (24, 48),   # Reduced: 24-48 (was 32-64)
+                    'large': (32, 64)     # Reduced: 32-64 (was 48-96) - capped at 64
                 },
                 118: {
-                    'normal': (16, 64),   # Wider range: 16-64 (was 8-32)
-                    'medium': (48, 96),   # Wider range: 48-96 (was 43-53)
-                    'large': (64, 128)    # Wider range: 64-128 (was 58-70)
+                    'normal': (16, 48),   # Reduced: 16-48 (was 16-64)
+                    'medium': (48, 96),   # Kept: 48-96
+                    'large': (64, 128)    # Kept: 64-128
                 }
             }
             
@@ -293,7 +382,7 @@ class Config:
                 # THOROUGH: Small systems can afford extensive search
                 return {
                     'num_seagulls': 1,     
-                    'max_iterations': 2,   
+                    'max_iterations': 1,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
@@ -301,7 +390,7 @@ class Config:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
                     'num_seagulls': 1,      
-                    'max_iterations': 2,   
+                    'max_iterations': 1,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
@@ -309,7 +398,7 @@ class Config:
                 # QUICK: Large systems prioritize efficiency
                 return {
                     'num_seagulls': 1,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 2,    # Temporarily set to 5 for quick testing
+                    'max_iterations': 1,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -414,8 +503,10 @@ class Config:
         # Set save_results flag
         self.SAVE_RESULTS = save_results
         
-        # Set data profile story flag from Args
-        self.GENERATE_DATA_PROFILE_STORY = Args.generate_data_profile_story
+        # Set data plotting flag from Args (controls both validation and profile story plots)
+        self.PLOT_DATA_INFO = Args.plot_data_info
+        # Backward compatibility: also set GENERATE_DATA_PROFILE_STORY (deprecated, use PLOT_DATA_INFO)
+        self.GENERATE_DATA_PROFILE_STORY = Args.plot_data_info
         
         # Clear experimental results folder if requested
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
