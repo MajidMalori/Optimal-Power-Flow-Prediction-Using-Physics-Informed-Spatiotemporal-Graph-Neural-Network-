@@ -16,7 +16,7 @@ class Args:
     seed = 42
     
     # === DATA CONFIGURATION ===
-    data_mode = 'train'  # Options: 'train' or 'test'
+    data_mode = 'test'  # Options: 'train' or 'test'
     train_timesteps = 12000  # Number of timesteps for train mode (500 days = 300+100+100 for 60/20/20 split)
     test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
     
@@ -69,8 +69,7 @@ class Args:
     clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
     
     # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
-    use_mosoa = True  # True: Use MoSOA from paper, False: Use trial-based search (faster)
-    num_trials = 20  # Only used if use_mosoa=False
+    use_mosoa = True  # Use MoSOA from paper for hyperparameter optimization
     
     # === PARALLEL TRAINING CONFIGURATION ===
     # Device configuration
@@ -81,6 +80,63 @@ class Args:
     
     # Worker configuration (auto-configured based on device if set to 'auto')
     data_workers = 'auto'         # Number of data loading workers
+
+class FeatureIndices:
+    """
+    Feature indices for the 10-dimensional measurement vector.
+    Single source of truth to prevent indexing bugs.
+    
+    Order matches gen_meas_best.py: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm, va]
+    """
+    P_LOAD = 0      # Active load (MW)
+    Q_LOAD = 1      # Reactive load (Mvar)
+    P_EXT_GRID = 2  # External grid active power (MW)
+    Q_EXT_GRID = 3  # External grid reactive power (Mvar)
+    P_CONV = 4      # Conventional generation active power (MW)
+    Q_CONV = 5      # Conventional generation reactive power (Mvar)
+    P_REN = 6       # Renewable generation active power (MW)
+    Q_REN = 7       # Renewable generation reactive power (Mvar)
+    VM = 8          # Voltage magnitude (p.u.)
+    VA = 9          # Voltage angle (rad)
+    
+    # Feature names for documentation and debugging
+    FEATURE_NAMES = [
+        'p_load', 'q_load', 'p_ext_grid', 'q_ext_grid',
+        'p_conv', 'q_conv', 'p_ren', 'q_ren', 'vm', 'va'
+    ]
+    
+    NUM_FEATURES = 10
+
+
+class TargetIndices:
+    """
+    Target indices for the 2-dimensional OPF unknown vector.
+    
+    In OPF mode, targets are bus-type dependent:
+    - PQ bus (0): [V, θ] - both unknown
+    - PV bus (1): [Q, θ] - V is known, Q and θ are predicted
+    - Slack bus (2): [P, Q] - V and θ are known, P and Q are predicted
+    """
+    VAR1 = 0  # First unknown (bus-type dependent)
+    VAR2 = 1  # Second unknown (bus-type dependent)
+    
+    NUM_TARGETS = 2
+
+
+class ModelOutputIndices:
+    """
+    Model output indices for the 4-dimensional natural parameter vector.
+    
+    Heteroscedastic uncertainty with natural parametrization (Immer et al., NeurIPS 2023):
+    [η1_var1, η1_var2, f2_var1, f2_var2]
+    """
+    ETA1_VAR1 = 0  # Natural parameter η1 for variable 1
+    ETA1_VAR2 = 1  # Natural parameter η1 for variable 2
+    F2_VAR1 = 2    # f2 for variable 1 (used to compute η2 via softplus)
+    F2_VAR2 = 3    # f2 for variable 2 (used to compute η2 via softplus)
+    
+    NUM_OUTPUTS = 4
+
 
 class Config:
     """
@@ -96,47 +152,46 @@ class Config:
     
     # --- Training Parameters ---
     BATCH_SIZE = 64  # Default, will be overridden by adaptive function
-    LEARNING_RATE = 0.0005  # Best from LR testing: 0.0005 works well for both GCN and AdaptivePIGCN  # Increased from 0.001 to help escape local minima (model was stuck at plateau)
-    NUM_EPOCHS = 10  # Testing medium vs large capacity (set to 200 for full training)
-    EARLY_STOPPING_PATIENCE = 75  # Increased to prevent premature stopping on 118-bus
+    LEARNING_RATE = 0.0005  # Best from LR testing: 0.0005 works well for both GCN and AdaptivePIGCN
+    MAX_GRAD_NORM = 1.0  # Gradient clipping to prevent explosion (critical for natural parametrization with exp)
+    NUM_EPOCHS = 50  # Testing medium vs large capacity (set to 200 for full training)
+    
+    # --- Physics Loss Annealing ---
+    PHYSICS_WARMUP_EPOCHS = 10  # Gradually introduce physics losses over first N epochs (prevents early explosion)
+    # NOTE: Power violations are in (p.u.)² - per-unit system already provides normalization via S_base (constant)
+    # DO NOT divide by dynamic load in training loss - this makes loss non-stationary
+    # Learnable weights (Kendall-style) automatically handle scale differences between loss terms
+    EARLY_STOPPING_PATIENCE = 20  # Increased to prevent premature stopping on 118-bus
     
     # --- Gradient Accumulation Configuration ---
-    # Gradient accumulation simulates larger batch sizes without storing all gradients at once
-    # If False: Increases actual batch size (faster but uses more memory)
-    # If True: Uses smaller batches with accumulation (slower but uses less memory)
-    USE_GRADIENT_ACCUMULATION = False  # Set to False to disable and use larger batches (requires more memory)
+    # Gradient accumulation is disabled (always uses actual batch size)
     
     # --- Learning Rate Scheduler Configuration ---
-    # TEST RESULTS (Nov 2025): OneCycleLR causes up-down-up MSE pattern (scores: -75 to -99)
-    # Best configurations:
-    #   - GCN: StepLR + EB_On_Conservative (score: 69.49, decreasing: True, no overfitting)
-    #   - AdaptivePIGCN: CosineAnnealingLR + EB_On_Aggressive (score: 51.75, decreasing: True, no overfitting)
-    # RECOMMENDATION: Disable OneCycleLR, use StepLR for GCN, CosineAnnealingLR for AdaptivePIGCN
-    USE_LEARNING_RATE_SCHEDULER = False  # DISABLED: OneCycleLR causes instability. Use StepLR/CosineAnnealingLR instead.
-    ONECYCLE_MAX_LR = None  # None: Auto-calculate as 10x LEARNING_RATE (recommended)
-    ONECYCLE_PCT_START = 0.3  # 30% of cycle for warmup (increasing phase)
-    ONECYCLE_DIV_FACTOR = 25.0  # Initial LR = max_lr / div_factor (smooth start)
-    ONECYCLE_FINAL_DIV_FACTOR = 10000.0  # Final LR = max_lr / final_div_factor (very low at end)
-    
-    # Alternative scheduler settings (now implemented in trainer)
-    # Options: 'StepLR', 'CosineAnnealingLR', 'ExponentialLR', 'ReduceLROnPlateau', 'OneCycleLR', None
-    # The selected scheduler will be used for ALL models
-    # Recommended: 'StepLR' for GCN, 'CosineAnnealingLR' for AdaptivePIGCN (based on test results)
-    LR_SCHEDULER_TYPE = 'StepLR'  # Set to None to disable scheduler, or specify scheduler type
-    STEPLR_STEP_SIZE = 7  # Decay LR every N epochs
-    STEPLR_GAMMA = 0.5  # Multiply LR by gamma at each step
-    COSINEANNEALINGLR_T_MAX = 20  # Maximum number of iterations (epochs)
+    # Golden Configuration: Use CosineAnnealingLR only
+    # CosineAnnealingLR provides smooth learning rate decay, better generalization
+    USE_LEARNING_RATE_SCHEDULER = True  # Enable CosineAnnealingLR scheduler
+    COSINEANNEALINGLR_T_MAX = None  # None: Use NUM_EPOCHS (one full cosine cycle)
     COSINEANNEALINGLR_ETA_MIN = 1e-6  # Minimum learning rate
     
-    # --- Weight Decay (L2 Regularization) Configuration ---
-    USE_WEIGHT_DECAY = False  # True: Enable L2 regularization, False: Disable
-    WEIGHT_DECAY = 1e-5  # Weight decay coefficient (only used if USE_WEIGHT_DECAY=True)
+    # --- Weight Decay Configuration ---
+    # Golden Configuration: Use AdamW with weight_decay=0.0, rely on Empirical Bayes for regularization
+    # AdamW decouples weight decay from gradient updates (better than Adam)
+    # Empirical Bayes provides intelligent regularization (better than fixed weight_decay)
+    WEIGHT_DECAY = 0.0  # Set to 0.0 - rely on Empirical Bayes for regularization
     
     TRAIN_SPLIT = 0.6  
-    VAL_SPLIT = 0.2    
+    VAL_SPLIT = 0.2
+    
+    # Data splitting mode
+    DATA_SPLIT_MODE = 'blocked_timeseries'  # Options: 'blocked_timeseries' (recommended), 'chronological'
+    # 'blocked_timeseries': Groups data by renewable_fraction, then splits each block chronologically.
+    #   This ensures all fractions appear in train/val/test while maintaining temporal order within each block.
+    #   This is the methodologically sound approach for time-series forecasting with multiple scenarios.
+    # 'chronological': Simple chronological split (first N% train, next M% val, rest test).
+    #   May result in test set missing some renewable fractions, but maintains strict temporal order.    
     
     # Mixed precision training (speeds up training but may reduce precision slightly)
-    USE_MIXED_PRECISION = False  # True: Use float16 (faster), False: Use float32 (more accurate)
+    # Mixed precision training disabled (use float32 for accuracy)
     # Set to False for 33-bus or if you need maximum precision
     
     # --- Time-Series Configuration (Set during __init__ from Args) ---
@@ -153,15 +208,19 @@ class Config:
     # S_BASE_MVA is determined dynamically based on system type in metrics.py
     # Case33: 10 MVA, Case57/118: 100 MVA
     
+    
+    # --- Targeted Contingency Analysis ---
+    # Enables systematic testing of critical N-1 contingencies during evaluation
+    ENABLE_CONTINGENCY_ANALYSIS = True  # Enable targeted contingency analysis
+    CONTINGENCY_TOP_K = 10  # Number of critical lines to test (top K by power flow or centrality)
+    CONTINGENCY_METHOD = 'power_flow'  # Method to identify critical lines: 'power_flow', 'centrality', or 'historical'
+    
     # Loss weighting method: Learnable Uncertainty Weighting (Kendall et al., CVPR 2018)
     # Automatically learns optimal weights via backpropagation
     # Paper: "Multi-Task Learning Using Uncertainty to Weigh Losses"
-    USE_HETEROSCEDASTIC_UNCERTAINTY = True  # True: Heteroscedastic (input-dependent), False: Homoscedastic (learnable params)
-    
-    # Homoscedastic: Single learnable sigma per loss term (simpler, faster)
     # Heteroscedastic: Model predicts uncertainty per sample (more expressive, requires model to output uncertainties)
     
-    # Heteroscedastic loss formulation (only used if USE_HETEROSCEDASTIC_UNCERTAINTY=True)
+    # Heteroscedastic loss formulation
     # Natural Parametrization: Immer et al. (NeurIPS 2023) - "Effective Bayesian Heteroscedastic Regression"
     # Paper: https://arxiv.org/abs/2306.17758, Citations: 27+ (as of Nov 2025)
     # 
@@ -175,14 +234,9 @@ class Config:
     # 3. No negative log variance issues (η2 < 0 by construction)
     # 4. Better generalization (empirical Bayes regularization)
     
-    # Natural parametrization function type
-    # Options: 'exp' (g+(x) = 0.5*exp(x)) or 'softplus' (g+(x) = (1/β)*log(1+exp(β*x)))
-    # getattr() explanation: getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
-    #   - Gets HETEROSCEDASTIC_NATURAL_FUNCTION from config if it exists
-    #   - If it doesn't exist, uses 'exp' as the default value
-    #   - This allows optional config parameters with sensible defaults
-    HETEROSCEDASTIC_NATURAL_FUNCTION = 'exp'  # 'exp' or 'softplus'
-    HETEROSCEDASTIC_SOFTPLUS_BETA = 1.0  # Only used if HETEROSCEDASTIC_NATURAL_FUNCTION='softplus'
+    # Natural parametrization function: Always use softplus for numerical stability
+    # softplus: g+(x) = (1/β)*log(1+exp(β*x)) - grows linearly for large x, prevents explosion
+    HETEROSCEDASTIC_SOFTPLUS_BETA = 1.0  # Beta parameter for softplus function
     
     # Clamping for numerical stability (NOT in paper)
     # Paper (Appendix E.2) does NOT use clamping - they compute natural parameters directly
@@ -204,12 +258,14 @@ class Config:
     #   - GCN: EB_On_Conservative (burn_in=5, update_freq=5, steps=10, lr=0.001)
     #   - AdaptivePIGCN: EB_On_Aggressive (burn_in=3, update_freq=3, steps=20, lr=0.01)
     USE_EMPIRICAL_BAYES = True  # ENABLED: Test results show EB improves performance
-    # Conservative settings (best for GCN):
-    EB_BURN_IN_EPOCHS = 5  # Let model stabilize before starting EB optimization (reduced from 10)
-    EB_UPDATE_FREQUENCY = 50  # Update hyperparameters every N epochs (reduced from 20 for more frequent updates)
-    EB_HYPERPARAMETER_STEPS = 10  # Number of gradient steps for δ optimization (reduced from 20)
-    EB_HYPERPARAMETER_LR = 0.001  # Lower learning rate for δ optimization (conservative)
-    # Note: For AdaptivePIGCN, consider using aggressive settings (burn_in=3, update_freq=3, steps=20, lr=0.01)
+    # Optimal settings for stable and efficient EB optimization:
+    EB_BURN_IN_EPOCHS = 2  # Let model stabilize before starting EB optimization
+    EB_UPDATE_FREQUENCY = 5  # Update hyperparameters every 5 epochs (not every epoch - reduces noise and computation)
+    EB_HYPERPARAMETER_STEPS = 20  # Number of gradient steps for δ optimization (more steps = better convergence)
+    EB_HYPERPARAMETER_LR = 0.001  # Learning rate for δ optimization (conservative, stable)
+    # Rationale: EB should periodically adjust regularization, not constantly. Updating every 5 epochs
+    # gives the model time to adapt to the new regularization before re-optimizing, reducing noise
+    # and computational overhead while maintaining effective regularization.
     
     # HETEROSCEDASTIC_BETA removed - only BIV method is supported (no beta parameter needed)
 
@@ -643,6 +699,10 @@ class Config:
     def get_summary_path(self, num_buses: int, model_name: str) -> str:
         """Returns the summary CSV path for a specific model."""
         return os.path.join(self.get_model_eval_dir(num_buses, model_name), "summary.csv")
+    
+    def get_training_log_path(self, num_buses: int, model_name: str) -> str:
+        """Returns the training log file path for a specific model."""
+        return os.path.join(self.get_model_eval_dir(num_buses, model_name), "training.log")
     
     def _initialize_run_timestamp(self):
         """Initialize the run timestamp - always create new timestamp for each run."""

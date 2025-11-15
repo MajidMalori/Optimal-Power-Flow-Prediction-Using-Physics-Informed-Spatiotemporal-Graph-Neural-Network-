@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from .base_model import BaseModel
 from .layers import VoltageGraphLayer
+from typing import Optional
 
 class GCN(BaseModel):
     def __init__(self,
@@ -10,7 +11,8 @@ class GCN(BaseModel):
                  num_gc_layers: int = 3,
                  num_buses: int = 118,
                  dropout: float = 0.1,
-                 use_heteroscedastic: bool = False):
+                 config=None,
+                 normalizer=None):
         """
         Simple GCN for OPF prediction.
         
@@ -20,13 +22,12 @@ class GCN(BaseModel):
             num_gc_layers: Number of graph convolution layers
             num_buses: Number of buses in the system
             dropout: Dropout rate
-            use_heteroscedastic: If True, output 4 features (predictions + uncertainties)
+            config: Configuration object (for generator constraints)
+            normalizer: PowerSystemNormalizer (for generator constraints)
         """
-        # Homoscedastic: output bus-type dependent unknowns [batch, buses, 2]
-        # Heteroscedastic: output [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        self.use_heteroscedastic = use_heteroscedastic
-        output_features_per_bus = 4 if use_heteroscedastic else 2
+        # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        output_features_per_bus = 4
         output_dim = num_buses * output_features_per_bus
         
         super().__init__(
@@ -42,22 +43,23 @@ class GCN(BaseModel):
         self.dropout_layer = nn.Dropout(dropout)
         
         # Output Layer
-        # Homoscedastic: [batch, buses, 2] = predictions only
-        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
         self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)
+        
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None):
         """
         Forward pass.
         
         Args:
             x: Input measurements [batch_size, num_buses, 10]
             adj: Adjacency matrix
+            bus_types: Optional bus type codes [batch_size, num_buses] with [0=PQ, 1=PV, 2=Slack] (unused, kept for compatibility)
             
         Returns:
-            torch.Tensor: Predicted unknowns [batch_size, num_buses, 2]
-                         OPF mode: bus-type dependent (PQ: V,θ | PV: Q,θ | Slack: P,Q)
+            torch.Tensor: Predicted unknowns [batch_size, num_buses, 4]
+                         OPF mode: [η1_var1, η1_var2, f2_var1, f2_var2] (natural parameters)
         """
         batch_size, num_nodes, _ = x.shape
         
@@ -65,8 +67,8 @@ class GCN(BaseModel):
             x = torch.relu(gc_layer(x, adj))
             x = self.dropout_layer(x)
         
-        # Homoscedastic: [batch, buses, 2] = predictions only
-        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        out = self.output_layer(x)  # [batch_size, num_buses, output_features_per_bus]
+        # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
+        out = self.output_layer(x)  # [batch_size, num_buses, 4]
+        
         return out

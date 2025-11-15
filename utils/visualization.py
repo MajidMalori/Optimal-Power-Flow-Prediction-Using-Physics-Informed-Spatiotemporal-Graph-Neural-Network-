@@ -47,206 +47,98 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
 
 def _plot_training_history_impl(history: Dict[str, list], model_name: str, config: Any, 
                                num_buses: int, is_physics_informed: bool = True):
-    """Internal implementation of plot_training_history - creates two separate 2x2 grid plots."""
+    """
+    Internal implementation of plot_training_history - creates single consolidated 2x3 grid plot.
+    Shows: RMSE, MSE, Power Violation, Voltage Violation, Effective Loss Weights (λ), Generalization Gap.
+    """
     
-    # Image 1: Training History (2x2 grid)
-    fig1, axes1 = plt.subplots(2, 2, figsize=(14, 10))
-    fig1.suptitle(f'Training History - {model_name}', fontsize=16, fontweight='bold')
+    # Single consolidated plot: 2x3 grid
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle(f'Training History - {model_name}', fontsize=16, fontweight='bold')
     
-    # Top-left: RMSE (for all models - more interpretable than total loss)
-    # Professional practice: Show components separately, not total (different units)
+    # Row 1, Col 1: RMSE
     train_rmse = [mse**0.5 for mse in history['train_mse']]
     val_rmse = [mse**0.5 for mse in history['val_mse']]
-    axes1[0, 0].plot(train_rmse, label='Train', linewidth=2)
-    axes1[0, 0].plot(val_rmse, label='Validation', linewidth=2)
-    axes1[0, 0].set_title('RMSE', fontweight='bold')
-    axes1[0, 0].set_xlabel('Epoch')
-    axes1[0, 0].set_ylabel('RMSE')
-    axes1[0, 0].legend()
-    axes1[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].plot(train_rmse, label='Train', linewidth=2)
+    axes[0, 0].plot(val_rmse, label='Validation', linewidth=2)
+    axes[0, 0].set_title('RMSE', fontweight='bold')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('RMSE')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
     
-    # Top-right: MSE (Prediction Error)
-    axes1[0, 1].plot(history['train_mse'], label='Train', linewidth=2)
-    axes1[0, 1].plot(history['val_mse'], label='Validation', linewidth=2)
-    axes1[0, 1].set_title('MSE (Prediction Error)', fontweight='bold')
-    axes1[0, 1].set_xlabel('Epoch')
-    axes1[0, 1].set_ylabel('MSE')
-    axes1[0, 1].legend()
-    axes1[0, 1].grid(True, alpha=0.3)
+    # Row 1, Col 2: MSE (Prediction Error)
+    axes[0, 1].plot(history['train_mse'], label='Train', linewidth=2)
+    axes[0, 1].plot(history['val_mse'], label='Validation', linewidth=2)
+    axes[0, 1].set_title('MSE (Prediction Error)', fontweight='bold')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('MSE')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
     
-    # Bottom-left: Power Balance Violation (only for physics-informed)
+    # Row 1, Col 3: Power Balance Violation (only for physics-informed)
     if is_physics_informed and 'train_power_violation' in history:
-        axes1[1, 0].plot(history['train_power_violation'], label='Train', linewidth=2, color='red')
-        axes1[1, 0].plot(history['val_power_violation'], label='Validation', linewidth=2, color='darkred')
-        axes1[1, 0].set_title('Power Balance Violation', fontweight='bold')
-        axes1[1, 0].set_xlabel('Epoch')
-        axes1[1, 0].set_ylabel('Violation')
-        axes1[1, 0].legend()
-        axes1[1, 0].grid(True, alpha=0.3)
+        axes[0, 2].plot(history['train_power_violation'], label='Train', linewidth=2, color='red')
+        axes[0, 2].plot(history['val_power_violation'], label='Validation', linewidth=2, color='darkred')
+        axes[0, 2].set_title('Power Balance Violation', fontweight='bold')
+        axes[0, 2].set_xlabel('Epoch')
+        axes[0, 2].set_ylabel('Violation')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True, alpha=0.3)
     else:
-        # For non-physics models, show RMSE instead
-        train_rmse = [mse**0.5 for mse in history['train_mse']]
-        val_rmse = [mse**0.5 for mse in history['val_mse']]
-        axes1[1, 0].plot(train_rmse, label='Train', linewidth=2)
-        axes1[1, 0].plot(val_rmse, label='Validation', linewidth=2)
-        axes1[1, 0].set_title('RMSE', fontweight='bold')
-        axes1[1, 0].set_xlabel('Epoch')
-        axes1[1, 0].set_ylabel('RMSE')
-        axes1[1, 0].legend()
-        axes1[1, 0].grid(True, alpha=0.3)
+        axes[0, 2].text(0.5, 0.5, 'Power violation\nnot available', 
+                       ha='center', va='center', fontsize=12,
+                       bbox=dict(boxstyle='round', facecolor='lightgray'))
+        axes[0, 2].axis('off')
     
-    # Bottom-right: Voltage Limit Violation (only for physics-informed)
+    # Row 2, Col 1: Voltage Limit Violation (only for physics-informed)
     if is_physics_informed and 'train_voltage_violation' in history:
-        axes1[1, 1].plot(history['train_voltage_violation'], label='Train', linewidth=2, color='blue')
-        axes1[1, 1].plot(history['val_voltage_violation'], label='Validation', linewidth=2, color='darkblue')
-        axes1[1, 1].set_title('Voltage Limit Violation', fontweight='bold')
-        axes1[1, 1].set_xlabel('Epoch')
-        axes1[1, 1].set_ylabel('Violation')
-        axes1[1, 1].legend()
-        axes1[1, 1].grid(True, alpha=0.3)
+        axes[1, 0].plot(history['train_voltage_violation'], label='Train', linewidth=2, color='blue')
+        axes[1, 0].plot(history['val_voltage_violation'], label='Validation', linewidth=2, color='darkblue')
+        axes[1, 0].set_title('Voltage Limit Violation', fontweight='bold')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Violation')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
     else:
-        # For non-physics models, show MSE breakdown by variable (if available)
-        if 'train_mse_var1' in history and 'train_mse_var2' in history:
-            axes1[1, 1].plot(history['train_mse_var1'], label='Train Var1', linewidth=2, color='blue')
-            axes1[1, 1].plot(history['train_mse_var2'], label='Train Var2', linewidth=2, color='red')
-            axes1[1, 1].plot(history['val_mse_var1'], label='Val Var1', linewidth=2, color='blue', linestyle='--')
-            axes1[1, 1].plot(history['val_mse_var2'], label='Val Var2', linewidth=2, color='red', linestyle='--')
-            axes1[1, 1].set_title('MSE by Variable', fontweight='bold')
-            axes1[1, 1].set_xlabel('Epoch')
-            axes1[1, 1].set_ylabel('MSE')
-            axes1[1, 1].legend()
-            axes1[1, 1].grid(True, alpha=0.3)
-        else:
-            axes1[1, 1].text(0.5, 0.5, 'MSE breakdown\nnot available', 
-                           ha='center', va='center', fontsize=12,
-                           bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes1[1, 1].axis('off')
+        axes[1, 0].text(0.5, 0.5, 'Voltage violation\nnot available', 
+                       ha='center', va='center', fontsize=12,
+                       bbox=dict(boxstyle='round', facecolor='lightgray'))
+        axes[1, 0].axis('off')
+    
+    # Row 2, Col 2: Effective Loss Weights (λ) - more interpretable than raw σ
+    has_learnable_uncertainty = ('sigma_data' in history and len(history['sigma_data']) > 0)
+    if has_learnable_uncertainty and is_physics_informed:
+        axes[1, 1].plot(history['effective_lambda_p'], label='λ_p (power)', linewidth=2, color='darkred')
+        axes[1, 1].plot(history['effective_lambda_v'], label='λ_v (voltage)', linewidth=2, color='darkblue')
+        axes[1, 1].set_title('Effective Loss Weights (λ = 1/(2σ²))', fontweight='bold')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('Effective Weight')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].set_yscale('log')
+    else:
+        axes[1, 1].text(0.5, 0.5, 'Effective weights\nnot available', 
+                       ha='center', va='center', fontsize=12,
+                       bbox=dict(boxstyle='round', facecolor='lightgray'))
+        axes[1, 1].axis('off')
+    
+    # Row 2, Col 3: Generalization Gap
+    epochs = list(range(1, len(history['train_mse']) + 1))
+    train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
+    axes[1, 2].plot(epochs, train_val_gap, color='red', label='Train-Val Gap', linewidth=2)
+    axes[1, 2].set_title('Generalization Gap', fontweight='bold')
+    axes[1, 2].set_xlabel('Epoch')
+    axes[1, 2].set_ylabel('|Train MSE - Val MSE|')
+    axes[1, 2].legend()
+    axes[1, 2].grid(True, alpha=0.3)
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
-    # Save Training History plot
+    # Save consolidated Training History plot
     save_path_history = config.get_training_history_path(num_buses, model_name)
     os.makedirs(os.path.dirname(save_path_history), exist_ok=True)
     plt.savefig(save_path_history, dpi=300)
-    plt.close()
-    
-    # Image 2: Training Parameters (2x2 grid)
-    fig2, axes2 = plt.subplots(2, 2, figsize=(14, 10))
-    fig2.suptitle(f'Training Parameters - {model_name}', fontsize=16, fontweight='bold')
-    
-    # Check if learnable uncertainty tracking is available
-    has_learnable_uncertainty = ('sigma_data' in history and len(history['sigma_data']) > 0)
-    
-    # Check if heteroscedastic mode is enabled
-    use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False) if config else False
-    
-    # Top-left: Learnable Uncertainty (σ)
-    if has_learnable_uncertainty:
-        if use_heteroscedastic:
-            # Heteroscedastic mode: Data loss uses natural parametrization (per-sample, not a single σ)
-            # Only plot physics loss sigmas (Kendall-style weights)
-            axes2[0, 0].plot(history['sigma_power'], label='σ_power (Kendall)', linewidth=2, color='red')
-            axes2[0, 0].plot(history['sigma_voltage'], label='σ_voltage (Kendall)', linewidth=2, color='blue')
-            axes2[0, 0].set_title('Learnable Uncertainty (σ) - Physics Losses', fontweight='bold')
-        else:
-            # Homoscedastic mode: All losses use Kendall-style weights
-            axes2[0, 0].plot(history['sigma_data'], label='σ_data', linewidth=2, color='purple')
-            axes2[0, 0].plot(history['sigma_power'], label='σ_power', linewidth=2, color='red')
-            axes2[0, 0].plot(history['sigma_voltage'], label='σ_voltage', linewidth=2, color='blue')
-            axes2[0, 0].set_title('Learnable Uncertainty (σ)', fontweight='bold')
-        axes2[0, 0].set_xlabel('Epoch')
-        axes2[0, 0].set_ylabel('σ (uncertainty)')
-        axes2[0, 0].legend()
-        axes2[0, 0].grid(True, alpha=0.3)
-        axes2[0, 0].set_yscale('log')
-    else:
-        axes2[0, 0].text(0.5, 0.5, 'Learnable uncertainty\ndata not available', 
-                        ha='center', va='center', fontsize=12,
-                        bbox=dict(boxstyle='round', facecolor='lightgray'))
-        axes2[0, 0].axis('off')
-    
-    # Top-right: Effective Loss Weights
-    if has_learnable_uncertainty:
-        axes2[0, 1].plot(history['effective_lambda_p'], label='λ_p (power)', linewidth=2, color='darkred')
-        axes2[0, 1].plot(history['effective_lambda_v'], label='λ_v (voltage)', linewidth=2, color='darkblue')
-        axes2[0, 1].set_title('Effective Loss Weights (1/(2σ²))', fontweight='bold')
-        axes2[0, 1].set_xlabel('Epoch')
-        axes2[0, 1].set_ylabel('Effective Weight')
-        axes2[0, 1].legend()
-        axes2[0, 1].grid(True, alpha=0.3)
-        axes2[0, 1].set_yscale('log')
-    else:
-        axes2[0, 1].text(0.5, 0.5, 'Effective weights\ndata not available', 
-                        ha='center', va='center', fontsize=12,
-                        bbox=dict(boxstyle='round', facecolor='lightgray'))
-        axes2[0, 1].axis('off')
-    
-    # Bottom-left: Power and Voltage Violations (if physics-informed)
-    if is_physics_informed and 'train_power_violation' in history:
-        axes2[1, 0].plot(history['train_power_violation'], label='Train Power', linewidth=2, color='red')
-        axes2[1, 0].plot(history['val_power_violation'], label='Val Power', linewidth=2, color='red', linestyle='--')
-        axes2[1, 0].plot(history['train_voltage_violation'], label='Train Voltage', linewidth=2, color='blue')
-        axes2[1, 0].plot(history['val_voltage_violation'], label='Val Voltage', linewidth=2, color='blue', linestyle='--')
-        axes2[1, 0].set_title('Physics Violations', fontweight='bold')
-        axes2[1, 0].set_xlabel('Epoch')
-        axes2[1, 0].set_ylabel('Violation')
-        axes2[1, 0].legend()
-        axes2[1, 0].grid(True, alpha=0.3)
-        axes2[1, 0].set_yscale('log')
-    else:
-        axes2[1, 0].text(0.5, 0.5, 'Physics violations\nnot available', 
-                        ha='center', va='center', fontsize=12,
-                        bbox=dict(boxstyle='round', facecolor='lightgray'))
-        axes2[1, 0].axis('off')
-    
-    # Bottom-right: Generalization Gap
-    epochs = list(range(1, len(history['train_mse']) + 1))
-    train_val_gap = [abs(t - v) for t, v in zip(history['train_mse'], history['val_mse'])]
-    axes2[1, 1].plot(epochs, train_val_gap, color='red', label='Train-Val Gap', linewidth=2)
-    axes2[1, 1].set_title('Generalization Gap', fontweight='bold')
-    axes2[1, 1].set_xlabel('Epoch')
-    axes2[1, 1].set_ylabel('|Train MSE - Val MSE|')
-    axes2[1, 1].legend()
-    axes2[1, 1].grid(True, alpha=0.3)
-    
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
-    # Save Training Parameters plot (new file)
-    save_path_params = save_path_history.replace('train_hist.png', 'train_params.png')
-    os.makedirs(os.path.dirname(save_path_params), exist_ok=True)
-    plt.savefig(save_path_params, dpi=300)
-    plt.close()
-
-
-def plot_renewable_impact(data_df: pd.DataFrame, metric_name: str, y_label: str, 
-                         title: str, config: Any, num_buses: int, model_name: str):
-    """Plots renewable impact for the best model."""
-    x_col = 'renewable_fraction'
-    y_col = metric_name
-    
-    plt.figure(figsize=(12, 8))
-    x, y = data_df[x_col], data_df[y_col]
-    plt.scatter(x, y, alpha=0.6, label='Test Scenario')
-
-    # Fit trendline
-    z = np.polyfit(x, y, 1)
-    p = np.poly1d(z)
-    plt.plot(x.sort_values(), p(x.sort_values()), "r--", linewidth=2, 
-             label=f'Trendline (y={z[0]:.2f}x + {z[1]:.2f})')
-
-    plt.title(title, fontsize=16)
-    plt.xlabel('Renewable Energy Fraction', fontsize=12)
-    plt.ylabel(y_label, fontsize=12)
-    plt.legend(fontsize=10)
-    plt.grid(True)
-
-    # Save in the new directory structure
-    save_dir = config.get_renewable_impacts_dir(num_buses, model_name)
-    os.makedirs(save_dir, exist_ok=True)
-    # Clean metric name for filename (remove 'normalized_' prefix)
-    clean_metric_name = metric_name.replace('normalized_', '')
-    save_path = os.path.join(save_dir, f"{clean_metric_name}.png")
-    plt.savefig(save_path, dpi=300)
     plt.close()
 
 

@@ -122,10 +122,10 @@ class EmpiricalBayesOptimizer:
                 # Compute log likelihood (negative of loss, without regularization)
                 loss_dict = criterion(outputs, targets, features, ybus, bus_types=bus_types, return_components=True)
                 
-                # Extract data loss (NLL for heteroscedastic, MSE for homoscedastic)
+                # Extract data loss (NLL for heteroscedastic)
                 data_loss = loss_dict.get('mse_weighted', loss_dict.get('mse', loss_dict['total_loss']))
                 
-                # Log likelihood = -NLL (for heteroscedastic) or -MSE (for homoscedastic)
+                # Log likelihood = -NLL (for heteroscedastic)
                 batch_size = features.shape[0]
                 total_log_likelihood += -data_loss.item() * batch_size
                 num_samples += batch_size
@@ -277,11 +277,23 @@ class EmpiricalBayesOptimizer:
         if not self.should_update(epoch):
             return
         
-        print(f"\n[Empirical Bayes] Updating hyperparameters at epoch {epoch}...")
+        # Log to file instead of terminal (log_file is already opened with UTF-8 encoding by trainer)
+        def _log(message):
+            if hasattr(self, 'log_file') and self.log_file:
+                try:
+                    self.log_file.write(f"{message}\n")
+                    self.log_file.flush()
+                except (UnicodeEncodeError, AttributeError):
+                    # Fallback: replace Unicode characters if encoding fails
+                    safe_message = message.replace('δ', 'delta').replace('σ', 'sigma').replace('λ', 'lambda')
+                    self.log_file.write(f"{safe_message}\n")
+                    self.log_file.flush()
+        
+        _log(f"\n[Empirical Bayes] Updating hyperparameters at epoch {epoch}...")
         
         # Compute current marginal likelihood (for monitoring)
         current_marginal_likelihood = self.compute_marginal_likelihood(train_loader, criterion)
-        print(f"  Current log marginal likelihood: {current_marginal_likelihood:.6f}")
+        _log(f"  Current log marginal likelihood: {current_marginal_likelihood:.6f}")
         
         # Use subset of data for gradient computation (for efficiency)
         # Use first 10 batches or 1000 samples, whichever is smaller
@@ -323,11 +335,11 @@ class EmpiricalBayesOptimizer:
             self.best_marginal_likelihood = new_marginal_likelihood
             self.best_delta_values = {k: v.clone().detach() for k, v in self.delta_per_layer.items()}
         
-        # Print one-liner: show only summary stats (min/max/mean) to avoid overflow
+        # Log one-liner: show only summary stats (min/max/mean) to avoid overflow
         # Vectorized extraction: stack all delta tensors and compute stats at once
         delta_tensor = torch.stack(list(self.delta_per_layer.values()))
         delta_min, delta_max, delta_mean = delta_tensor.min().item(), delta_tensor.max().item(), delta_tensor.mean().item()
-        print(f"  [EB] {status} ML: {new_marginal_likelihood:.6f} | δ: [{delta_min:.4f}, {delta_mean:.4f}, {delta_max:.4f}]")
+        _log(f"  [EB] {status} ML: {new_marginal_likelihood:.6f} | delta: [{delta_min:.4f}, {delta_mean:.4f}, {delta_max:.4f}]")
     
     def get_regularization_loss(self) -> torch.Tensor:
         """

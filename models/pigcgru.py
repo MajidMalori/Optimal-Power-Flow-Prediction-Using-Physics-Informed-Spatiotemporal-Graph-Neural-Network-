@@ -1,16 +1,18 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .base_model import BaseModel
+from typing import Optional
+from .spatiotemporal_base import SpatioTemporalBase
+from .graph_rnn_cells import GraphConvGRUCell
 
-class PIGCGRU(BaseModel):
+class PIGCGRU(SpatioTemporalBase):
     """
-    A Physics-Informed Graph Convolutional GRU.
-    This model integrates the adaptive adjacency matrix mechanism from adaptiveGCN
-    into a sequential GRU framework to capture spatio-temporal dynamics.
+    A Physics-Informed Graph Convolutional GRU using GraphConvGRU cells.
+    
+    This model uses GraphConvGRU cells that process temporal sequences while maintaining
+    graph structure, enabling better scalability than flattening the entire graph representation.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float, 
-                 embedding_dim: int = 16, phi: float = 0.5, use_heteroscedastic: bool = False, **kwargs):
+                 embedding_dim: int = 16, phi: float = 0.5, config=None, normalizer=None, **kwargs):
         """
         Args:
             feature_dim (int): The number of input features for each node.
@@ -21,126 +23,76 @@ class PIGCGRU(BaseModel):
             dropout (float): The dropout rate.
             embedding_dim (int): The dimensionality of the node embeddings for the adaptive matrix.
             phi (float): The interpolation coefficient for blending physical and learned graphs (0 <= phi <= 1).
-            use_heteroscedastic (bool): If True, output 4 features (predictions + uncertainties)
+            config: Configuration object (for generator constraints)
+            normalizer: PowerSystemNormalizer (for generator constraints)
         """
-        # Homoscedastic: output bus-type dependent unknowns [batch, buses, 2]
-        # Heteroscedastic: output [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        self.use_heteroscedastic = use_heteroscedastic
-        output_dim = 4 if use_heteroscedastic else 2
         super().__init__(
-            feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim, 
-            num_gc_layers=num_gc_layers, num_buses=num_buses, rnn_type='GRU', 
-            rnn_layers=rnn_layers, physics_informed=True, dropout=dropout
-        )
-
-        if not (0.0 <= phi <= 1.0):
-            raise ValueError(f"phi must be between 0 and 1, but got {phi}")
-
-        self.phi = phi
-        self.embedding_dim = embedding_dim
-
-        # --- Start: Components from adaptiveGCN ---
-        # Learnable node embeddings to create the latent graph structure.
-        self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        self.node_embedding2 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-
-        # The graph convolution is now a sequence of linear layers applied after aggregation.
-        # This replaces the old `StateGraphLayer`.
-        self.gc_layers = nn.ModuleList()
-        self.gc_layers.append(nn.Linear(feature_dim, hidden_dim))
-        for _ in range(num_gc_layers - 1):
-            self.gc_layers.append(nn.Linear(hidden_dim, hidden_dim))
-        # --- End: Components from adaptiveGCN ---
-        
-        # The size of the vector fed into the GRU is the flattened representation of all node embeddings.
-        gru_io_size = hidden_dim * num_buses
-        # For larger systems, use a more memory-efficient GRU size
-        if num_buses >= 57:
-            # Use a reduced GRU hidden size for larger systems to prevent memory explosion
-            gru_hidden_size = min(gru_io_size, max(512, gru_io_size // 4))
-        else:
-            gru_hidden_size = gru_io_size
-            
-        self.gru = nn.GRU(
-            input_size=gru_io_size, 
-            hidden_size=gru_hidden_size, 
-            num_layers=rnn_layers, 
-            batch_first=True, 
-            dropout=dropout if rnn_layers > 1 else 0.0
+            feature_dim=feature_dim, hidden_dim=hidden_dim, num_gc_layers=num_gc_layers,
+            num_buses=num_buses, rnn_layers=rnn_layers, dropout=dropout,
+            embedding_dim=embedding_dim, phi=phi, config=config, normalizer=normalizer,
+            rnn_type='GRU', **kwargs
         )
         
-        # Store the hidden size for later use
-        self.gru_hidden_size = gru_hidden_size
-        
-        # Add projection layer for reduced GRU output (for memory efficiency)
-        if gru_hidden_size != gru_io_size:
-            self.gru_projection = nn.Linear(gru_hidden_size, gru_io_size)
-        else:
-            self.gru_projection = None
-        
-        # Output Layer
-        # Homoscedastic: [batch, buses, 2] = predictions only
-        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        output_features = 4 if use_heteroscedastic else 2
-        self.output_transform = nn.Linear(hidden_dim, output_features)
-        self.dropout_layer = nn.Dropout(dropout)
+        # GraphConvGRU cells for each layer
+        # Each cell processes [batch, nodes, features] maintaining graph structure
+        self.gru_cells = nn.ModuleList()
+        for i in range(rnn_layers):
+            # First layer takes hidden_dim (from GCN), subsequent layers take hidden_dim
+            input_dim = hidden_dim if i == 0 else hidden_dim
+            self.gru_cells.append(
+                GraphConvGRUCell(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_buses=num_buses,
+                    dropout=dropout if i < rnn_layers - 1 else 0.0  # No dropout on last layer
+                )
+            )
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Forward pass for the adaptive PIGCGRU.
+        Forward pass for the adaptive PIGCGRU using GraphConvGRU cells.
 
         Args:
             x (torch.Tensor): Input features of shape [batch_size, seq_len, num_nodes, feature_dim].
             adj (torch.Tensor): The static, dense physical adjacency matrix of shape [num_nodes, num_nodes].
+            bus_types: Bus type codes [batch_size, num_nodes] (optional)
         """
         batch_size, seq_len, num_nodes, _ = x.shape
 
-        # --- Adaptive Adjacency Matrix Calculation (from adaptiveGCN) ---
-        # 1. Create the learned adjacency matrix. This is static and shared across all time steps.
-        learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
-
-        # 2. Combine with the physical adjacency matrix.
-        # The resulting adaptive matrix is also static for this model version.
-        # It is expanded to the batch*sequence dimension for efficient processing.
-        A_adp = self.phi * adj + (1 - self.phi) * learned_adj
-        A_adp_expanded = A_adp.unsqueeze(0).expand(batch_size * seq_len, -1, -1)
-
-        # --- Spatio-Temporal Processing ---
-        # Reshape for efficient GCN processing across the batch and sequence dimensions.
-        x_reshaped = x.view(batch_size * seq_len, num_nodes, -1)
+        # Compute adaptive adjacency matrix (shared across all timesteps)
+        A_adp = self.compute_adaptive_adjacency(adj, batch_size, seq_len)  # [batch_size * seq_len, num_nodes, num_nodes]
+        # Reshape to [batch_size, seq_len, num_nodes, num_nodes] for per-timestep processing
+        A_adp = A_adp.view(batch_size, seq_len, num_nodes, num_nodes)
         
-        # 3. Apply adaptive graph convolution layers.
-        h = x_reshaped
-        for gc_layer in self.gc_layers:
-            # Aggregate features using the adaptive matrix, then transform.
-            h_aggregated = torch.bmm(A_adp_expanded, h)
-            h = F.relu(gc_layer(h_aggregated))
-            h = self.dropout_layer(h)
+        # Initialize hidden states for each layer
+        h_layers = [torch.zeros(batch_size, num_nodes, self.hidden_dim, device=x.device, dtype=x.dtype)
+                    for _ in range(self.rnn_layers)]
         
-        # 4. Reshape for GRU processing.
-        # The output of the GCN layers is a sequence of graph embeddings.
-        h_gru_in = h.view(batch_size, seq_len, -1)
+        # Process sequence timestep by timestep
+        for t in range(seq_len):
+            # Get input at timestep t
+            x_t = x[:, t, :, :]  # [batch, nodes, feature_dim]
+            
+            # Get adjacency for this timestep [batch, nodes, nodes]
+            A_adp_expanded = A_adp[:, t, :, :]
+            
+            # Reshape for GCN: [batch, nodes, feature_dim]
+            h_spatial = x_t
+            for gc_layer in self.gc_layers:
+                # Aggregate features using adaptive adjacency, then transform
+                h_aggregated = torch.bmm(A_adp_expanded, h_spatial)  # [batch, nodes, features]
+                h_spatial = torch.relu(gc_layer(h_aggregated))
+                h_spatial = self.dropout_layer(h_spatial)
+            
+            # Now h_spatial is [batch, nodes, hidden_dim]
+            # Process through GRU layers
+            h_input = h_spatial
+            for layer_idx, gru_cell in enumerate(self.gru_cells):
+                h_layers[layer_idx] = gru_cell(h_input, h_layers[layer_idx], A_adp_expanded)
+                h_input = h_layers[layer_idx]  # Output of this layer is input to next
         
-        # 5. Pass the sequence through the GRU.
-        gru_out, _ = self.gru(h_gru_in)
+        # Use hidden state from last layer at final timestep
+        last_step_per_node = h_layers[-1]  # [batch, nodes, hidden_dim]
         
-        # We only need the output from the final time step for state prediction.
-        last_step_output = gru_out[:, -1, :]
-        
-        # 6. Reshape the final time step's output to per-node features.
-        if self.gru_projection is not None:
-            # For larger systems with reduced GRU size, project back to the original size
-            projected_output = self.gru_projection(last_step_output)
-            last_step_per_node = projected_output.view(batch_size, num_nodes, self.hidden_dim)
-        else:
-            # Original behavior for smaller systems
-            last_step_per_node = last_step_output.view(batch_size, num_nodes, self.hidden_dim)
-        
-        # 7. Apply the final transformation to get the desired output shape.
-        # Homoscedastic: [batch, buses, 2] = predictions only
-        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        final_output_per_node = self.output_transform(last_step_per_node)
-        return final_output_per_node
+        # Apply output transformation and constraints
+        return self.apply_output_transformation(last_step_per_node, bus_types)

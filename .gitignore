@@ -7,6 +7,7 @@ data/time_series/
 data/train/
 data/test/
 keep/
+tests/
 
 # Data files in root data folder
 data/*.npy

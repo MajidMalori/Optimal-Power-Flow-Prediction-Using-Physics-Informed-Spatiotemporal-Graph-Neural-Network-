@@ -19,19 +19,8 @@ class PowerSystemTrainer(BaseTrainer):
         self.use_cuda = device.type == 'cuda'
     
     def _get_gradient_accumulation_steps(self):
-        """Calculate gradient accumulation steps based on system size and config flag"""
-        # If accumulation is disabled, return 1 (no accumulation)
-        if not getattr(self.config, 'USE_GRADIENT_ACCUMULATION', True):
-            return 1
-        
-        # Otherwise, use accumulation based on system size to reduce memory usage
-        num_buses = self.config.NUM_BUSES
-        if num_buses >= 118:
-            return 4  # Large systems: accumulate 4 batches
-        elif num_buses >= 57:
-            return 2  # Medium systems: accumulate 2 batches
-        else:
-            return 1  # Small systems: no accumulation needed
+        """Calculate gradient accumulation steps (always returns 1 - accumulation disabled)"""
+        return 1  # Gradient accumulation is disabled
 
     def _train_epoch(self, train_loader):
         self.model.train()
@@ -51,10 +40,18 @@ class PowerSystemTrainer(BaseTrainer):
             # Adjacency is always dense for time-series data - direct device transfer
             adjacency_input = batch['adjacency'].to(self.device, non_blocking=True)
 
-            # Forward pass
-            outputs = self.model(features, adjacency_input)  # [batch, buses, 2] or [batch, buses, 4] if heteroscedastic
-            
             bus_types = batch.get('bus_types', None)
+            
+            # Forward pass - pass bus_types if model supports it (for generator constraints)
+            if bus_types is not None:
+                bus_types_device = bus_types.to(self.device, non_blocking=True)
+                try:
+                    outputs = self.model(features, adjacency_input, bus_types=bus_types_device)
+                except TypeError:
+                    # Model doesn't support bus_types parameter, use default forward
+                    outputs = self.model(features, adjacency_input)
+            else:
+                outputs = self.model(features, adjacency_input)  # [batch, buses, 4]
             
             # Clear batch dict immediately (data already on device)
             del batch
@@ -65,7 +62,8 @@ class PowerSystemTrainer(BaseTrainer):
                 features,
                 ybus,
                 bus_types=bus_types,
-                return_components=False
+                return_components=False,
+                epoch=self.current_epoch
             )
             
             # Add Empirical Bayes regularization if enabled (from paper Section 4.3)
@@ -76,6 +74,12 @@ class PowerSystemTrainer(BaseTrainer):
             
             total_loss = total_loss / accumulation_steps
             total_loss.backward()
+            
+            # Gradient clipping to prevent explosion (critical for natural parametrization)
+            # Root cause: Large f2 → large exp(f2) → large gradients → larger f2 (feedback loop)
+            max_grad_norm = getattr(self.config, 'MAX_GRAD_NORM', 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self.criterion.parameters(), max_grad_norm)
             
             # Extract values BEFORE deleting tensors - optimized .item() calls
             total_loss_val = loss_dict['total_loss'].item()
@@ -107,10 +111,10 @@ class PowerSystemTrainer(BaseTrainer):
             if (batch_idx + 1) % accumulation_steps == 0:
                 self.optimizer.step()
                 
-                # Step OneCycleLR scheduler after each optimizer step (per-batch, not per-epoch)
+                # Step scheduler after each optimizer step (for per-batch schedulers)
                 if hasattr(self, 'scheduler') and self.scheduler is not None:
-                    if hasattr(self, 'scheduler_type') and self.scheduler_type == 'OneCycleLR':
-                        self.scheduler.step()  # OneCycleLR steps per-batch
+                    # Most schedulers step per-epoch, but some can step per-batch if needed
+                    pass  # Scheduler stepping handled per-epoch in base_trainer
                 
                 self.optimizer.zero_grad()
                 # Clear input tensors after optimizer step (safe: gradients already computed and applied)
@@ -131,26 +135,14 @@ class PowerSystemTrainer(BaseTrainer):
 
             if self.is_physics_informed:
                 avg_mse = epoch_losses['mse']/(batch_idx+1)
-                # Professional reporting: Show components separately (different units)
-                # - MSE: per-unit² (denormalized)
-                # - Power violation: RMSE (per-unit)
-                # - Voltage violation: RMSE (per-unit)
-                # Do NOT sum them (different units)
-                if 'mse_weighted' in epoch_losses:
-                    pbar.set_postfix(OrderedDict([
-                        ('mse', f"{avg_mse:.7f}"),  # Denormalized MSE (per-unit²)
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),  # RMSE (per-unit)
-                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")  # RMSE (per-unit)
-                    ]))
-                else:
-                    pbar.set_postfix(OrderedDict([
-                        ('mse', f"{avg_mse:.7f}"),  # Denormalized MSE (per-unit²)
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),  # RMSE (per-unit)
-                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")  # RMSE (per-unit)
-                    ]))
+                pbar.set_postfix(OrderedDict([
+                    ('mse_phys', f"{avg_mse:.6f}"),
+                    ('p_vio_rmse', f"{epoch_losses['power_violation']/(batch_idx+1):.6f}"),
+                    ('v_vio_rmse', f"{epoch_losses['voltage_violation']/(batch_idx+1):.6f}")
+                ]))
             else:
                 # For non-physics models (GCN), only show MSE (total_loss = MSE for non-physics)
-                pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")  # Denormalized (physical units)
+                pbar.set_postfix(mse_phys=f"{epoch_losses['mse']/(batch_idx+1):.6f}")  # Denormalized (physical units)
             
             # AGGRESSIVE MEMORY CLEARING: More frequent for larger systems
             # Clear cache every N batches based on system size to prevent memory accumulation
@@ -202,7 +194,9 @@ class PowerSystemTrainer(BaseTrainer):
                     targets,
                     features,
                     ybus,
-                    bus_types=bus_types
+                    bus_types=bus_types,
+                    return_components=False,
+                    epoch=self.current_epoch
                 )
                 
                 epoch_losses['total_loss'] += loss_dict['total_loss'].item()  # Normalized (for optimization)
@@ -218,19 +212,14 @@ class PowerSystemTrainer(BaseTrainer):
                 
                 if self.is_physics_informed:
                     avg_mse = epoch_losses['mse']/(batch_idx+1)
-                    # Professional reporting: Show components separately (different units)
-                    # - MSE: per-unit² (denormalized)
-                    # - Power violation: RMSE (per-unit)
-                    # - Voltage violation: RMSE (per-unit)
-                    # Do NOT sum them (different units)
                     pbar.set_postfix(OrderedDict([
-                        ('mse', f"{avg_mse:.7f}"),  # Denormalized MSE (per-unit²)
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.7f}"),  # RMSE (per-unit)
-                        ('v_viol', f"{epoch_losses['voltage_violation']/(batch_idx+1):.7f}")  # RMSE (per-unit)
+                        ('mse_phys', f"{avg_mse:.6f}"),
+                        ('p_vio_rmse', f"{epoch_losses['power_violation']/(batch_idx+1):.6f}"),
+                        ('v_vio_rmse', f"{epoch_losses['voltage_violation']/(batch_idx+1):.6f}")
                     ]))
                 else:
                     # For non-physics models (GCN), only show MSE (total_loss = MSE for non-physics)
-                    pbar.set_postfix(mse=f"{epoch_losses['mse']/(batch_idx+1):.7f}")  # Denormalized (physical units)
+                    pbar.set_postfix(mse_phys=f"{epoch_losses['mse']/(batch_idx+1):.6f}")  # Denormalized (physical units)
         
         # Return the average of all loss components
         num_batches = len(val_loader)

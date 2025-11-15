@@ -60,7 +60,8 @@ def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, D
 
 
 def calculate_predicted_uncertainty_metrics(model_outputs: np.ndarray, renewable_fractions: np.ndarray,
-                                            min_sigma: float = 0.01, max_sigma: float = 10.0) -> Dict:
+                                            min_sigma: float = 0.01, max_sigma: float = 10.0,
+                                            timesteps: np.ndarray = None) -> Dict:
     """
     Calculate PREDICTED uncertainty metrics from model outputs (heteroscedastic mode).
     
@@ -127,69 +128,140 @@ def calculate_predicted_uncertainty_metrics(model_outputs: np.ndarray, renewable
             'mean_temporal_predicted': np.mean(temporal_predicted_uncertainty_mean),
             'max_temporal_predicted': np.max(temporal_predicted_uncertainty_mean)
         }
+        
+        # Store timesteps for this fraction if available
+        if timesteps is not None:
+            frac_timesteps = timesteps[mask]
+            uncertainty_data[round(float(frac), 1)]['timesteps'] = frac_timesteps
     
     return uncertainty_data
 
 
 def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray, 
-                                  renewable_fractions: np.ndarray, bus_types: np.ndarray = None) -> Dict:
+                                  renewable_fractions: np.ndarray, bus_types: np.ndarray = None,
+                                  timesteps: np.ndarray = None) -> Dict:
     """
-    Calculate uncertainty metrics for each renewable fraction.
+    Calculate uncertainty metrics for each renewable fraction, separated by bus type.
     
     OPF Mode: Predictions are bus-type dependent unknowns:
     - PQ buses: [V, θ] (voltage magnitude, angle)
     - PV buses: [Q, θ] (reactive power, angle)
     - Slack buses: [P, Q] (active power, reactive power)
     
+    This function calculates errors separately for each bus type to preserve physical meaning.
+    This allows for more insightful analysis (e.g., voltage uncertainty at PQ buses).
+    
     Args:
         predictions: Shape [n_samples, n_buses, 2] - OPF unknowns
         targets: Shape [n_samples, n_buses, 2] - True OPF unknowns
         renewable_fractions: Shape [n_samples] - renewable fraction for each sample
-        bus_types: Shape [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack] (optional)
+        bus_types: Shape [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack] (required for OPF)
+        timesteps: Shape [n_samples] - actual timestep indices for each sample (optional)
     
     Returns:
-        Dictionary containing uncertainty metrics for each renewable fraction
+        Dictionary containing uncertainty metrics for each renewable fraction, with separate
+        entries for each bus type: 'pq', 'pv', 'slack', and 'combined' (all buses)
     """
-    # OPF Mode: Use both features (unknowns vary by bus type)
-    # For simplicity, compute uncertainty as combined error across both features
-    # This captures uncertainty in the predicted unknowns regardless of bus type
+    if bus_types is None:
+        raise ValueError("bus_types is required for OPF mode uncertainty analysis")
     
     # Calculate per-feature errors
     errors_feat0 = predictions[:, :, 0] - targets[:, :, 0]  # [n_samples, n_buses]
     errors_feat1 = predictions[:, :, 1] - targets[:, :, 1]  # [n_samples, n_buses]
     
-    # Combined error magnitude (Euclidean norm per bus)
-    # This captures total prediction error regardless of which unknowns are being predicted
-    errors_combined = np.sqrt(errors_feat0**2 + errors_feat1**2)  # [n_samples, n_buses]
-    
     # Get unique renewable fractions
-    # This ensures keys like 0.2 don't become 0.19999999 or 0.20000001
     renewable_fractions_rounded = np.round(renewable_fractions, decimals=1)
     unique_fractions = np.unique(renewable_fractions_rounded)
     
     uncertainty_data = {}
     
     for frac in unique_fractions:
-        # Get indices for this fraction (using rounded values for stable comparison)
+        # Get indices for this fraction
         mask = renewable_fractions_rounded == frac
-        frac_errors = errors_combined[mask]  # [n_frac_samples, n_buses]
+        frac_errors_feat0 = errors_feat0[mask]  # [n_frac_samples, n_buses]
+        frac_errors_feat1 = errors_feat1[mask]  # [n_frac_samples, n_buses]
+        frac_bus_types = bus_types[mask]  # [n_frac_samples, n_buses]
         
-        # Spatial uncertainty: std across time for each bus
-        # This measures how much prediction error varies over time at each bus location
-        spatial_uncertainty = np.std(frac_errors, axis=0)  # [n_buses]
+        frac_data = {}
         
-        # Temporal uncertainty: mean error across buses for each timestep
-        # This measures system-wide prediction error at each time point
-        temporal_uncertainty = np.mean(frac_errors, axis=1)  # [n_frac_samples]
+        # Calculate errors for each bus type separately
+        for bus_type_code, bus_type_name in [(0, 'pq'), (1, 'pv'), (2, 'slack')]:
+            # Create mask for this bus type across all samples and buses
+            bus_type_mask = (frac_bus_types == bus_type_code)  # [n_frac_samples, n_buses]
+            
+            if not np.any(bus_type_mask):
+                # No buses of this type for this fraction
+                frac_data[bus_type_name] = {
+                    'spatial': np.array([]),
+                    'temporal': np.array([]),
+                    'mean_spatial': 0.0,
+                    'max_spatial': 0.0,
+                    'mean_temporal': 0.0
+                }
+                continue
+            
+            # Extract errors for this bus type
+            # For each sample, get errors at buses of this type
+            errors_by_type = []
+            for sample_idx in range(frac_errors_feat0.shape[0]):
+                sample_bus_mask = bus_type_mask[sample_idx]  # [n_buses]
+                if np.any(sample_bus_mask):
+                    # Get errors for buses of this type in this sample
+                    sample_errors_feat0 = frac_errors_feat0[sample_idx][sample_bus_mask]
+                    sample_errors_feat1 = frac_errors_feat1[sample_idx][sample_bus_mask]
+                    # Calculate error magnitude per bus
+                    sample_errors_mag = np.sqrt(sample_errors_feat0**2 + sample_errors_feat1**2)
+                    errors_by_type.append(sample_errors_mag)
+            
+            if len(errors_by_type) == 0:
+                frac_data[bus_type_name] = {
+                    'spatial': np.array([]),
+                    'temporal': np.array([]),
+                    'mean_spatial': 0.0,
+                    'max_spatial': 0.0,
+                    'mean_temporal': 0.0
+                }
+                continue
+            
+            # Stack to get [n_frac_samples, n_buses_of_this_type] (variable number of buses per sample)
+            # For spatial analysis, we need to aggregate across samples
+            # For temporal analysis, we need to aggregate across buses
+            
+            # Spatial uncertainty: mean error per bus across time
+            # Aggregate all errors for buses of this type across all samples
+            all_bus_errors = np.concatenate(errors_by_type) if errors_by_type else np.array([])
+            spatial_uncertainty = np.array([np.mean(errors) for errors in errors_by_type]) if errors_by_type else np.array([])
+            
+            # Temporal uncertainty: mean error across buses for each timestep
+            temporal_uncertainty = np.array([np.mean(errors) for errors in errors_by_type]) if errors_by_type else np.array([])
+            
+            frac_data[bus_type_name] = {
+                'spatial': spatial_uncertainty,
+                'temporal': temporal_uncertainty,
+                'mean_spatial': np.mean(all_bus_errors) if len(all_bus_errors) > 0 else 0.0,
+                'max_spatial': np.max(all_bus_errors) if len(all_bus_errors) > 0 else 0.0,
+                'mean_temporal': np.mean(temporal_uncertainty) if len(temporal_uncertainty) > 0 else 0.0
+            }
         
-        # Use rounded float as key to match expected_fractions exactly
-        uncertainty_data[round(float(frac), 1)] = {
-            'spatial': spatial_uncertainty,
-            'temporal': temporal_uncertainty,
-            'mean_spatial': np.mean(spatial_uncertainty),
-            'max_spatial': np.max(spatial_uncertainty),
-            'mean_temporal': np.mean(temporal_uncertainty)
+        # Also calculate combined error (all buses) for backward compatibility
+        errors_combined = np.sqrt(frac_errors_feat0**2 + frac_errors_feat1**2)  # [n_frac_samples, n_buses]
+        spatial_uncertainty_combined = np.std(errors_combined, axis=0)  # [n_buses]
+        temporal_uncertainty_combined = np.mean(errors_combined, axis=1)  # [n_frac_samples]
+        
+        frac_data['combined'] = {
+            'spatial': spatial_uncertainty_combined,
+            'temporal': temporal_uncertainty_combined,
+            'mean_spatial': np.mean(spatial_uncertainty_combined),
+            'max_spatial': np.max(spatial_uncertainty_combined),
+            'mean_temporal': np.mean(temporal_uncertainty_combined)
         }
+        
+        # Store timesteps for this fraction if available
+        if timesteps is not None:
+            frac_timesteps = timesteps[mask]
+            frac_data['timesteps'] = frac_timesteps
+        
+        uncertainty_data[round(float(frac), 1)] = frac_data
     
     return uncertainty_data
 
@@ -254,13 +326,12 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
             ax.set_title(f'{int(frac*100)}% Renewables\n(Mean σ: {uncertainty_data[frac]["mean_spatial"]:.4f} p.u.)',
                         fontsize=12, fontweight='bold')
         else:
-            # Data missing - show placeholder (shouldn't happen with stratified split)
+            # Data missing - show placeholder (shouldn't happen with blocked_timeseries split)
             ax.text(0.5, 0.5, f'{int(frac*100)}% Renewables\n(No data available)', 
                    transform=ax.transAxes, ha='center', va='center',
                    fontsize=12, fontweight='bold',
                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.7))
             ax.set_title(f'{int(frac*100)}% Renewables', fontsize=12, fontweight='bold')
-            print(f"[Uncertainty] WARNING: No data for {int(frac*100)}% renewables - check data generation")
         
         ax.axis('off')
     
@@ -311,17 +382,16 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         plt.tight_layout()
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"[Uncertainty] WARNING: No test data for temporal comparison: {output_path}")
         return
     
     # Continue with available fractions
     expected_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     missing_fractions = [f for f in expected_fractions if f not in fractions]
     
-    # Warn about missing fractions (shouldn't happen with stratified split, but check anyway)
+    # Warn about missing fractions (shouldn't happen with blocked_timeseries split, but check anyway)
     if missing_fractions:
         missing_pct = [int(f*100) for f in missing_fractions]
-        print(f"[Uncertainty] INFO: Test set missing renewable fractions: {missing_pct}% (reduced data or edge case)")
+        print(f"[Uncertainty] Missing fractions in test set: {missing_pct}%")
     
     # Color map for different renewable fractions (match data profile story style)
     colors = plt.cm.viridis(np.linspace(0, 1, len(fractions)))
@@ -334,8 +404,14 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         temporal_unc = uncertainty_data[frac]['temporal']
         n_points = len(temporal_unc)
         
-        # Map timesteps to hours of day (modulo 24) to show daily cycle pattern
-        x_values = np.arange(n_points) % hours_per_day
+        # Use actual timesteps if available, otherwise fall back to array indices
+        if 'timesteps' in uncertainty_data[frac] and uncertainty_data[frac]['timesteps'] is not None:
+            # Use actual timesteps to compute hours of day
+            actual_timesteps = uncertainty_data[frac]['timesteps']
+            x_values = actual_timesteps % hours_per_day
+        else:
+            # Fallback: Map array indices to hours (assumes first sample is hour 0)
+            x_values = np.arange(n_points) % hours_per_day
         
         # Compute hourly mean and std (match data profile story style)
         hourly_mean = []
@@ -386,7 +462,8 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
                                        renewable_fractions: np.ndarray, case_name: str,
                                        output_dir: str, model_name: str = "", config=None,
-                                       bus_types: np.ndarray = None, model_outputs: np.ndarray = None):
+                                       bus_types: np.ndarray = None, model_outputs: np.ndarray = None,
+                                       timesteps: np.ndarray = None):
     """
     Main function to generate all uncertainty visualizations.
     
@@ -401,22 +478,23 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
         bus_types: Optional [n_samples, n_buses] bus type array for OPF mode
         model_outputs: Optional [n_samples, n_buses, 4] - Full model outputs in heteroscedastic mode
                       [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
+        timesteps: Optional [n_samples] - actual timestep indices for temporal plotting
     
     Returns:
         uncertainty_data: Dictionary with all calculated metrics
     """
     # Calculate error statistics (what actually happened)
-    error_statistics = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types)
+    error_statistics = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types, timesteps=timesteps)
     
-    # Calculate predicted uncertainties (what model thinks) if heteroscedastic mode
+    # Calculate predicted uncertainties (what model thinks) - always heteroscedastic mode
     predicted_uncertainties = None
     if model_outputs is not None:
-        use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False) if config else False
-        if use_heteroscedastic and model_outputs.shape[2] == 4:
+        if model_outputs.shape[2] == 4:
             min_sigma = getattr(config, 'HETEROSCEDASTIC_MIN_SIGMA', 0.01) if config else 0.01
             max_sigma = getattr(config, 'HETEROSCEDASTIC_MAX_SIGMA', 10.0) if config else 10.0
             predicted_uncertainties = calculate_predicted_uncertainty_metrics(
-                model_outputs, renewable_fractions, min_sigma=min_sigma, max_sigma=max_sigma
+                model_outputs, renewable_fractions, min_sigma=min_sigma, max_sigma=max_sigma,
+                timesteps=timesteps
             )
     
     # Use predicted uncertainties if available, otherwise fall back to error statistics
@@ -433,8 +511,30 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
                 'mean_temporal': data['mean_temporal_predicted']
             }
     else:
-        # Use error statistics (already has correct keys)
-        uncertainty_data = error_statistics
+        # Use error statistics - extract 'combined' data for plotting (backward compatibility)
+        # The new structure has bus-type-specific data, but plotting functions use 'combined'
+        uncertainty_data = {}
+        for frac, frac_data in error_statistics.items():
+            if isinstance(frac_data, dict) and 'combined' in frac_data:
+                # New structure with bus-type separation - use 'combined' for plotting
+                uncertainty_data[frac] = frac_data['combined'].copy()
+                # Preserve timesteps if available
+                if 'timesteps' in frac_data:
+                    uncertainty_data[frac]['timesteps'] = frac_data['timesteps']
+            else:
+                # Old structure (backward compatibility)
+                uncertainty_data[frac] = frac_data
+    
+    # Ensure timesteps are passed through if available
+    if timesteps is not None and isinstance(uncertainty_data, dict):
+        # Timesteps should already be in error_statistics from calculate_uncertainty_metrics
+        # But ensure they're preserved in the final uncertainty_data structure
+        for frac in uncertainty_data.keys():
+            if 'timesteps' not in uncertainty_data[frac] and timesteps is not None:
+                # Extract timesteps for this fraction
+                frac_mask = np.round(renewable_fractions, decimals=1) == frac
+                if np.any(frac_mask):
+                    uncertainty_data[frac]['timesteps'] = timesteps[frac_mask]
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -447,8 +547,7 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     temporal_output = os.path.join(output_dir, 'uncertainty_temporal.png')
     plot_temporal_comparison_curves(uncertainty_data, case_name, temporal_output, model_name, config)
     
-    # Print consolidated message
-    print(f"[Uncertainty] Saved all plots for {model_name}")
+    # Plots saved silently
     
     return uncertainty_data
 

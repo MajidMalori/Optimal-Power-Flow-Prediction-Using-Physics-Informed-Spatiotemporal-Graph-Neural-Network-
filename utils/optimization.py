@@ -232,7 +232,7 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
 
 def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: int, 
                        is_sequential: bool, uses_adaptive_graph: bool, model_name: str = None,
-                       is_opf_mode: bool = True, config: Any = None) -> Dict[str, Any]:
+                       is_opf_mode: bool = True, config: Any = None, normalizer: Any = None) -> Dict[str, Any]:
     """
     Create model keyword arguments from optimized parameters.
     
@@ -242,7 +242,8 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
         num_buses: Number of buses in the system
         is_sequential: Whether model is sequential
         uses_adaptive_graph: Whether model uses adaptive graph features
-        config: Main config object (for heteroscedastic mode)
+        config: Main config object (for generator constraints)
+        normalizer: PowerSystemNormalizer (for generator constraints)
         
     Returns:
         Dictionary of model keyword arguments
@@ -256,6 +257,12 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
         'dropout': model_config.DROPOUT
     }
     
+    # Add config and normalizer for generator constraints (if available)
+    if config is not None:
+        model_kwargs['config'] = config
+    if normalizer is not None:
+        model_kwargs['normalizer'] = normalizer
+    
     if is_sequential:
         model_kwargs['rnn_layers'] = int(params['RNN_LAYERS'])
     
@@ -265,9 +272,7 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
             'phi': float(params['PHI'])
         })
     
-    # Add heteroscedastic mode flag if config is provided
-    if config is not None:
-        model_kwargs['use_heteroscedastic'] = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+    # Always use heteroscedastic mode (no flag needed)
     
     # Twin heads removed: Not compatible with OPF mode (different bus types have different unknowns)
     

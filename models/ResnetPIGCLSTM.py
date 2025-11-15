@@ -1,120 +1,95 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .base_model import BaseModel
+from typing import Optional
+from .spatiotemporal_base import SpatioTemporalBase
+from .graph_rnn_cells import GraphConvLSTMCell
 
-class ResnetPIGCLSTM(BaseModel):
+class ResnetPIGCLSTM(SpatioTemporalBase):
     """
     A Physics-Informed Graph Convolutional LSTM with Residual Connections.
-    and expand it internally, following the provided design guide.
+    Uses GraphConvLSTM cells with residual connections in the temporal processing layers.
     """
     def __init__(self, feature_dim: int, hidden_dim: int, num_gc_layers: int, num_buses: int, rnn_layers: int, dropout: float,
-                 embedding_dim: int = 16, phi: float = 0.5, use_heteroscedastic: bool = False, **kwargs):
-        # Homoscedastic: output bus-type dependent unknowns [batch, buses, 2]
-        # Heteroscedastic: output [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        self.use_heteroscedastic = use_heteroscedastic
-        output_dim = 4 if use_heteroscedastic else 2
-        super().__init__(feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim, num_gc_layers=num_gc_layers,
-                         num_buses=num_buses, rnn_type='LSTM', rnn_layers=rnn_layers, physics_informed=True, dropout=dropout)
+                 embedding_dim: int = 16, phi: float = 0.5, config=None, normalizer=None, **kwargs):
+        super().__init__(
+            feature_dim=feature_dim, hidden_dim=hidden_dim, num_gc_layers=num_gc_layers,
+            num_buses=num_buses, rnn_layers=rnn_layers, dropout=dropout,
+            embedding_dim=embedding_dim, phi=phi, config=config, normalizer=normalizer,
+            rnn_type='LSTM', **kwargs
+        )
 
-        if not (0.0 <= phi <= 1.0):
-            raise ValueError(f"phi must be between 0 and 1, but got {phi}")
-
-        self.phi = phi
-        self.embedding_dim = embedding_dim
-
-        # Learnable node embeddings to create an adaptive graph
-        self.node_embedding1 = nn.Parameter(torch.randn(self.num_buses, embedding_dim))
-        self.node_embedding2 = nn.Parameter(torch.randn(self.num_buses, embedding_dim))
-
-        # Graph Convolutional layers
-        self.gc_layers = nn.ModuleList([nn.Linear(feature_dim, self.hidden_dim)])
-        for _ in range(self.num_gc_layers - 1):
-            self.gc_layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
-
-        # LSTM layers with residual connections and scalable sizing
-        flattened_size = self.hidden_dim * self.num_buses  
-        # SIMPLIFIED: Use much smaller LSTM hidden size to prevent instability
-        lstm_hidden_size = min(flattened_size, max(64, flattened_size // 8))  # Much smaller than before
-        
-        self.residual_lstms = nn.ModuleList()
+        # GraphConvLSTM cells with residual connections
+        self.lstm_cells = nn.ModuleList()
         self.lstm_layer_norms = nn.ModuleList()
-        self.lstm_projections = nn.ModuleList()  # Project between different sizes
+        
+        for i in range(rnn_layers):
+            input_dim = hidden_dim if i == 0 else hidden_dim
+            self.lstm_cells.append(
+                GraphConvLSTMCell(
+                    input_dim=input_dim,
+                    hidden_dim=hidden_dim,
+                    num_buses=num_buses,
+                    dropout=0.0  # Dropout handled externally
+                )
+            )
+            self.lstm_layer_norms.append(nn.LayerNorm(hidden_dim))
 
-        for _ in range(self.rnn_layers):
-            self.residual_lstms.append(nn.LSTM(flattened_size, lstm_hidden_size, num_layers=1, batch_first=True))
-            self.lstm_projections.append(nn.Linear(lstm_hidden_size, flattened_size))  # Project back to original size
-            self.lstm_layer_norms.append(nn.LayerNorm(flattened_size))
-
-        # Output Layer
-        # Homoscedastic: [batch, buses, 2] = predictions only
-        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        output_features = 4 if use_heteroscedastic else 2
-        self.output_transform = nn.Linear(self.hidden_dim, output_features)
-        self.dropout_layer = nn.Dropout(self.dropout)
-
-    def forward(self, x: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Forward pass for the adaptive ResnetPIGCLSTM.
+        Forward pass for the adaptive ResnetPIGCLSTM with residual connections.
 
         Args:
             x (torch.Tensor): Input features of shape [batch_size, seq_len, num_nodes, feature_dim].
             adj (torch.Tensor): The static, dense physical adjacency matrix of shape [num_nodes, num_nodes].
-                               This tensor should NOT be pre-batched.
+            bus_types: Bus type codes [batch_size, num_nodes] (optional)
         """
         batch_size, seq_len, num_nodes, _ = x.shape
 
-        # --- Adaptive Adjacency Matrix Calculation ---
-        # 1. Create the learned adjacency matrix [num_nodes, num_nodes].
-        learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
-
-        # 2. Combine with the physical adjacency matrix using the phi parameter.
-        A_adp = self.phi * adj + (1 - self.phi) * learned_adj
-
-        # 3. Expand the single adaptive matrix for efficient batch processing.
-        A_adp_expanded = A_adp.unsqueeze(0).expand(batch_size * seq_len, num_nodes, num_nodes)
-
-        # --- Spatio-Temporal Processing ---
-        # Reshape input for GCN processing across batch and sequence dimensions.
-        x_reshaped = x.view(batch_size * seq_len, num_nodes, -1)
-
-        # GCN layers for spatial feature extraction
-        h = x_reshaped
-        for gc_layer in self.gc_layers:
-            h_aggregated = torch.bmm(A_adp_expanded, h)
-            h = F.relu(gc_layer(h_aggregated))
-            h = self.dropout_layer(h)
-
-        # Reshape for LSTM processing.
-        h_lstm_in = h.view(batch_size, seq_len, -1)
+        # Compute adaptive adjacency matrix (shared across all timesteps)
+        A_adp = self.compute_adaptive_adjacency(adj, batch_size, seq_len)  # [batch_size * seq_len, num_nodes, num_nodes]
+        # Reshape to [batch_size, seq_len, num_nodes, num_nodes] for per-timestep processing
+        A_adp = A_adp.view(batch_size, seq_len, num_nodes, num_nodes)
         
-        # Residual LSTM layers for temporal feature extraction
-        h_res = h_lstm_in
-        hidden_state, cell_state = None, None
-        for i in range(self.rnn_layers):
-            residual = h_res
-            # Pass hidden and cell states from the previous layer's output
-            lstm_out, (hidden_state, cell_state) = self.residual_lstms[i](h_res, (hidden_state, cell_state) if hidden_state is not None else None)
-            # Project back to original size for residual connection
-            h_res = self.lstm_projections[i](lstm_out) + residual  # Add residual connection
-            h_res = self.lstm_layer_norms[i](h_res) # Apply layer normalization
-            if i < self.rnn_layers - 1:
-                h_res = self.dropout_layer(h_res)
+        # Initialize hidden and cell states for each layer
+        h_layers = [torch.zeros(batch_size, num_nodes, self.hidden_dim, device=x.device, dtype=x.dtype)
+                    for _ in range(self.rnn_layers)]
+        c_layers = [torch.zeros(batch_size, num_nodes, self.hidden_dim, device=x.device, dtype=x.dtype)
+                    for _ in range(self.rnn_layers)]
         
-        lstm_out = h_res
+        # Process sequence timestep by timestep
+        for t in range(seq_len):
+            # Get input at timestep t
+            x_t = x[:, t, :, :]  # [batch, nodes, feature_dim]
+            
+            # Get adjacency for this timestep [batch, nodes, nodes]
+            A_adp_expanded = A_adp[:, t, :, :]
+            
+            # Apply spatial processing (GCN layers) to get spatial features
+            h_spatial = x_t
+            for gc_layer in self.gc_layers:
+                # Aggregate features using adaptive adjacency, then transform
+                h_aggregated = torch.bmm(A_adp_expanded, h_spatial)  # [batch, nodes, features]
+                h_spatial = torch.relu(gc_layer(h_aggregated))
+                h_spatial = self.dropout_layer(h_spatial)
+            
+            # Now h_spatial is [batch, nodes, hidden_dim]
+            # Process through LSTM layers with residual connections
+            h_input = h_spatial
+            for layer_idx, lstm_cell in enumerate(self.lstm_cells):
+                residual = h_input  # Store input for residual connection
+                h_new, c_new = lstm_cell(
+                    h_input, h_layers[layer_idx], c_layers[layer_idx], A_adp_expanded
+                )
+                h_new = h_new + residual  # Add residual connection
+                h_new = self.lstm_layer_norms[layer_idx](h_new)  # Apply layer normalization
+                if layer_idx < self.rnn_layers - 1:
+                    h_new = self.dropout_layer(h_new)
+                h_layers[layer_idx] = h_new
+                c_layers[layer_idx] = c_new
+                h_input = h_new  # Output of this layer is input to next
         
-        # --- Output Transformation ---
-        # Select the output of the last time step for prediction.
-        last_step_output = lstm_out[:, -1, :]
+        # Use hidden state from last layer at final timestep
+        last_step_per_node = h_layers[-1]  # [batch, nodes, hidden_dim]
         
-        # Reshape back to a per-node representation.
-        last_step_per_node = last_step_output.view(batch_size, self.num_buses, self.hidden_dim)
-        
-        # Apply the final linear transformation.
-        # Homoscedastic: [batch, buses, 2] = predictions only
-        # Heteroscedastic: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        #   Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is exp or softplus
-        final_output_per_node = self.output_transform(last_step_per_node)
-        return final_output_per_node
+        # Apply output transformation and constraints
+        return self.apply_output_transformation(last_step_per_node, bus_types)

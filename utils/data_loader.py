@@ -55,9 +55,9 @@ class PowerSystemNormalizer:
         if torch.is_tensor(data):
             # If it's a CUDA tensor, move to CPU first
             if data.is_cuda:
-                data_cpu = data.cpu()
+                data_cpu = data.detach().cpu()
             else:
-                data_cpu = data
+                data_cpu = data.detach().cpu()
             # Convert to numpy for computation
             data_np = data_cpu.numpy()
             was_tensor = True
@@ -253,16 +253,18 @@ class PowerSystemDataset(Dataset):
 
         # OPF: Targets have 2 features per bus (OPF unknowns, bus-type dependent)
         # Extract generation components from FEATURES (measurements), not targets
-        # Features format: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+        # Import feature indices constants (single source of truth)
+        from config import FeatureIndices
+        
         if features_tensor.dim() == 3:
             # Sequential model: use last timestep
             features_last = features_tensor[-1] if features_tensor.shape[0] > 1 else features_tensor[0]
         else:
             features_last = features_tensor
         
-        ext_grid_gen = features_last[:, 2:4]  # p_ext, q_ext (indices 2-3)
-        conventional_gen = features_last[:, 4:6]  # p_conv, q_conv (indices 4-5)
-        renewable_gen = features_last[:, 6:8]  # p_ren, q_ren (indices 6-7)
+        ext_grid_gen = features_last[:, FeatureIndices.P_EXT_GRID:FeatureIndices.Q_EXT_GRID+1]  # p_ext, q_ext
+        conventional_gen = features_last[:, FeatureIndices.P_CONV:FeatureIndices.Q_CONV+1]  # p_conv, q_conv
+        renewable_gen = features_last[:, FeatureIndices.P_REN:FeatureIndices.Q_REN+1]  # p_ren, q_ren
         
         # Get bus types for this timestep (OPF: needed for loss calculation)
         bus_types_tensor = None
@@ -280,7 +282,8 @@ class PowerSystemDataset(Dataset):
             'renewable_fraction': renewable_fraction,
             'ext_grid_gen': ext_grid_gen,
             'conventional_gen': conventional_gen,
-            'renewable_gen': renewable_gen
+            'renewable_gen': renewable_gen,
+            'timestep': target_idx  # Store actual timestep for temporal plotting
         }
 
 # ... all other functions below this line remain the same ...
@@ -433,19 +436,64 @@ def load_power_system_data(config, case_name):
             concatenated_renewable_fractions, normalizer)
 
 def _collate_static(batch):
-    # This collate function will now work correctly as targets are already single slices.
-    return default_collate(batch)
+    """
+    Collate function for static models.
+    Ensures adjacency matrix is consistently shaped as [batch_size, num_buses, num_buses].
+    """
+    # Extract adjacency matrix from first item (it's the same for all items)
+    static_adj_matrix = batch[0]['adjacency']  # [num_buses, num_buses]
+    batch_size = len(batch)
+    
+    # Expand adjacency to batch dimension: [batch_size, num_buses, num_buses]
+    if static_adj_matrix.dim() == 2:
+        static_adj_batch = static_adj_matrix.unsqueeze(0).expand(batch_size, -1, -1)
+    elif static_adj_matrix.dim() == 3:
+        # Already has batch dimension, but should be single matrix
+        static_adj_batch = static_adj_matrix[0].unsqueeze(0).expand(batch_size, -1, -1)
+    else:
+        static_adj_batch = static_adj_matrix
+    
+    # Collate other items normally
+    other_items_batch = [{k: v for k, v in item.items() if k != 'adjacency'} for item in batch]
+    collated_batch = default_collate(other_items_batch)
+    
+    # Set the properly shaped adjacency matrix
+    collated_batch['adjacency'] = static_adj_batch
+    
+    return collated_batch
 
 def _collate_sequential_padded(batch):
-    # This collate function no longer needs to pad the targets.
-    static_adj_matrix = batch[0]['adjacency']
+    """
+    Collate function for sequential models.
+    Ensures adjacency matrix is consistently shaped as [batch_size, num_buses, num_buses].
+    """
+    # Extract adjacency matrix from first item (it's the same for all items)
+    static_adj_matrix = batch[0]['adjacency']  # [num_buses, num_buses]
+    batch_size = len(batch)
+    
+    # Expand adjacency to batch dimension: [batch_size, num_buses, num_buses]
+    if static_adj_matrix.dim() == 2:
+        static_adj_batch = static_adj_matrix.unsqueeze(0).expand(batch_size, -1, -1)
+    elif static_adj_matrix.dim() == 3:
+        # Already has batch dimension, but should be single matrix
+        static_adj_batch = static_adj_matrix[0].unsqueeze(0).expand(batch_size, -1, -1)
+    else:
+        static_adj_batch = static_adj_matrix
+    
+    # Collate other items
     other_items_batch = [{k: v for k, v in item.items() if k not in ['features', 'targets', 'adjacency']} for item in batch]
     collated_batch = default_collate(other_items_batch)
-    collated_batch['adjacency'] = static_adj_matrix
+    
+    # Set the properly shaped adjacency matrix
+    collated_batch['adjacency'] = static_adj_batch
+    
+    # Pad features sequences
     features_list = [item['features'] for item in batch]
     collated_batch['features'] = pad_sequence(features_list, batch_first=True, padding_value=0.0)
-    # Targets are now a batch of [N, F] tensors, so we can stack them into [B, N, F]
+    
+    # Stack targets: [batch_size, num_buses, 2]
     collated_batch['targets'] = default_collate([item['targets'] for item in batch])
+    
     return collated_batch
 
 def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static, bus_types=None):
@@ -465,49 +513,102 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     )
     dataset_size = len(dataset)
     
-    # TIME-SERIES mode: Use STRATIFIED split by renewable fraction for ALL models
-    # This ensures ALL renewable fractions appear in train/val/test sets
+    # Get split mode from config (default to 'blocked_timeseries' if not specified)
+    split_mode = getattr(config, 'DATA_SPLIT_MODE', 'blocked_timeseries')
     
-    # Group indices by renewable fraction
-    unique_fractions = np.unique(renewable_fractions)
-    train_indices, val_indices, test_indices = [], [], []
+    # Backward compatibility: 'stratified' is an alias for 'blocked_timeseries'
+    if split_mode == 'stratified':
+        split_mode = 'blocked_timeseries'
     
-    for frac in unique_fractions:
-        # Get all sample indices for this renewable fraction
-        frac_mask = renewable_fractions == frac
-        frac_indices = np.where(frac_mask)[0]
+    if split_mode == 'blocked_timeseries':
+        # BLOCKED TIME-SERIES SPLIT (Recommended for time-series forecasting)
+        # 
+        # This is the methodologically sound approach for time-series data with multiple scenarios.
+        # It combines the benefits of both chronological and stratified splitting:
+        # 1. Groups data into blocks by renewable_fraction (ensures all scenarios in train/val/test)
+        # 2. Splits each block chronologically (maintains temporal order, prevents data leakage)
+        # 3. Combines splits across blocks (final sets contain all renewable fractions)
+        #
+        # Why this is superior:
+        # - Zero data leakage: Temporal order is strictly maintained within each scenario block
+        # - Guaranteed representation: All renewable fractions appear in train/val/test sets
+        # - Fair evaluation: Model is tested on diverse scenarios while respecting time-series principles
+        # - Publication-ready: Defensible in top-tier ML/power systems journals
         
-        # Adjust for sequential models (some indices might be out of bounds)
-        # Only keep indices that are valid for the dataset
-        valid_frac_indices = [idx for idx in frac_indices if idx < dataset_size]
+        # Group indices by renewable fraction
+        unique_fractions = np.unique(renewable_fractions)
+        train_indices, val_indices, test_indices = [], [], []
         
-        if len(valid_frac_indices) == 0:
-            continue
+        for frac in unique_fractions:
+            # STEP 1: BLOCK - Get all sample indices for this specific renewable fraction
+            frac_mask = renewable_fractions == frac
+            frac_indices = np.where(frac_mask)[0]
+            
+            # Filter indices to ensure they are valid for the dataset length
+            # (important for sequential models that may have padding/truncation)
+            valid_frac_indices = [idx for idx in frac_indices if idx < dataset_size]
+            
+            if len(valid_frac_indices) == 0:
+                continue
+            
+            n_frac = len(valid_frac_indices)
+            
+            # STEP 2: SPLIT CHRONOLOGICALLY within the block
+            # The indices are already sorted by time within the block (from data generation)
+            n_train = int(config.TRAIN_SPLIT * n_frac)
+            n_val = int(config.VAL_SPLIT * n_frac)
+            # The rest goes to test, ensuring no data loss within the block
+            n_test = n_frac - n_train - n_val
+            
+            # Contiguous splits preserve temporal order within each block
+            frac_train_indices = valid_frac_indices[:n_train]
+            frac_val_indices = valid_frac_indices[n_train:n_train + n_val]
+            frac_test_indices = valid_frac_indices[n_train + n_val:]
+            
+            # Verify no data loss for this fraction
+            assert len(frac_train_indices) + len(frac_val_indices) + len(frac_test_indices) == n_frac, \
+                f"Data loss detected for fraction {frac}: {len(frac_train_indices)}+{len(frac_val_indices)}+{len(frac_test_indices)} != {n_frac}"
+            
+            # STEP 3: COMBINE - Add the split indices to the final lists
+            train_indices.extend(frac_train_indices)
+            val_indices.extend(frac_val_indices)
+            test_indices.extend(frac_test_indices)
         
-        # Split THIS fraction's data into train/val/test
-        # Ensure no data loss: train + val + test = total (all indices used)
-        n_frac = len(valid_frac_indices)
-        n_train = int(config.TRAIN_SPLIT * n_frac)
-        n_val = int(config.VAL_SPLIT * n_frac)
-        n_test = n_frac - n_train - n_val  # Remaining goes to test (ensures no data loss)
+        # Sort the final indices to maintain as much of the overall temporal structure as possible
+        # This helps with data loader efficiency and maintains some global temporal ordering
+        train_indices.sort()
+        val_indices.sort()
+        test_indices.sort()
         
-        # Contiguous splits WITHIN each fraction (preserves temporal order)
-        frac_train = valid_frac_indices[:n_train]
-        frac_val = valid_frac_indices[n_train:n_train + n_val]
-        frac_test = valid_frac_indices[n_train + n_val:n_train + n_val + n_test]  # Explicit end index
+        split_mode_str = "Blocked Time-Series"
         
-        # Verify no data loss for this fraction
-        assert len(frac_train) + len(frac_val) + len(frac_test) == n_frac, \
-            f"Data loss detected for fraction {frac}: {len(frac_train)}+{len(frac_val)}+{len(frac_test)} != {n_frac}"
+    elif split_mode == 'chronological':
+        # SIMPLE CHRONOLOGICAL SPLIT (Alternative method)
+        # 
+        # Split by time order (train on past, test on future).
+        # This maintains strict temporal order but may result in test set missing some renewable fractions.
+        # Use this only if you specifically need a simple chronological split.
+        # 
+        # WARNING: This method may cause warnings like "No data for X% renewables" in test set,
+        # which is expected if your data generation creates blocks of scenarios sequentially.
         
-        train_indices.extend(frac_train)
-        val_indices.extend(frac_val)
-        test_indices.extend(frac_test)
-    
-    # Sort indices to maintain some temporal structure across fractions
-    train_indices = sorted(train_indices)
-    val_indices = sorted(val_indices)
-    test_indices = sorted(test_indices)
+        # All indices in chronological order (already sorted by time)
+        all_indices = list(range(dataset_size))
+        
+        # Calculate split sizes
+        n_train = int(config.TRAIN_SPLIT * dataset_size)
+        n_val = int(config.VAL_SPLIT * dataset_size)
+        n_test = dataset_size - n_train - n_val  # Remaining goes to test (ensures no data loss)
+        
+        # Split chronologically: first N% for train, next M% for val, remaining for test
+        train_indices = all_indices[:n_train]
+        val_indices = all_indices[n_train:n_train + n_val]
+        test_indices = all_indices[n_train + n_val:n_train + n_val + n_test]
+        
+        split_mode_str = "Chronological"
+        
+    else:
+        raise ValueError(f"Unknown DATA_SPLIT_MODE: {split_mode}. Must be 'blocked_timeseries' or 'chronological'.")
     
     # Verify NO DATA LOSS: train + val + test = total dataset size
     total_split_size = len(train_indices) + len(val_indices) + len(test_indices)
@@ -522,7 +623,7 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     expected_val = config.VAL_SPLIT
     expected_test = 1.0 - config.TRAIN_SPLIT - config.VAL_SPLIT
     
-    print(f"[Data Split] Train: {len(train_indices)} ({train_ratio:.1%}), Val: {len(val_indices)} ({val_ratio:.1%}), Test: {len(test_indices)} ({test_ratio:.1%}) | Expected: {expected_train:.1%}/{expected_val:.1%}/{expected_test:.1%} | Zero loss: {total_split_size}=={dataset_size} [OK]")
+    print(f"[Data Split] Mode: {split_mode_str} | Train: {len(train_indices)} ({train_ratio:.1%}), Val: {len(val_indices)} ({val_ratio:.1%}), Test: {len(test_indices)} ({test_ratio:.1%}) | Expected: {expected_train:.1%}/{expected_val:.1%}/{expected_test:.1%} | Zero loss: {total_split_size}=={dataset_size} [OK]")
     
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, val_indices)

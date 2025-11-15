@@ -74,39 +74,31 @@ class PowerSystemLoss(nn.Module):
         self.is_physics_informed = not is_gcn
         self.mse_loss_fn = nn.MSELoss()
         
-        # Heteroscedastic vs Homoscedastic uncertainty
-        self.use_heteroscedastic = getattr(config, 'USE_HETEROSCEDASTIC_UNCERTAINTY', False)
+        # Heteroscedastic uncertainty with natural parametrization (Immer et al., NeurIPS 2023)
+        # Model outputs [batch, buses, 4]: [η1_var1, η1_var2, f2_var1, f2_var2]
+        # where η1 = f1 (direct), η2 = -g+(f2) with g+ being softplus (numerically stable)
+        # 
+        # For PHYSICS losses: Use Kendall-style learnable weights (not heteroscedastic)
+        # Heteroscedastic paper (Immer et al. 2023) only addresses data loss, not physics losses
+        # Kendall et al. (CVPR 2018) provides well-cited method for multi-task loss weighting
+        self.log_sigma_data = None  # Data loss uses heteroscedastic (natural parametrization)
+        self.log_sigma_power = nn.Parameter(torch.tensor(0.0))  # Physics loss: Kendall-style
+        self.log_sigma_voltage = nn.Parameter(torch.tensor(0.0))  # Physics loss: Kendall-style
         
-        if self.use_heteroscedastic:
-            # Heteroscedastic: Model will predict natural parameters for DATA loss (MSE)
-            # Model should output [batch, buses, 4]: [η1_var1, η1_var2, f2_var1, f2_var2]
-            # where η1 = f1 (direct), η2 = -g+(f2) with g+ being exp or softplus
-            # 
-            # For PHYSICS losses: Use Kendall-style learnable weights (not heteroscedastic)
-            # Heteroscedastic paper (Immer et al. 2023) only addresses data loss, not physics losses
-            # Kendall et al. (CVPR 2018) provides well-cited method for multi-task loss weighting
-            self.log_sigma_data = None  # Data loss uses heteroscedastic (natural parametrization)
-            self.log_sigma_power = nn.Parameter(torch.tensor(0.0))  # Physics loss: Kendall-style
-            self.log_sigma_voltage = nn.Parameter(torch.tensor(0.0))  # Physics loss: Kendall-style
-            
-            # Natural Parametrization (Immer et al., NeurIPS 2023)
-            # "Effective Bayesian Heteroscedastic Regression with Deep Neural Networks"
-            # Paper: https://arxiv.org/abs/2306.17758, Citations: 27+ (as of Nov 2025)
-            # 
-            # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
-            # Key advantages:
-            # 1. Jointly concave objective (more stable optimization)
-            # 2. Simpler gradients: ∇η1 = μ - y, ∇η2 = σ² - (y² - μ²)
-            # 3. No negative log variance issues (η2 < 0 by construction)
-            self.loss_type = 'natural'
-            natural_function = getattr(config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
-            print(f"[Heteroscedastic Loss] Using: Natural Parametrization (Immer et al., NeurIPS 2023) with {natural_function}")
-        else:
-            # Homoscedastic: Learnable uncertainty parameters (single value per loss term)
-            self.log_sigma_data = nn.Parameter(torch.tensor(0.0))
-            self.log_sigma_power = nn.Parameter(torch.tensor(0.0))
-            self.log_sigma_voltage = nn.Parameter(torch.tensor(0.0))
-            self.loss_type = None
+        # Physics loss annealing: gradually introduce physics constraints to prevent early explosion
+        self.physics_warmup_epochs = getattr(config, 'PHYSICS_WARMUP_EPOCHS', 10)
+        
+        # Natural Parametrization (Immer et al., NeurIPS 2023)
+        # "Effective Bayesian Heteroscedastic Regression with Deep Neural Networks"
+        # Paper: https://arxiv.org/abs/2306.17758, Citations: 27+ (as of Nov 2025)
+        # 
+        # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+        # Key advantages:
+        # 1. Jointly concave objective (more stable optimization)
+        # 2. Simpler gradients: ∇η1 = μ - y, ∇η2 = σ² - (y² - μ²)
+        # 3. No negative log variance issues (η2 < 0 by construction)
+        self.loss_type = 'natural'
+        print(f"[Heteroscedastic Loss] Using: Natural Parametrization (Immer et al., NeurIPS 2023) with softplus")
         
         self.register_buffer('v_min', torch.tensor(config.V_MIN, dtype=torch.float32))
         self.register_buffer('v_max', torch.tensor(config.V_MAX, dtype=torch.float32))
@@ -144,7 +136,8 @@ class PowerSystemLoss(nn.Module):
                 measurements_norm: torch.Tensor,
                 ybus_batch: torch.Tensor,
                 bus_types: torch.Tensor,
-                return_components: bool = False) -> torch.Tensor:
+                return_components: bool = False,
+                epoch: int = None) -> torch.Tensor:
         
         # Ensure outputs and targets have the same shape
         if outputs_norm.dim() != targets_norm.dim():
@@ -154,13 +147,8 @@ class PowerSystemLoss(nn.Module):
             else:
                  raise ValueError(f"Shape mismatch: outputs {outputs_norm.shape}, targets {targets_norm.shape}")
         
-        # Handle heteroscedastic vs homoscedastic output shapes
-        if self.use_heteroscedastic:
-            # Heteroscedastic: Model outputs [batch, buses, 4] = [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
-            expected_features = 4
-        else:
-            # Homoscedastic: Model outputs [batch, buses, 2] = [var1_pred, var2_pred]
-            expected_features = 2
+        # Heteroscedastic: Model outputs [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        expected_features = 4
         
         # Ensure outputs are in correct format
         if outputs_norm.dim() == 2:
@@ -173,7 +161,7 @@ class PowerSystemLoss(nn.Module):
                 raise ValueError(
                     f"Cannot reshape outputs from {outputs_norm.shape} (size={actual_size}) "
                     f"to [batch={batch_size}, buses={num_buses}, {expected_features}] (expected size={expected_size}). "
-                    f"Targets shape: {targets_norm.shape}, Heteroscedastic: {self.use_heteroscedastic}"
+                    f"Targets shape: {targets_norm.shape}"
                 )
             outputs_norm = outputs_norm.view(batch_size, num_buses, expected_features)
         elif outputs_norm.dim() == 3:
@@ -193,242 +181,173 @@ class PowerSystemLoss(nn.Module):
                     f"Each bus has {total_features} features (should be {expected_features}). "
                     f"This suggests the output layer is producing [batch, buses, buses*{expected_features}] instead of [batch, buses, {expected_features}]. "
                     f"Actual size: {actual_size}, Expected: {expected_size}. "
-                    f"Targets shape: {targets_norm.shape}, Heteroscedastic: {self.use_heteroscedastic}"
+                    f"Targets shape: {targets_norm.shape}"
                 )
             else:
                 raise ValueError(
                     f"Unexpected output shape: {outputs_norm.shape} (size={actual_size}). "
                     f"Expected [batch, buses, {expected_features}] (size={expected_size}). "
                     f"Got last dim {total_features}, expected {expected_features}. "
-                    f"Targets shape: {targets_norm.shape}, Heteroscedastic: {self.use_heteroscedastic}"
+                    f"Targets shape: {targets_norm.shape}"
                 )
         
         # Extract natural parameters and compute loss
-        if self.use_heteroscedastic:
-            # Heteroscedastic: outputs_norm is [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-            # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
-            # where η1 = f1 (direct), η2 = -g+(f2) with g+ being exp or softplus
-            
-            eta1_var1_raw = outputs_norm[..., 0]  # [batch, buses] - η1 for variable 1
-            eta1_var2_raw = outputs_norm[..., 1]  # [batch, buses] - η1 for variable 2
-            f2_var1_raw = outputs_norm[..., 2]    # [batch, buses] - f2 for variable 1
-            f2_var2_raw = outputs_norm[..., 3]    # [batch, buses] - f2 for variable 2
-            
-            # Get natural function type (exp or softplus)
-            natural_function = getattr(self.config, 'HETEROSCEDASTIC_NATURAL_FUNCTION', 'exp')
-            softplus_beta = getattr(self.config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
-            
-            # DEBUG: Check raw model outputs - ONLY PRINT WHEN NaN DETECTED
-            if torch.isnan(eta1_var1_raw).any() or torch.isnan(f2_var1_raw).any():
-                print(f"\n{'='*80}")
-                print(f"[DEBUG] NaN in raw model outputs!")
-                print(f"{'='*80}")
-                print(f"  eta1_var1_raw: nan={torch.isnan(eta1_var1_raw).any().item()}, inf={torch.isinf(eta1_var1_raw).any().item()}, min={eta1_var1_raw.min().item():.6f}, max={eta1_var1_raw.max().item():.6f}")
-                print(f"  f2_var1_raw: nan={torch.isnan(f2_var1_raw).any().item()}, inf={torch.isinf(f2_var1_raw).any().item()}, min={f2_var1_raw.min().item():.6f}, max={f2_var1_raw.max().item():.6f}")
-                print(f"  eta1_var2_raw: nan={torch.isnan(eta1_var2_raw).any().item()}, inf={torch.isinf(eta1_var2_raw).any().item()}, min={eta1_var2_raw.min().item():.6f}, max={eta1_var2_raw.max().item():.6f}")
-                print(f"  f2_var2_raw: nan={torch.isnan(f2_var2_raw).any().item()}, inf={torch.isinf(f2_var2_raw).any().item()}, min={f2_var2_raw.min().item():.6f}, max={f2_var2_raw.max().item():.6f}")
-                print(f"{'='*80}")
-                import sys
-                sys.exit(1)
-            
-            # Compute g+(f2) - positive function ensuring η2 < 0
-            if natural_function == 'exp':
-                # g+(x) = 0.5 * exp(x) (from paper, Equation 4)
-                g_plus_var1 = 0.5 * torch.exp(f2_var1_raw)
-                g_plus_var2 = 0.5 * torch.exp(f2_var2_raw)
-            elif natural_function == 'softplus':
-                # g+(x) = (1/β) * log(1 + exp(β*x))
-                g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
-                g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
-            else:
-                raise ValueError(f"Unknown natural function: {natural_function}. Must be 'exp' or 'softplus'")
-            
-            # DEBUG: Check g+ values - ONLY PRINT WHEN NaN DETECTED
-            if torch.isnan(g_plus_var1).any() or torch.isinf(g_plus_var1).any():
-                print(f"\n{'='*80}")
-                print(f"[DEBUG] NaN/Inf in g_plus_var1!")
-                print(f"{'='*80}")
-                print(f"  f2_var1_raw range: [{f2_var1_raw.min().item():.6f}, {f2_var1_raw.max().item():.6f}]")
-                print(f"  f2_var2_raw range: [{f2_var2_raw.min().item():.6f}, {f2_var2_raw.max().item():.6f}]")
-                print(f"  g_plus_var1 range: [{g_plus_var1.min().item():.6f}, {g_plus_var1.max().item():.6f}], nan={torch.isnan(g_plus_var1).any().item()}, inf={torch.isinf(g_plus_var1).any().item()}")
-                print(f"  g_plus_var2 range: [{g_plus_var2.min().item():.6f}, {g_plus_var2.max().item():.6f}], nan={torch.isnan(g_plus_var2).any().item()}, inf={torch.isinf(g_plus_var2).any().item()}")
-                print(f"  exp(f2_var1_raw) overflow: {(f2_var1_raw > 10).sum().item()} values > 10")
-                print(f"  exp(f2_var2_raw) overflow: {(f2_var2_raw > 10).sum().item()} values > 10")
-                print(f"{'='*80}")
-                import sys
-                sys.exit(1)
-            
-            # Compute natural parameters: η1 = f1 (direct), η2 = -g+(f2) < 0
-            eta1_var1 = eta1_var1_raw  # [batch, buses]
-            eta1_var2 = eta1_var2_raw  # [batch, buses]
-            eta2_var1 = -g_plus_var1  # [batch, buses] - guaranteed < 0
-            eta2_var2 = -g_plus_var2  # [batch, buses] - guaranteed < 0
-            
-            # Convert to mean and variance for predictions and MSE calculation
-            # μ = -η1/(2η2), σ² = -1/(2η2)
-            # Paper (Equation 3): No epsilon used - η2 < 0 by construction, so division is safe
-            mu_var1 = -eta1_var1 / (2.0 * eta2_var1)  # [batch, buses]
-            mu_var2 = -eta1_var2 / (2.0 * eta2_var2)  # [batch, buses]
-            sigma2_var1 = -1.0 / (2.0 * eta2_var1)   # [batch, buses] - variance
-            sigma2_var2 = -1.0 / (2.0 * eta2_var2)   # [batch, buses] - variance
-            
-            # NOTE: Paper does NOT use clamping (see Appendix E.2)
-            # However, we add clamping for numerical stability in practice:
-            # - Prevents division by zero when η2 → 0 (variance → ∞)
-            # - Prevents overflow when η2 → -∞ (variance → 0)
-            # - Ensures variance stays in reasonable range for power systems
-            # 
-            # If you want to match the paper exactly, set HETEROSCEDASTIC_USE_CLAMPING=False
-            use_clamping = getattr(self.config, 'HETEROSCEDASTIC_USE_CLAMPING', False)  # Default: False to match paper
-            if use_clamping:
-                # Hardcoded defaults (not in paper, but useful for numerical stability)
-                min_sigma = 0.01  # Minimum standard deviation
-                max_sigma = 10.0  # Maximum standard deviation
-                min_sigma2 = min_sigma ** 2
-                max_sigma2 = max_sigma ** 2
-                sigma2_var1 = sigma2_var1.clamp(min_sigma2, max_sigma2)
-                sigma2_var2 = sigma2_var2.clamp(min_sigma2, max_sigma2)
-            
-            # Natural parametrization loss is computed on normalized targets
-            # (since model outputs are in normalized space)
-            var1_true_norm = targets_norm[..., 0]  # [batch, buses] - normalized
-            var2_true_norm = targets_norm[..., 1]  # [batch, buses] - normalized
-            
-            # Compute natural parametrization negative log-likelihood (Equation 5 from paper)
-            # log p(y|x,θ) = [η1, η2]ᵀ[y, y²]ᵀ + η1²/(4η2) + ½log(-2η2) + const
-            # NLL = -log p(y|x,θ)
-            # Note: This is computed on normalized targets (y_norm) since η1, η2 are in normalized space
-            
-            # For variable 1: y = var1_true_norm (normalized)
-            y1 = var1_true_norm  # [batch, buses]
-            y1_sq = y1 ** 2  # [batch, buses]
-            
-            # Inner product: [η1, η2]ᵀ[y, y²]ᵀ = η1*y + η2*y²
-            inner1 = eta1_var1 * y1 + eta2_var1 * y1_sq  # [batch, buses]
-            
-            # Log partition: η1²/(4η2) + ½log(-2η2)
-            # Note: η2 < 0, so -2η2 > 0, log(-2η2) is valid
-            # Paper (Equation 5): No epsilon used
-            log_partition1 = (eta1_var1 ** 2) / (4.0 * eta2_var1) + 0.5 * torch.log(-2.0 * eta2_var1)  # [batch, buses]
-            
-            # NLL for variable 1: -inner - log_partition (constant term omitted)
-            nll_var1 = -inner1 - log_partition1  # [batch, buses]
-            
-            # For variable 2: y = var2_true_norm (normalized)
-            y2 = var2_true_norm  # [batch, buses]
-            y2_sq = y2 ** 2  # [batch, buses]
-            
-            inner2 = eta1_var2 * y2 + eta2_var2 * y2_sq  # [batch, buses]
-            log_partition2 = (eta1_var2 ** 2) / (4.0 * eta2_var2) + 0.5 * torch.log(-2.0 * eta2_var2)  # [batch, buses]
-            nll_var2 = -inner2 - log_partition2  # [batch, buses]
-            
-            # Total NLL: mean across batch and buses
-            data_loss = torch.mean(nll_var1) + torch.mean(nll_var2)
-            
-            # DEBUG: Check for NaN in natural parametrization
-            if torch.isnan(data_loss) or torch.isinf(data_loss):
-                print(f"\n[DEBUG] NaN/Inf detected in data_loss!")
-                print(f"  eta1_var1: min={eta1_var1.min().item():.6f}, max={eta1_var1.max().item():.6f}, nan={torch.isnan(eta1_var1).any().item()}")
-                print(f"  eta2_var1: min={eta2_var1.min().item():.6f}, max={eta2_var1.max().item():.6f}, nan={torch.isnan(eta2_var1).any().item()}")
-                print(f"  eta1_var2: min={eta1_var2.min().item():.6f}, max={eta1_var2.max().item():.6f}, nan={torch.isnan(eta1_var2).any().item()}")
-                print(f"  eta2_var2: min={eta2_var2.min().item():.6f}, max={eta2_var2.max().item():.6f}, nan={torch.isnan(eta2_var2).any().item()}")
-                print(f"  log_partition1: min={log_partition1.min().item():.6f}, max={log_partition1.max().item():.6f}, nan={torch.isnan(log_partition1).any().item()}")
-                print(f"  log_partition2: min={log_partition2.min().item():.6f}, max={log_partition2.max().item():.6f}, nan={torch.isnan(log_partition2).any().item()}")
-                print(f"  nll_var1: min={nll_var1.min().item():.6f}, max={nll_var1.max().item():.6f}, nan={torch.isnan(nll_var1).any().item()}")
-                print(f"  nll_var2: min={nll_var2.min().item():.6f}, max={nll_var2.max().item():.6f}, nan={torch.isnan(nll_var2).any().item()}")
-                print(f"  data_loss: {data_loss.item()}")
-                # Check division by zero
-                print(f"  eta2_var1 near zero: {(torch.abs(eta2_var1) < 1e-6).sum().item()} values")
-                print(f"  eta2_var2 near zero: {(torch.abs(eta2_var2) < 1e-6).sum().item()} values")
-                raise RuntimeError("NaN detected in natural parametrization loss - stopping training")
-            
-            # Compute MSE on NORMALIZED data for consistency with total loss (NLL is on normalized data)
-            # This ensures MSE + p_vio + v_viol ≈ total_loss (all in same scale)
-            mse_var1_norm = torch.mean((mu_var1 - var1_true_norm) ** 2)  # [batch, buses] -> scalar
-            mse_var2_norm = torch.mean((mu_var2 - var2_true_norm) ** 2)  # [batch, buses] -> scalar
-            unweighted_mse = mse_var1_norm + mse_var2_norm  # Normalized MSE (for consistency with total loss)
-            
-            # Also compute denormalized MSE for reporting (physical units)
-            mu_norm = torch.stack([mu_var1, mu_var2], dim=-1)  # [batch, buses, 2]
-            predictions_denorm = self.normalizer.denormalize(mu_norm)
-            var1_pred = predictions_denorm[..., 0]
-            var2_pred = predictions_denorm[..., 1]
-            targets_denorm_for_mse = self.normalizer.denormalize(targets_norm)
-            var1_true = targets_denorm_for_mse[..., 0]
-            var2_true = targets_denorm_for_mse[..., 1]
-            mse_var1_denorm = torch.mean((var1_pred - var1_true) ** 2)  # Denormalized (for reporting)
-            mse_var2_denorm = torch.mean((var2_pred - var2_true) ** 2)  # Denormalized (for reporting)
-            
-            # Compute sigma (standard deviation) for reporting and violations
-            # Note: sigma2 is in normalized space, but we report it as-is (relative uncertainty)
-            if use_clamping:
-                sigma_var1 = torch.sqrt(sigma2_var1.clamp(min_sigma2, max_sigma2))  # [batch, buses]
-                sigma_var2 = torch.sqrt(sigma2_var2.clamp(min_sigma2, max_sigma2))  # [batch, buses]
-            else:
-                # No clamping: match paper exactly (Equation 3: σ² = -1/(2η2), so σ = sqrt(σ²))
-                # Paper: No epsilon used
-                sigma_var1 = torch.sqrt(sigma2_var1)  # [batch, buses]
-                sigma_var2 = torch.sqrt(sigma2_var2)  # [batch, buses]
-            
-            # Store sigma tensors for use in violation calculations
-            self._sigma_var1_for_violations = sigma_var1  # [batch, buses]
-            self._sigma_var2_for_violations = sigma_var2  # [batch, buses]
-        else:
-            # Homoscedastic: outputs_norm is [batch, buses, 2]
-            outputs_denorm_for_mse = self.normalizer.denormalize(outputs_norm)
-            targets_denorm_for_mse = self.normalizer.denormalize(targets_norm)
-            
-            var1_pred = outputs_denorm_for_mse[..., 0]
-            var2_pred = outputs_denorm_for_mse[..., 1]
-            var1_true = targets_denorm_for_mse[..., 0]
-            var2_true = targets_denorm_for_mse[..., 1]
-            
-            # Compute denormalized MSE (physical units)
-            mse_var1_denorm = self.mse_loss_fn(var1_pred, var1_true)
-            mse_var2_denorm = self.mse_loss_fn(var2_pred, var2_true)
-            # For homoscedastic, data_loss is denormalized (used for optimization)
-            data_loss = mse_var1_denorm + mse_var2_denorm
-            unweighted_mse = data_loss  # For homoscedastic, unweighted = weighted
-            # Store for later use in reporting
-            mse_var1 = mse_var1_denorm
-            mse_var2 = mse_var2_denorm
+        # Heteroscedastic: outputs_norm is [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+        # where η1 = f1 (direct), η2 = -g+(f2) with g+ being softplus (numerically stable)
+        
+        eta1_var1_raw = outputs_norm[..., 0]  # [batch, buses] - η1 for variable 1
+        eta1_var2_raw = outputs_norm[..., 1]  # [batch, buses] - η1 for variable 2
+        f2_var1_raw = outputs_norm[..., 2]    # [batch, buses] - f2 for variable 1
+        f2_var2_raw = outputs_norm[..., 3]    # [batch, buses] - f2 for variable 2
+        
+        # Get softplus beta parameter
+        softplus_beta = getattr(self.config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
+        
+        # DEBUG: Check raw model outputs - ONLY PRINT WHEN NaN DETECTED
+        if torch.isnan(eta1_var1_raw).any() or torch.isnan(f2_var1_raw).any():
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] NaN in raw model outputs!")
+            print(f"{'='*80}")
+            print(f"  eta1_var1_raw: nan={torch.isnan(eta1_var1_raw).any().item()}, inf={torch.isinf(eta1_var1_raw).any().item()}, min={eta1_var1_raw.min().item():.6f}, max={eta1_var1_raw.max().item():.6f}")
+            print(f"  f2_var1_raw: nan={torch.isnan(f2_var1_raw).any().item()}, inf={torch.isinf(f2_var1_raw).any().item()}, min={f2_var1_raw.min().item():.6f}, max={f2_var1_raw.max().item():.6f}")
+            print(f"  eta1_var2_raw: nan={torch.isnan(eta1_var2_raw).any().item()}, inf={torch.isinf(eta1_var2_raw).any().item()}, min={eta1_var2_raw.min().item():.6f}, max={eta1_var2_raw.max().item():.6f}")
+            print(f"  f2_var2_raw: nan={torch.isnan(f2_var2_raw).any().item()}, inf={torch.isinf(f2_var2_raw).any().item()}, min={f2_var2_raw.min().item():.6f}, max={f2_var2_raw.max().item():.6f}")
+            print(f"{'='*80}")
+            import sys
+            sys.exit(1)
+        
+        # Compute g+(f2) using softplus - numerically stable (grows linearly for large x, prevents explosion)
+        # g+(x) = (1/β) * log(1 + exp(β*x))
+        g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
+        g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
+        
+        # DEBUG: Check g+ values - ONLY PRINT WHEN NaN DETECTED
+        if torch.isnan(g_plus_var1).any() or torch.isinf(g_plus_var1).any():
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] NaN/Inf in g_plus_var1!")
+            print(f"{'='*80}")
+            print(f"  f2_var1_raw range: [{f2_var1_raw.min().item():.6f}, {f2_var1_raw.max().item():.6f}]")
+            print(f"  f2_var2_raw range: [{f2_var2_raw.min().item():.6f}, {f2_var2_raw.max().item():.6f}]")
+            print(f"  g_plus_var1 range: [{g_plus_var1.min().item():.6f}, {g_plus_var1.max().item():.6f}], nan={torch.isnan(g_plus_var1).any().item()}, inf={torch.isinf(g_plus_var1).any().item()}")
+            print(f"  g_plus_var2 range: [{g_plus_var2.min().item():.6f}, {g_plus_var2.max().item():.6f}], nan={torch.isnan(g_plus_var2).any().item()}, inf={torch.isinf(g_plus_var2).any().item()}")
+            print(f"{'='*80}")
+            import sys
+            sys.exit(1)
+        
+        # Compute natural parameters: η1 = f1 (direct), η2 = -g+(f2) < 0
+        eta1_var1 = eta1_var1_raw  # [batch, buses]
+        eta1_var2 = eta1_var2_raw  # [batch, buses]
+        eta2_var1 = -g_plus_var1  # [batch, buses] - guaranteed < 0
+        eta2_var2 = -g_plus_var2  # [batch, buses] - guaranteed < 0
+        
+        # Convert to mean and variance for predictions and MSE calculation
+        # μ = -η1/(2η2), σ² = -1/(2η2)
+        # Small epsilon to prevent division by zero (numerical safeguard)
+        eps = 1e-8
+        mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)  # [batch, buses]
+        mu_var2 = -eta1_var2 / (2.0 * eta2_var2 + eps)  # [batch, buses]
+        sigma2_var1 = -1.0 / (2.0 * eta2_var1 + eps)   # [batch, buses] - variance
+        sigma2_var2 = -1.0 / (2.0 * eta2_var2 + eps)   # [batch, buses] - variance
+        
+        # Natural parametrization loss is computed on normalized targets
+        # (since model outputs are in normalized space)
+        var1_true_norm = targets_norm[..., 0]  # [batch, buses] - normalized
+        var2_true_norm = targets_norm[..., 1]  # [batch, buses] - normalized
+        
+        # Compute natural parametrization negative log-likelihood (Equation 5 from paper)
+        # log p(y|x,θ) = [η1, η2]ᵀ[y, y²]ᵀ + η1²/(4η2) + ½log(-2η2) + const
+        # NLL = -log p(y|x,θ)
+        # Note: This is computed on normalized targets (y_norm) since η1, η2 are in normalized space
+        
+        # For variable 1: y = var1_true_norm (normalized)
+        y1 = var1_true_norm  # [batch, buses]
+        y1_sq = y1 ** 2  # [batch, buses]
+        
+        # Inner product: [η1, η2]ᵀ[y, y²]ᵀ = η1*y + η2*y²
+        inner1 = eta1_var1 * y1 + eta2_var1 * y1_sq  # [batch, buses]
+        
+        # Log partition: η1²/(4η2) + ½log(-2η2)
+        # Note: η2 < 0, so -2η2 > 0, log(-2η2) is valid
+        # Small epsilon to prevent division by zero and log(0) (numerical safeguard)
+        log_partition1 = (eta1_var1 ** 2) / (4.0 * eta2_var1 + eps) + 0.5 * torch.log(-2.0 * eta2_var1 + eps)  # [batch, buses]
+        
+        # NLL for variable 1: -inner - log_partition (constant term omitted)
+        nll_var1 = -inner1 - log_partition1  # [batch, buses]
+        
+        # For variable 2: y = var2_true_norm (normalized)
+        y2 = var2_true_norm  # [batch, buses]
+        y2_sq = y2 ** 2  # [batch, buses]
+        
+        inner2 = eta1_var2 * y2 + eta2_var2 * y2_sq  # [batch, buses]
+        log_partition2 = (eta1_var2 ** 2) / (4.0 * eta2_var2 + eps) + 0.5 * torch.log(-2.0 * eta2_var2 + eps)  # [batch, buses]
+        nll_var2 = -inner2 - log_partition2  # [batch, buses]
+        
+        # Total NLL: mean across batch and buses
+        data_loss = torch.mean(nll_var1) + torch.mean(nll_var2)
+        
+        # DEBUG: Check for NaN in natural parametrization
+        if torch.isnan(data_loss) or torch.isinf(data_loss):
+            print(f"\n[DEBUG] NaN/Inf detected in data_loss!")
+            print(f"  eta1_var1: min={eta1_var1.min().item():.6f}, max={eta1_var1.max().item():.6f}, nan={torch.isnan(eta1_var1).any().item()}")
+            print(f"  eta2_var1: min={eta2_var1.min().item():.6f}, max={eta2_var1.max().item():.6f}, nan={torch.isnan(eta2_var1).any().item()}")
+            print(f"  eta1_var2: min={eta1_var2.min().item():.6f}, max={eta1_var2.max().item():.6f}, nan={torch.isnan(eta1_var2).any().item()}")
+            print(f"  eta2_var2: min={eta2_var2.min().item():.6f}, max={eta2_var2.max().item():.6f}, nan={torch.isnan(eta2_var2).any().item()}")
+            print(f"  log_partition1: min={log_partition1.min().item():.6f}, max={log_partition1.max().item():.6f}, nan={torch.isnan(log_partition1).any().item()}")
+            print(f"  log_partition2: min={log_partition2.min().item():.6f}, max={log_partition2.max().item():.6f}, nan={torch.isnan(log_partition2).any().item()}")
+            print(f"  nll_var1: min={nll_var1.min().item():.6f}, max={nll_var1.max().item():.6f}, nan={torch.isnan(nll_var1).any().item()}")
+            print(f"  nll_var2: min={nll_var2.min().item():.6f}, max={nll_var2.max().item():.6f}, nan={torch.isnan(nll_var2).any().item()}")
+            print(f"  data_loss: {data_loss.item()}")
+            # Check division by zero
+            print(f"  eta2_var1 near zero: {(torch.abs(eta2_var1) < 1e-6).sum().item()} values")
+            print(f"  eta2_var2 near zero: {(torch.abs(eta2_var2) < 1e-6).sum().item()} values")
+            raise RuntimeError("NaN detected in natural parametrization loss - stopping training")
+        
+        # Compute MSE on NORMALIZED data for consistency with total loss (NLL is on normalized data)
+        # This ensures MSE + p_vio + v_viol ≈ total_loss (all in same scale)
+        mse_var1_norm = torch.mean((mu_var1 - var1_true_norm) ** 2)  # [batch, buses] -> scalar
+        mse_var2_norm = torch.mean((mu_var2 - var2_true_norm) ** 2)  # [batch, buses] -> scalar
+        unweighted_mse = mse_var1_norm + mse_var2_norm  # Normalized MSE (for consistency with total loss)
+        
+        # Also compute denormalized MSE for reporting (physical units)
+        mu_norm = torch.stack([mu_var1, mu_var2], dim=-1)  # [batch, buses, 2]
+        predictions_denorm = self.normalizer.denormalize(mu_norm)
+        var1_pred = predictions_denorm[..., 0]
+        var2_pred = predictions_denorm[..., 1]
+        targets_denorm_for_mse = self.normalizer.denormalize(targets_norm)
+        var1_true = targets_denorm_for_mse[..., 0]
+        var2_true = targets_denorm_for_mse[..., 1]
+        mse_var1_denorm = torch.mean((var1_pred - var1_true) ** 2)  # Denormalized (for reporting)
+        mse_var2_denorm = torch.mean((var2_pred - var2_true) ** 2)  # Denormalized (for reporting)
+        
+        # Compute sigma (standard deviation) for reporting and violations
+        # Note: sigma2 is in normalized space, but we report it as-is (relative uncertainty)
+        # Paper (Equation 3): σ² = -1/(2η2), so σ = sqrt(σ²)
+        sigma_var1 = torch.sqrt(sigma2_var1)  # [batch, buses]
+        sigma_var2 = torch.sqrt(sigma2_var2)  # [batch, buses]
+        
+        # Store sigma tensors for use in violation calculations
+        self._sigma_var1_for_violations = sigma_var1  # [batch, buses]
+        self._sigma_var2_for_violations = sigma_var2  # [batch, buses]
         
         # If not physics-informed, we are done.
         if not self.is_physics_informed:
             # ML Engineering Best Practice: Report denormalized MSE (physical units) for interpretability
-            if self.use_heteroscedastic:
-                mse_denorm_val = mse_var1_denorm + mse_var2_denorm
-                total_loss_denorm_val = mse_denorm_val  # For non-physics, total = MSE
-                return {
-                    'total_loss': data_loss,  # Normalized (for optimization)
-                    'total_loss_denorm': total_loss_denorm_val,  # Denormalized (physical units - for display)
-                    'mse': mse_denorm_val,  # Denormalized MSE (physical units - what ML engineers show)
-                    'mse_normalized': unweighted_mse,  # Normalized MSE (for reference)
-                    'mse_var1': mse_var1_norm,
-                    'mse_var2': mse_var2_norm,
-                    'power_violation': torch.tensor(0.0, device=data_loss.device),
-                    'voltage_violation': torch.tensor(0.0, device=data_loss.device)
-                }
-            else:
-                # For homoscedastic, mse_var1_denorm and mse_var2_denorm were already computed above
-                mse_denorm_val = mse_var1_denorm + mse_var2_denorm
-                total_loss_denorm_val = mse_denorm_val  # For non-physics, total = MSE
-                return {
-                    'total_loss': data_loss,  # For homoscedastic, data_loss is denormalized (no normalization)
-                    'total_loss_denorm': total_loss_denorm_val,  # Denormalized (physical units - for display)
-                    'mse': mse_denorm_val,  # Denormalized MSE (physical units - what ML engineers show)
-                    'mse_normalized': data_loss,  # For homoscedastic, normalized = denormalized
-                    'mse_var1': mse_var1,
-                    'mse_var2': mse_var2,
-                    'power_violation': torch.tensor(0.0, device=data_loss.device),
-                    'voltage_violation': torch.tensor(0.0, device=data_loss.device)
-                }
+            mse_denorm_val = mse_var1_denorm + mse_var2_denorm
+            total_loss_denorm_val = mse_denorm_val  # For non-physics, total = MSE
+            return {
+                'total_loss': data_loss,  # Normalized (for optimization)
+                'total_loss_denorm': total_loss_denorm_val,  # Denormalized (physical units - for display)
+                'mse': mse_denorm_val,  # Denormalized MSE (physical units - what ML engineers show)
+                'mse_normalized': unweighted_mse,  # Normalized MSE (for reference)
+                'mse_var1': mse_var1_norm,
+                'mse_var2': mse_var2_norm,
+                'power_violation': torch.tensor(0.0, device=data_loss.device),
+                'voltage_violation': torch.tensor(0.0, device=data_loss.device)
+            }
 
         # Get denormalized predictions for physics calculations
-        if self.use_heteroscedastic:
-            outputs_denorm = predictions_denorm
-        else:
-            outputs_denorm = outputs_denorm_for_mse
+        outputs_denorm = predictions_denorm
         
         # In OPF mode, feature 0 varies by bus type (V for PQ, Q for PV, P for Slack)
         # Only check for negative voltages on PQ buses (where V is predicted) - NO CLAMPING
@@ -488,55 +407,50 @@ class PowerSystemLoss(nn.Module):
         )
 
         # Use MSE for training loss (squared, for optimization)
+        # Power balance violation: MSE of mismatch in (p.u.)²
+        # Per-unit system already provides normalization via S_base (constant)
+        # DO NOT divide by dynamic load - this makes loss non-stationary
         power_penalty = torch.mean(power_violation_mse_per_sample)  # MSE (per-unit²) for training
         # Use RMSE for display (sqrt, more interpretable)
         power_penalty_rmse = torch.mean(power_violation_rmse_per_sample)  # RMSE (per-unit) for display
         voltage_penalty = torch.mean(voltage_violation_mse_per_sample)  # MSE (per-unit²) for training
         voltage_penalty_rmse = torch.mean(voltage_violation_rmse_per_sample)  # RMSE (per-unit) for display
         
-        if self.use_heteroscedastic:
-            # Heteroscedastic: Data loss uses natural parametrization (Immer et al., NeurIPS 2023)
-            # Data loss: pure natural parametrization NLL (paper Equation 5)
-            weighted_data_loss = data_loss  # Already computed as NLL
-            
-            # Physics losses: Use Kendall-style learnable weights (Kendall et al., CVPR 2018)
-            # Heteroscedastic paper does NOT address physics losses - only data loss
-            # Kendall-style weights are well-cited (2000+ citations) and appropriate for multi-task learning
-            sigma_power = torch.exp(self.log_sigma_power)
-            sigma_voltage = torch.exp(self.log_sigma_voltage)
-            
-            weighted_power_loss = (1.0 / (2.0 * sigma_power ** 2)) * power_penalty
-            weighted_voltage_loss = (1.0 / (2.0 * sigma_voltage ** 2)) * voltage_penalty
-            
-            # Regularization: log(sigma) terms for physics losses (Kendall-style)
-            # Data loss regularization is already in the NLL (natural parametrization)
-            regularization = torch.log(sigma_power) + torch.log(sigma_voltage)
-        else:
-            # Homoscedastic: Use learnable parameters for all losses
-            sigma_data = torch.exp(self.log_sigma_data)
-            sigma_power = torch.exp(self.log_sigma_power)
-            sigma_voltage = torch.exp(self.log_sigma_voltage)
-            
-            weighted_data_loss = (1.0 / (2.0 * sigma_data ** 2)) * data_loss
-            weighted_power_loss = (1.0 / (2.0 * sigma_power ** 2)) * power_penalty
-            weighted_voltage_loss = (1.0 / (2.0 * sigma_voltage ** 2)) * voltage_penalty
-            
-            regularization = torch.log(sigma_data) + torch.log(sigma_power) + torch.log(sigma_voltage)
+        # Physics loss annealing: gradually introduce physics constraints to prevent early explosion
+        # Apply annealing to penalties (before weighting) so sigmas can still learn properly
+        if epoch is None:
+            epoch = 0  # Default to epoch 0 for backward compatibility
+        if self.is_physics_informed and epoch < self.physics_warmup_epochs:
+            # Linearly increase weight from 0 to 1 over warmup period
+            # Epoch 0: weight = 1/warmup, Epoch warmup-1: weight = 1.0
+            annealing_weight = float(epoch + 1) / float(self.physics_warmup_epochs)
+            power_penalty = power_penalty * annealing_weight
+            voltage_penalty = voltage_penalty * annealing_weight
+        # After warmup, annealing_weight = 1.0 (no change)
+        
+        # Heteroscedastic: Data loss uses natural parametrization (Immer et al., NeurIPS 2023)
+        # Data loss: pure natural parametrization NLL (paper Equation 5)
+        weighted_data_loss = data_loss  # Already computed as NLL
+        
+        # Physics losses: Use Kendall-style learnable weights (Kendall et al., CVPR 2018)
+        # Heteroscedastic paper does NOT address physics losses - only data loss
+        # Kendall-style weights are well-cited (2000+ citations) and appropriate for multi-task learning
+        sigma_power = torch.exp(self.log_sigma_power)
+        sigma_voltage = torch.exp(self.log_sigma_voltage)
+        
+        weighted_power_loss = (1.0 / (2.0 * sigma_power ** 2)) * power_penalty
+        weighted_voltage_loss = (1.0 / (2.0 * sigma_voltage ** 2)) * voltage_penalty
+        
+        # Regularization: log(sigma) terms for physics losses (Kendall-style)
+        # Data loss regularization is already in the NLL (natural parametrization)
+        regularization = torch.log(sigma_power) + torch.log(sigma_voltage)
         
         total_loss = weighted_data_loss + weighted_power_loss + weighted_voltage_loss + regularization
         
         # Compute denormalized MSE for reporting (physical units - what ML engineers typically show)
         # This is more interpretable than normalized MSE
-        if self.use_heteroscedastic:
-            mse_denorm = mse_var1_denorm + mse_var2_denorm  # Denormalized MSE (physical units)
-            mse_normalized = unweighted_mse  # Normalized MSE (for internal consistency)
-        else:
-            # For homoscedastic, mse_var1_denorm and mse_var2_denorm were already computed above
-            mse_denorm = mse_var1_denorm + mse_var2_denorm  # Denormalized MSE (physical units)
-            # For homoscedastic, data_loss is already denormalized, so normalized = denormalized
-            # But we normalize it for consistency with heteroscedastic case
-            # Actually, for homoscedastic, we don't normalize, so normalized = denormalized
-            mse_normalized = data_loss  # For homoscedastic, normalized = denormalized (no normalization applied)
+        mse_denorm = mse_var1_denorm + mse_var2_denorm  # Denormalized MSE (physical units)
+        mse_normalized = unweighted_mse  # Normalized MSE (for internal consistency)
         
         # Compute denormalized total_loss for display (physical units - interpretable)
         # Use RMSE for violations in display (more interpretable than MSE)
@@ -557,8 +471,8 @@ class PowerSystemLoss(nn.Module):
                 'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units - for display)
                 'mse': mse_denorm,  # Denormalized MSE (physical units - what ML engineers show)
                 'mse_normalized': mse_normalized,  # Normalized MSE (for reference)
-                'mse_var1': mse_var1_norm if self.use_heteroscedastic else mse_var1,
-                'mse_var2': mse_var2_norm if self.use_heteroscedastic else mse_var2,
+                'mse_var1': mse_var1_norm,
+                'mse_var2': mse_var2_norm,
                 'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
                 'power_violation_mse': power_penalty,  # MSE (per-unit²) for training - kept for reference
                 'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
@@ -572,9 +486,8 @@ class PowerSystemLoss(nn.Module):
                 'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units - for display)
                 'mse': mse_denorm,  # Denormalized MSE (physical units - what ML engineers show)
                 'mse_normalized': mse_normalized,  # Normalized MSE (for reference)
-                'mse_weighted': weighted_data_loss if not self.use_heteroscedastic else None,
-                'mse_var1': mse_var1_norm if self.use_heteroscedastic else mse_var1,
-                'mse_var2': mse_var2_norm if self.use_heteroscedastic else mse_var2,
+                'mse_var1': mse_var1_norm,
+                'mse_var2': mse_var2_norm,
                 'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
                 'power_violation_mse': power_penalty,  # MSE (per-unit²) for training - kept for reference
                 'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
@@ -839,19 +752,11 @@ class PowerSystemLoss(nn.Module):
         p_losses_pu = p_gen_pred_pu - p_load_total_pu  # [batch_size]
         
         # Normalize by total load (from measurements) to get [0, 1] range
-        epsilon = 1e-6  # Increased epsilon for stability
+        epsilon = 1e-6
         total_load_pu = torch.abs(p_load_total_pu)  # [batch_size] - total load in per-unit (always positive)
         
-        # Clamp total_load_pu to avoid division by very small numbers
-        # Minimum load threshold: 0.01 p.u. (1% of base power) - prevents explosion
-        min_load_threshold = 0.01
-        total_load_pu_clamped = torch.clamp(total_load_pu, min=min_load_threshold)
-        
-        # Normalized loss = |losses| / (clamped_load + epsilon) - should be in [0, 1] range
-        # Typical power losses are 1-5% of load, so values > 0.1 (10%) are unrealistic
-        # Clamp normalized loss to reasonable range [0, 10] to prevent explosion from bad predictions
-        normalized_loss = torch.abs(p_losses_pu) / (total_load_pu_clamped + epsilon)  # [batch_size]
-        normalized_loss = torch.clamp(normalized_loss, min=0.0, max=10.0)  # Cap at 10x load (unrealistic but prevents NaN)
+        # Normalized loss = |losses| / (load + epsilon)
+        normalized_loss = torch.abs(p_losses_pu) / (total_load_pu + epsilon)  # [batch_size]
         
         return normalized_loss
 
@@ -960,12 +865,7 @@ class PowerSystemLoss(nn.Module):
         total_load_magnitude = torch.sqrt(p_load**2 + q_load**2)
         total_load_pu = total_load_magnitude / self.s_base_mva
         
-        # Clamp total_load_pu to avoid division by very small numbers
-        min_load_threshold = 0.01
-        total_load_pu_clamped = torch.clamp(torch.abs(total_load_pu), min=min_load_threshold)
-        
-        normalized_power_flow = mean_flow_magnitude_per_bus / (total_load_pu_clamped + epsilon)
-        normalized_power_flow = torch.clamp(normalized_power_flow, min=0.0, max=100.0)  # Cap at 100x load
+        normalized_power_flow = mean_flow_magnitude_per_bus / (torch.abs(total_load_pu) + epsilon)
         
         return normalized_power_flow
 
@@ -1066,12 +966,6 @@ class PowerSystemLoss(nn.Module):
         raw_emissions = (total_carbon_emitting_gen * carbon_intensity) / (energy_coefficient + 1e-9)
         total_generation = total_carbon_emitting_gen + total_renewable_gen
         
-        # Clamp total_generation to avoid division by very small numbers
-        min_gen_threshold = 0.01 * self.s_base_mva  # 1% of base power in MW
-        total_generation_clamped = torch.clamp(total_generation, min=min_gen_threshold)
-        
-        normalized_emissions = total_carbon_emitting_gen / (total_generation_clamped + epsilon)
-        # Clamp to [0, 1] range (should already be in this range, but ensure it)
-        normalized_emissions = torch.clamp(normalized_emissions, min=0.0, max=1.0)
+        normalized_emissions = total_carbon_emitting_gen / (total_generation + epsilon)
         
         return {'raw': raw_emissions, 'normalized': normalized_emissions}

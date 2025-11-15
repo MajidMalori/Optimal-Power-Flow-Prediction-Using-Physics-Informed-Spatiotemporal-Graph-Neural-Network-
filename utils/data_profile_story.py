@@ -47,8 +47,10 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
             data_tuple = load_power_system_data(config, case_name)
             features, adjacency, ybus_matrices, targets, bus_types, energy_coeffs, carbon_coeffs, renewable_fractions, normalizer = data_tuple
         
+        # Import feature indices constants (single source of truth)
+        from config import FeatureIndices
+        
         # Features shape: [n_samples, n_buses, 10]
-        # Features: [vm_pu, va_rad, p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren]
         n_samples, n_buses, n_features = features.shape
         
         # Denormalize features to check actual values
@@ -58,12 +60,12 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         features_tensor = torch.from_numpy(features).float()
         features_denorm = normalizer.denormalize(features_tensor).numpy()  # [n_samples, n_buses, 10]
         
-        # Extract denormalized features
-        p_load = features_denorm[:, :, 2]   # Active load (MW, should be >= 0)
-        q_load = features_denorm[:, :, 3]     # Reactive load
-        p_conv = features_denorm[:, :, 6]    # Conventional generation
-        p_ren = features_denorm[:, :, 8]     # Renewable generation (MW, should be >= 0)
-        q_ren = features_denorm[:, :, 9]     # Reactive renewable
+        # Extract denormalized features using constants (single source of truth)
+        p_load = features_denorm[:, :, FeatureIndices.P_LOAD]      # Active load (MW, should be >= 0)
+        q_load = features_denorm[:, :, FeatureIndices.Q_LOAD]      # Reactive load
+        p_conv = features_denorm[:, :, FeatureIndices.P_CONV]      # Conventional generation
+        p_ren = features_denorm[:, :, FeatureIndices.P_REN]        # Renewable generation (MW, should be >= 0)
+        q_ren = features_denorm[:, :, FeatureIndices.Q_REN]        # Reactive renewable
         
         # Calculate hourly patterns
         hours_per_day = config.HOURS_PER_DAY

@@ -38,12 +38,11 @@ def log_memory_usage(stage_name):
     # Memory logging disabled
     pass
 
-def get_adaptive_batch_size(num_buses, base_batch_size=32, use_gradient_accumulation=True):
+def get_adaptive_batch_size(num_buses, base_batch_size=32, use_gradient_accumulation=False):
     """
-    Get adaptive batch size based on system size and gradient accumulation setting.
+    Get adaptive batch size based on system size.
     
-    If gradient accumulation is enabled: Reduce batch size (memory efficient)
-    If gradient accumulation is disabled: Increase batch size to match effective batch (faster, more memory)
+    Gradient accumulation is disabled, so batch size is optimized for memory.
     """
     if use_gradient_accumulation:
         # With accumulation: use smaller batches to save memory
@@ -149,7 +148,7 @@ import matplotlib.pyplot as plt
 from utils.data_loader import load_power_system_data, create_data_loaders
 from utils.metrics import PowerSystemLoss
 from utils.data_validation import validate_data_before_training
-from utils.optimization import (mosoa_optimizer, trial_based_search, setup_hyperparameter_bounds, create_model_kwargs, 
+from utils.optimization import (mosoa_optimizer, setup_hyperparameter_bounds, create_model_kwargs, 
                                generate_run_name, process_optimization_params, format_params_concise,
                                calculate_objective_score)
 from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_model_with_uncertainty,
@@ -157,6 +156,8 @@ from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluat
                              save_best_model_results, print_comprehensive_summary, print_model_summary)
 from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from utils.data_profile_story import analyze_data_profiles
+from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
+from utils.evaluate_robustness import evaluate_model_robustness
 from trainers.model_trainer import PowerSystemTrainer
 from config import Config, Args
 
@@ -181,11 +182,10 @@ def setup_logging(log_path: str):
 _config_instance = None
 
 def signal_handler(signum, _):
-    """Handle interrupt signals to ensure proper cleanup."""
-    print(f"\nReceived signal {signum}. Cleaning up...")
-    if _config_instance:
-        _config_instance.finalize_run({'status': 'interrupted', 'reason': f'signal_{signum}'})
-    sys.exit(0)
+    """Handle interrupt signals gracefully - set flag instead of printing directly."""
+    from utils.shutdown_flag import set_shutdown
+    set_shutdown()
+    # Don't print here - let the main loop handle it to avoid reentrant call issues
 
 def setup_professional_logging():
     """Setup professional logging with memory tracking"""
@@ -396,17 +396,16 @@ def main():
                     
                     # Check memory before model creation (monitoring disabled)
                     
-                    # Use adaptive batch size based on system size and gradient accumulation setting
-                    use_accumulation = getattr(run_config, 'USE_GRADIENT_ACCUMULATION', True)
+                    # Use adaptive batch size based on system size
                     run_config.BATCH_SIZE = get_adaptive_batch_size(
                         num_buses, 
                         run_config.BATCH_SIZE, 
-                        use_gradient_accumulation=use_accumulation
+                        use_gradient_accumulation=False  # Always disabled
                     )
                     
-                    # Safety check: Cap batch size to prevent OOM (especially when accumulation is disabled)
+                    # Safety check: Cap batch size to prevent OOM
                     # For 118-bus systems, limit to 128 to prevent memory issues
-                    if num_buses >= 118 and not use_accumulation:
+                    if num_buses >= 118:
                         max_safe_batch = 128  # Conservative limit for 118-bus without accumulation
                         if run_config.BATCH_SIZE > max_safe_batch:
                             print(f"  Warning: Batch size {run_config.BATCH_SIZE} may cause OOM for {num_buses}-bus. Capping to {max_safe_batch}")
@@ -426,7 +425,7 @@ def main():
                     is_opf_mode = (_bus_types is not None)
                     model_kwargs = create_model_kwargs(
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph, 
-                        model_name=model_name, is_opf_mode=is_opf_mode, config=run_config
+                        model_name=model_name, is_opf_mode=is_opf_mode, config=run_config, normalizer=_normalizer
                     )
                     
                     # Check memory before model creation
@@ -467,18 +466,19 @@ def main():
                         is_gcn=(not is_physics_informed)
                     ).to(device)
                     
-                    # Create optimizer with learning rate and weight decay (if enabled)
-                    # CRITICAL: Include criterion.parameters() so learnable sigmas (log_sigma_power, log_sigma_voltage) can be optimized
-                    learning_rate = run_config.LEARNING_RATE  # No longer from hyperparameter tuning
-                    weight_decay = run_config.WEIGHT_DECAY if getattr(run_config, 'USE_WEIGHT_DECAY', False) else 0.0
+                    # Golden Configuration: Use AdamW optimizer
+                    # AdamW decouples weight decay from gradient updates (better generalization than Adam)
+                    # Weight decay set to 0.0 - rely on Empirical Bayes for regularization
+                    learning_rate = run_config.LEARNING_RATE
+                    weight_decay = 0.0  # Rely on Empirical Bayes, not fixed weight decay
                     # Combine model and criterion parameters for optimization
                     all_params = list(model.parameters()) + list(criterion.parameters())
-                    optimizer = torch.optim.Adam(all_params, lr=learning_rate, weight_decay=weight_decay)
+                    optimizer = torch.optim.AdamW(all_params, lr=learning_rate, weight_decay=weight_decay)
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     
-                    # Train the model
-                    trainer.train(train_loader, val_loader)
+                    # Train the model (pass model_name and num_buses for log file)
+                    trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses)
 
                     # Get validation metrics for hyperparameter optimization (use normalized data like training)
                     val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
@@ -540,16 +540,7 @@ def main():
                     lower_bounds, upper_bounds, dim, objective_function,
                     param_keys=param_keys
                 )
-            else:
-                print(f"Optimizing with trial-based search: {args.num_trials} trials")
-                best_score, best_position, history, iteration_details = trial_based_search(
-                    num_trials=args.num_trials,
-                    lower_bound=lower_bounds,
-                    upper_bound=upper_bounds,
-                    dim=dim,
-                    objective_func=objective_function,
-                    search_strategy='latin_hypercube'
-                )
+            # MoSOA is the only optimization method (trial_based_search removed)
 
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
@@ -586,7 +577,7 @@ def main():
             is_opf_mode = (_bus_types is not None)
             model_kwargs_best = create_model_kwargs(
                 model_config, best_params, num_buses, is_sequential, uses_adaptive_graph, 
-                model_name=model_name, is_opf_mode=is_opf_mode, config=best_config
+                model_name=model_name, is_opf_mode=is_opf_mode, config=best_config, normalizer=_normalizer
             )
 
             # Create data loaders for best model
@@ -655,8 +646,64 @@ def main():
                         model_name=model_name,
                         config=best_config,  # Pass config for time-series mode detection
                         model_outputs=uncertainty_data.get('model_outputs', None),  # Full outputs with uncertainties if heteroscedastic
-                        bus_types=uncertainty_data.get('bus_types', None)  # Pass bus_types for OPF mode
+                        bus_types=uncertainty_data.get('bus_types', None),  # Pass bus_types for OPF mode
+                        timesteps=uncertainty_data.get('timesteps', None)  # Pass timesteps for temporal plotting
                     )
+                    
+                    # Generate critical evaluation plots
+                    if uncertainty_data.get('bus_types') is not None:
+                        try:
+                            # Predicted vs Actual scatter plots
+                            plot_predicted_vs_actual(
+                                predictions=uncertainty_data['predictions'],
+                                targets=uncertainty_data['targets'],
+                                bus_types=uncertainty_data['bus_types'],
+                                case_name=case_name,
+                                output_dir=model_output_dir,
+                                model_name=model_name
+                            )
+                            
+                            # Error distribution histograms
+                            plot_error_distributions(
+                                predictions=uncertainty_data['predictions'],
+                                targets=uncertainty_data['targets'],
+                                bus_types=uncertainty_data['bus_types'],
+                                case_name=case_name,
+                                output_dir=model_output_dir,
+                                model_name=model_name
+                            )
+                            
+                            # Calibration diagram (if heteroscedastic model outputs available)
+                            if uncertainty_data.get('model_outputs') is not None:
+                                plot_calibration_diagram(
+                                    model_outputs=uncertainty_data['model_outputs'],
+                                    targets=uncertainty_data['targets'],
+                                    bus_types=uncertainty_data['bus_types'],
+                                    case_name=case_name,
+                                    output_dir=model_output_dir,
+                                    model_name=model_name,
+                                    config=best_config
+                                )
+                        except Exception as e:
+                            print(f"  Warning: Could not generate evaluation plots: {e}")
+                    
+                    # Evaluate robustness under contingencies (if enabled)
+                    if getattr(best_config, 'ENABLE_CONTINGENCY_ANALYSIS', False):
+                        try:
+                            evaluate_model_robustness(
+                                model=model_to_eval,
+                                test_loader=test_loader_best,
+                                device=device,
+                                config=best_config,
+                                normalizer=_normalizer,
+                                case_name=case_name,
+                                output_dir=model_output_dir,
+                                model_name=model_name,
+                                top_k_contingencies=getattr(best_config, 'CONTINGENCY_TOP_K', 10),
+                                contingency_method=getattr(best_config, 'CONTINGENCY_METHOD', 'power_flow')
+                            )
+                        except Exception as e:
+                            print(f"  Warning: Could not evaluate robustness: {e}")
                 except Exception as e:
                     print(f"  Warning: Could not generate uncertainty visualizations: {e}")
                     import traceback
@@ -812,17 +859,13 @@ def main():
         base_config.finalize_run({'status': 'no_results', 'test_config': args.test_config})
 
 
-def signal_handler(signum, _):
-    """Handle interrupt signals gracefully"""
-    print(f"\n Received signal {signum}, cleaning up...")
-    import gc
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    sys.exit(0)
+def signal_handler_legacy(signum, _):
+    """Legacy signal handler - kept for compatibility but uses flag-based approach."""
+    global _shutdown_flag
+    _shutdown_flag = True
 
 if __name__ == '__main__':
-    # Set up signal handlers for clean exit
+    # Set up signal handlers for clean exit (use flag-based approach)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
