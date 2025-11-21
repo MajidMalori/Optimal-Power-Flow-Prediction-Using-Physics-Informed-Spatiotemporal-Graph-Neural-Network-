@@ -52,9 +52,10 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
                 outputs = model(features_input, adj)
             
 
-            all_outputs.append(outputs)
-            all_targets.append(targets)
-            all_ybus.append(ybus)  # Store Ybus matrices
+            # CRITICAL FIX: Detach and move to CPU before appending to prevent GPU memory accumulation
+            all_outputs.append(outputs.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+            all_ybus.append(ybus.detach().cpu() if ybus.requires_grad else ybus.cpu())  # Store Ybus matrices
             if bus_types is not None:
                 all_bus_types.append(bus_types.cpu())  # Store bus types for analysis
 
@@ -127,7 +128,20 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     outputs_denorm = normalizer.denormalize(all_outputs_tensor)
     targets_denorm = normalizer.denormalize(all_targets_tensor)
 
-    return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config, bus_types=all_bus_types_tensor)
+    # Collect measurements (features) for physics violation computation
+    all_measurements = []
+    with torch.no_grad():
+        for batch in test_loader:
+            features = batch['features'].to(device)
+            if is_sequential and features.dim() == 3:
+                features_input = features[:, -1, :]  # Use last timestep
+            else:
+                features_input = features
+            all_measurements.append(features_input)
+    all_measurements_tensor = torch.cat(all_measurements, dim=0)
+    
+    return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config, 
+                          bus_types=all_bus_types_tensor, measurements=all_measurements_tensor)
 
 
 def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.utils.data.DataLoader, 
@@ -174,9 +188,10 @@ def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.u
                 outputs = model(features_input, adj)
             
 
-            all_outputs.append(outputs)
-            all_targets.append(targets)
-            all_ybus.append(ybus)
+            # CRITICAL FIX: Detach and move to CPU before appending to prevent GPU memory accumulation
+            all_outputs.append(outputs.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+            all_ybus.append(ybus.detach().cpu() if ybus.requires_grad else ybus.cpu())
             all_renewable_fractions.append(renewable_fraction)
             if bus_types is not None:
                 all_bus_types.append(bus_types)
@@ -391,8 +406,19 @@ def compute_metrics_normalized(outputs: torch.Tensor, targets: torch.Tensor, ybu
         
         # For OPF, physics violations require full voltage state reconstruction
         # For now, set to 0 (can be implemented later if needed)
-        metrics['power_violation'] = 0.0
-        metrics['voltage_violation'] = 0.0
+        # Compute actual physics violations using dedicated function
+        # This replaces the hardcoded 0.0 values with real calculations
+        try:
+            from utils.physics_metrics import compute_physics_metrics
+            physics_metrics = compute_physics_metrics(
+                outputs, measurements, ybus_batch, config, bus_types
+            )
+            metrics['power_violation'] = physics_metrics['power_violation']
+            metrics['voltage_violation'] = physics_metrics['voltage_violation']
+        except Exception as e:
+            # Fallback to 0.0 if computation fails (shouldn't happen, but safety net)
+            metrics['power_violation'] = 0.0
+            metrics['voltage_violation'] = 0.0
         
         return metrics
 
@@ -428,9 +454,10 @@ def evaluate_model_normalized(model: torch.nn.Module, test_loader: torch.utils.d
                 outputs = model(features_input, adj)
             
 
-            all_outputs.append(outputs)
-            all_targets.append(targets)
-            all_ybus.append(ybus)
+            # CRITICAL FIX: Detach and move to CPU before appending to prevent GPU memory accumulation
+            all_outputs.append(outputs.detach().cpu())
+            all_targets.append(targets.detach().cpu())
+            all_ybus.append(ybus.detach().cpu() if ybus.requires_grad else ybus.cpu())
             if bus_types is not None:
                 all_bus_types.append(bus_types.cpu())
 
@@ -522,14 +549,14 @@ def evaluate_moopf_objectives(model: torch.nn.Module, data_loader: torch.utils.d
                 # Calculate physics-based metrics for physics-informed models
                 # OPF: Pass predicted unknowns (2 features) and measurements (10 features) separately
                 # CRITICAL: Must pass bus_types for correct voltage state reconstruction
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus, bus_types=bus_types)
+                norm_loss = physics_calculator._compute_active_power_loss_pu(outputs_phys, features_phys, ybus, bus_types=bus_types)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys, measurements=features_phys, bus_types=bus_types)
                 # Use PREDICTED state for carbon emissions calculation (model-dependent)
                 emissions = physics_calculator._compute_carbon_emissions(
                     features_phys, time_carbon, time_energy, renewable_frac,
                     voltages=outputs_phys, Ybus=ybus, bus_types=bus_types
                 )
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus, bus_types=bus_types)
+                norm_power_flow = physics_calculator._compute_mean_power_flow_pu(outputs_phys, features_phys, ybus, bus_types=bus_types)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
                 batch_size = features.shape[0]
@@ -665,14 +692,14 @@ def evaluate_moopf_objectives_normalized(model: torch.nn.Module, data_loader: to
                 # Calculate physics-based metrics for physics-informed models
                 # OPF: Pass predicted unknowns (2 features) and measurements (10 features) separately
                 # CRITICAL: Must pass bus_types for correct voltage state reconstruction
-                norm_loss = physics_calculator._compute_normalized_active_power_loss(outputs_phys, features_phys, ybus, bus_types=bus_types)
+                norm_loss = physics_calculator._compute_active_power_loss_pu(outputs_phys, features_phys, ybus, bus_types=bus_types)
                 norm_vdev = physics_calculator._compute_normalized_voltage_deviation(outputs_phys, measurements=features_phys, bus_types=bus_types)
                 # Use PREDICTED state for carbon emissions calculation (model-dependent)
                 emissions = physics_calculator._compute_carbon_emissions(
                     features_phys, time_carbon, time_energy, renewable_frac,
                     voltages=outputs_phys, Ybus=ybus, bus_types=bus_types
                 )
-                norm_power_flow = physics_calculator._compute_normalized_power_flow(outputs_phys, features_phys, ybus, bus_types=bus_types)
+                norm_power_flow = physics_calculator._compute_mean_power_flow_pu(outputs_phys, features_phys, ybus, bus_types=bus_types)
             else:
                 # For non-physics models, set physics metrics to zero/neutral values
                 batch_size = features.shape[0]
@@ -786,15 +813,27 @@ def save_best_model_results(best_model: torch.nn.Module, best_run: Dict[str, Any
     }
     
     # Add MOOPF objectives if physics-informed
+    # CRITICAL FIX: Validate that physics-informed models actually have MOOPF scores
     if is_physics_informed and not moopf_results.empty:
+        # Check if moopf_score column exists and has valid values
+        if 'moopf_score' in moopf_results.columns:
+            moopf_mean = moopf_results['moopf_score'].mean()
+            if pd.isna(moopf_mean):
+                raise ValueError(f"CRITICAL: Physics-informed model {model_name} has NaN MOOPF scores. "
+                               f"This indicates evaluation failed. Check evaluate_moopf_objectives_normalized.")
+        else:
+            raise ValueError(f"CRITICAL: Physics-informed model {model_name} missing 'moopf_score' column. "
+                           f"Evaluation did not compute MOOPF metrics. Check is_physics_informed flag.")
+        
         clean_results.update({
             'avg_power_loss': moopf_results['normalized_power_loss'].mean() if 'normalized_power_loss' in moopf_results.columns else None,
             'avg_voltage_dev': moopf_results['normalized_voltage_deviation'].mean() if 'normalized_voltage_deviation' in moopf_results.columns else None,
             'avg_power_flow': moopf_results['normalized_power_flow'].mean() if 'normalized_power_flow' in moopf_results.columns else None,
             'avg_carbon_emissions': moopf_results['raw_carbon_emissions_tCO2'].mean() if 'raw_carbon_emissions_tCO2' in moopf_results.columns else None,
-            'moopf_score': moopf_results['moopf_score'].mean() if 'moopf_score' in moopf_results.columns else None,
+            'moopf_score': moopf_mean,
         })
     else:
+        # Non-physics models: explicitly set MOOPF metrics to None (not NaN)
         clean_results.update({
             'avg_power_loss': None,
             'avg_voltage_dev': None,
@@ -890,9 +929,18 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any =
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
     
-    # Save to CSV file in experimental_results directory (if saving enabled)
+    # Save to CSV file in current run directory (if saving enabled)
     if config and hasattr(config, 'SAVE_RESULTS') and config.SAVE_RESULTS:
-        model_eval_dir = "experimental_results"
+        # Use CURRENT_RUN_DIR to save in run-specific folder (consistent with other saves)
+        try:
+            if hasattr(config, 'CURRENT_RUN_DIR') and config.CURRENT_RUN_DIR:
+                model_eval_dir = config.CURRENT_RUN_DIR
+            else:
+                # Fallback to experimental_results if CURRENT_RUN_DIR not available
+                model_eval_dir = getattr(config, 'EXPERIMENTAL_RESULTS_DIR', 'experimental_results')
+        except (AttributeError, TypeError):
+            model_eval_dir = getattr(config, 'EXPERIMENTAL_RESULTS_DIR', 'experimental_results')
+        
         os.makedirs(model_eval_dir, exist_ok=True)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -919,25 +967,41 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any =
     
     print("-" * 100)
     
-    # Find overall best performers
-    successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]
+    # CRITICAL FIX: Separate physics and non-physics models for fair comparison
+    physics_results = [r for r in all_results if r['is_physics_informed'] and r['final_test_score'] != float('inf')]
+    non_physics_results = [r for r in all_results if not r['is_physics_informed'] and r['final_test_score'] != float('inf')]
+    successful_results = physics_results + non_physics_results
     
     if successful_results:
-        # Best overall (lowest test score)
-        best_overall = min(successful_results, key=lambda x: x['final_test_score'])
-        print(f"\n OVERALL BEST PERFORMER:")
-        print(f"   Model: {best_overall['model_name']} on {best_overall['num_buses']}-bus system")
-        print(f"   {best_overall['final_metric_name']}: {best_overall['final_test_score']:.6f}")
-        print(f"   Config: {best_overall['best_hidden_dim']} hidden_dim, {best_overall['best_gc_layers']} GC layers")
+        # Best overall - separate by model type
+        if physics_results:
+            best_physics = min(physics_results, key=lambda x: x['final_test_score'])
+            print(f"\n BEST PHYSICS-INFORMED MODEL:")
+            print(f"   Model: {best_physics['model_name']} on {best_physics['num_buses']}-bus system")
+            print(f"   {best_physics['final_metric_name']}: {best_physics['final_test_score']:.6f}")
+            print(f"   Config: {best_physics['best_hidden_dim']} hidden_dim, {best_physics['best_gc_layers']} GC layers")
         
-        # Best per bus system
-        print(f"\n BEST PER BUS SYSTEM:")
+        if non_physics_results:
+            best_non_physics = min(non_physics_results, key=lambda x: x['final_test_score'])
+            print(f"\n BEST NON-PHYSICS MODEL:")
+            print(f"   Model: {best_non_physics['model_name']} on {best_non_physics['num_buses']}-bus system")
+            print(f"   {best_non_physics['final_metric_name']}: {best_non_physics['final_test_score']:.6f}")
+            print(f"   Config: {best_non_physics['best_hidden_dim']} hidden_dim, {best_non_physics['best_gc_layers']} GC layers")
+        
+        # Best per bus system - separate by type
+        print(f"\n BEST PER BUS SYSTEM (by type):")
         bus_systems = list(set(r['num_buses'] for r in successful_results))
         for num_buses in sorted(bus_systems):
-            bus_results = [r for r in successful_results if r['num_buses'] == num_buses]
-            if bus_results:
-                best_for_bus = min(bus_results, key=lambda x: x['final_test_score'])
-                print(f"   {num_buses}-bus: {best_for_bus['model_name']} ({best_for_bus['final_metric_name']}: {best_for_bus['final_test_score']:.6f})")
+            bus_physics = [r for r in physics_results if r['num_buses'] == num_buses]
+            bus_non_physics = [r for r in non_physics_results if r['num_buses'] == num_buses]
+            
+            if bus_physics:
+                best_physics_bus = min(bus_physics, key=lambda x: x['final_test_score'])
+                print(f"   {num_buses}-bus (Physics): {best_physics_bus['model_name']} ({best_physics_bus['final_metric_name']}: {best_physics_bus['final_test_score']:.6f})")
+            
+            if bus_non_physics:
+                best_non_physics_bus = min(bus_non_physics, key=lambda x: x['final_test_score'])
+                print(f"   {num_buses}-bus (Non-Physics): {best_non_physics_bus['model_name']} ({best_non_physics_bus['final_metric_name']}: {best_non_physics_bus['final_test_score']:.6f})")
         
         # Performance comparison
         print(f"\n PERFORMANCE COMPARISON:")

@@ -59,15 +59,21 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
     for num_buses in bus_systems:
         case_name = f"case{num_buses}"
         for frac in renewable_fractions:
-            # Support both sparse (new) and dense (old) Ybus formats
-            # Try sparse format first, then fall back to dense format
+            # NEW FORMAT: Topology caching system requires base_adjacency and topology_ids
+            # OLD FORMAT: adjacency.npy (no longer generated, but checked for backward compatibility)
             required_file_types = [
                 "features.npy",
                 "targets.npy", 
-                "adjacency.npy",
+                "base_adjacency.npy",  # NEW: Single base adjacency matrix
+                "topology_ids.npy",    # NEW: Topology ID for each timestep
                 "time_energy_coeffs.txt",
                 "time_carbon_coeffs.txt"
                 # Note: Generation components are now included in features/targets matrices
+            ]
+            
+            # Legacy format check (for backward compatibility detection)
+            legacy_file_types = [
+                "adjacency.npy"  # Old format - if this exists but new format doesn't, trigger regeneration
             ]
             
             # Add Ybus files - check for sparse format
@@ -75,7 +81,7 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
                 "ybus_base.npy",
                 "ybus_contingency_timesteps.npy",
                 "ybus_contingency_matrices.npy",
-                "convergence_report.json"
+                "data_quality_audit.json"  # New professional format (legacy convergence_report.json also accepted)
             ]
             
             # OPF: Check for bus_types file (new structure)
@@ -86,7 +92,7 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
             # Try sparse format first
             dense_ybus_type = "ybus_matrices.npy"
             
-            # Check common files (features, targets, etc.)
+            # Check common files (features, targets, etc.) - NEW FORMAT REQUIRED
             for file_type in required_file_types:
                 found = False
                 
@@ -108,6 +114,42 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
                 
                 if not found:
                     missing_files.append(f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}.{file_type.split('.')[1]}")
+            
+            # Check for legacy adjacency format - if it exists but new format doesn't, trigger regeneration
+            legacy_adjacency_found = False
+            for file_type in legacy_file_types:
+                if latest_timestamp:
+                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
+                    filename = base_name + '.' + file_type.split('.')[1]
+                    filepath = os.path.join(data_dir, filename)
+                    if os.path.exists(filepath):
+                        legacy_adjacency_found = True
+                        break
+                
+                if not legacy_adjacency_found:
+                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}"
+                    filename = base_name + '.' + file_type.split('.')[1]
+                    filepath = os.path.join(data_dir, filename)
+                    if os.path.exists(filepath):
+                        legacy_adjacency_found = True
+                        break
+            
+            # If legacy format exists but new format is missing, mark as missing (triggers regeneration)
+            if legacy_adjacency_found:
+                new_format_exists = False
+                # Check if base_adjacency exists
+                if latest_timestamp:
+                    base_adj_path = os.path.join(data_dir, f"{case_name}_base_adjacency_frac{frac:.1f}_{latest_timestamp}.npy")
+                    if os.path.exists(base_adj_path):
+                        new_format_exists = True
+                if not new_format_exists:
+                    base_adj_path = os.path.join(data_dir, f"{case_name}_base_adjacency_frac{frac:.1f}.npy")
+                    if os.path.exists(base_adj_path):
+                        new_format_exists = True
+                
+                if not new_format_exists:
+                    missing_files.append(f"{case_name}_base_adjacency_frac{frac:.1f}.npy (LEGACY FORMAT DETECTED - regeneration required)")
+                    missing_files.append(f"{case_name}_topology_ids_frac{frac:.1f}.npy (LEGACY FORMAT DETECTED - regeneration required)")
             
             # Check OPF files (bus_types) - required for new OPF structure
             for file_type in opf_files:
@@ -136,19 +178,53 @@ def check_data_files_exist(config) -> Tuple[bool, List[str]]:
             for ybus_type in sparse_ybus_types:
                 found = False
                 
-                if latest_timestamp:
-                    base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
-                    filename = base_name + '.' + ybus_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
-                    base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}"
-                    filename = base_name + '.' + ybus_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
+                # Special handling for data_quality_audit.json - also accept legacy convergence_report.json
+                if ybus_type == "data_quality_audit.json":
+                    # Try new format first
+                    if latest_timestamp:
+                        base_name = f"{case_name}_data_quality_audit_frac{frac:.1f}_{latest_timestamp}"
+                        filename = base_name + '.json'
+                        filepath = os.path.join(data_dir, filename)
+                        if os.path.exists(filepath):
+                            found = True
+                    
+                    if not found:
+                        base_name = f"{case_name}_data_quality_audit_frac{frac:.1f}"
+                        filename = base_name + '.json'
+                        filepath = os.path.join(data_dir, filename)
+                        if os.path.exists(filepath):
+                            found = True
+                    
+                    # Fallback to legacy convergence_report.json
+                    if not found:
+                        if latest_timestamp:
+                            base_name = f"{case_name}_convergence_report_frac{frac:.1f}_{latest_timestamp}"
+                            filename = base_name + '.json'
+                            filepath = os.path.join(data_dir, filename)
+                            if os.path.exists(filepath):
+                                found = True
+                        
+                        if not found:
+                            base_name = f"{case_name}_convergence_report_frac{frac:.1f}"
+                            filename = base_name + '.json'
+                            filepath = os.path.join(data_dir, filename)
+                            if os.path.exists(filepath):
+                                found = True
+                else:
+                    # Normal file checking
+                    if latest_timestamp:
+                        base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
+                        filename = base_name + '.' + ybus_type.split('.')[1]
+                        filepath = os.path.join(data_dir, filename)
+                        if os.path.exists(filepath):
+                            found = True
+                    
+                    if not found:
+                        base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}"
+                        filename = base_name + '.' + ybus_type.split('.')[1]
+                        filepath = os.path.join(data_dir, filename)
+                        if os.path.exists(filepath):
+                            found = True
                 
                 if not found:
                     # Sparse file missing - add to missing list
@@ -415,10 +491,7 @@ def clean_existing_data(config, aggressive=True):
     data_dir = config.DATA_DIR  # Use mode-specific directory (train or test)
     files_removed = 0
     
-    print(f"\n{'='*80}")
-    print(f"CLEANING ALL {config.DATA_MODE.upper()} DATA")
-    print(f"{'='*80}")
-    print(f"Target directory: {data_dir}")
+    print(f"\n{'='*80}\nCLEANING ALL {config.DATA_MODE.upper()} DATA | Dir: {data_dir}\n{'='*80}")
     
     if not os.path.exists(data_dir):
         print("Directory doesn't exist yet. Nothing to clean.")
@@ -428,15 +501,12 @@ def clean_existing_data(config, aggressive=True):
         # AGGRESSIVE CLEANUP: Remove the entire mode-specific directory and recreate it
         # This ensures absolutely NO leftover files from previous runs
         try:
-            print(f"Performing aggressive cleanup: removing entire directory...")
             shutil.rmtree(data_dir)
             os.makedirs(data_dir, exist_ok=True)
-            print(f"Successfully cleaned and recreated: {data_dir}")
-            print("   All previous data has been completely removed.\n")
+            print(f"Cleaned and recreated directory: {data_dir}\n")
             return
         except Exception as e:
-            print(f"WARNING: Could not remove directory: {e}")
-            print("Falling back to file-by-file cleanup...\n")
+            print(f"WARNING: Could not remove directory: {e}. Falling back to file-by-file cleanup...\n")
     
     # FALLBACK: File-by-file cleanup (if aggressive fails)
     # Remove ALL data files (both timestamped and legacy formats)
@@ -467,12 +537,9 @@ def clean_existing_data(config, aggressive=True):
                 print(f"WARNING: Could not remove {filepath}: {e}")
     
     if files_removed > 0:
-        print(f"Removed {files_removed} data files from {config.DATA_MODE} folder.")
-        print("   Ready for fresh data generation.\n")
+        print(f"Removed {files_removed} data files from {config.DATA_MODE} folder. Ready for fresh data generation.\n")
     else:
         print("No existing data files found to clean.\n")
-    
-    print("="*80)
 
 def generate_data_if_missing(config) -> bool:
     """
@@ -490,11 +557,7 @@ def generate_data_if_missing(config) -> bool:
     Returns:
         bool: True if data generation was successful, False otherwise
     """
-    print(f"\n{'='*80}")
-    print(f"ROBUST DATA VALIDATION - {config.DATA_MODE.upper()} MODE")
-    print(f"{'='*80}")
-    print(f"Expected timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]}")
-    print(f"Data directory: {config.DATA_DIR}")
+    print(f"\n{'='*80}\nROBUST DATA VALIDATION - {config.DATA_MODE.upper()} MODE | Timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]} | Dir: {config.DATA_DIR}\n{'='*80}")
     
     # STEP 1: Check if files exist
     data_exist, missing_files = check_data_files_exist(config)
@@ -506,14 +569,11 @@ def generate_data_if_missing(config) -> bool:
     if not data_exist:
         needs_regeneration = True
         regeneration_reason.append(f"Missing {len(missing_files)} data files")
-        print(f"\nValidation failed: {len(missing_files)} files missing")
-        print("   Examples:")
-        for i, file in enumerate(missing_files[:5]):
-            print(f"      - {file}")
-        if len(missing_files) > 5:
-            print(f"      ... and {len(missing_files) - 5} more files")
+        examples = ", ".join(missing_files[:3])
+        more = f", ...{len(missing_files) - 3} more" if len(missing_files) > 3 else ""
+        print(f"Validation failed: {len(missing_files)} files missing ({examples}{more})")
     else:
-        print("\nAll files present")
+        print("All files present")
         
         # Even if files exist, validate consistency
         is_consistent, consistency_reason = check_data_consistency(config)
@@ -527,18 +587,12 @@ def generate_data_if_missing(config) -> bool:
     
     # STEP 3: If data is valid, skip generation
     if not needs_regeneration:
-        print("\n" + "="*80)
-        print("Data validation passed - Using existing data")
-        print("="*80)
+        print(f"\n{'='*80}\nData validation passed - Using existing data\n{'='*80}")
         return True
     
     # STEP 4: Data needs regeneration - perform AGGRESSIVE cleanup
-    print(f"\n{'='*80}")
-    print("DATA REGENERATION REQUIRED")
-    print(f"{'='*80}")
-    print("Reason(s):")
-    for reason in regeneration_reason:
-        print(f"  • {reason}")
+    reasons_str = " | ".join(regeneration_reason)
+    print(f"\n{'='*80}\nDATA REGENERATION REQUIRED: {reasons_str}\n{'='*80}")
     
     # AGGRESSIVE CLEANUP: Remove ALL data in the mode-specific folder
     print("\nPerforming aggressive cleanup to ensure data integrity...")
@@ -580,8 +634,7 @@ def generate_data_if_missing(config) -> bool:
         
         # Run data generation with tqdm progress monitoring
         timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
-        print(f"Mode: {config.DATA_MODE} | Timesteps: {timesteps}")
-        print("Starting data generation with progress tracking...\n")
+        print(f"Mode: {config.DATA_MODE} | Timesteps: {timesteps} | Starting data generation...\n")
         
         # Start monitoring progress in background thread (with tqdm)
         stop_event = threading.Event()
@@ -648,10 +701,9 @@ def generate_data_if_missing(config) -> bool:
                 print(f"Generated data has consistency issues: {reason_after}")
                 return False
         else:
-            print(f"Generation incomplete: {len(remaining_missing)} files still missing")
-            print("   Examples:")
-            for missing in remaining_missing[:5]:
-                print(f"      - {missing}")
+            examples = ", ".join(remaining_missing[:3])
+            more = f", ...{len(remaining_missing) - 3} more" if len(remaining_missing) > 3 else ""
+            print(f"Generation incomplete: {len(remaining_missing)} files still missing ({examples}{more})")
             return False
             
     except Exception as e:
@@ -697,21 +749,47 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
         all_data[num_buses] = {}
         
         for frac in renewable_fractions:
-            pattern = f"{case_name}_convergence_report_frac{frac:.1f}_*.json"
-            report_files = glob.glob(os.path.join(data_dir, pattern))
+            # NO FALLBACKS - Fail fast if audit files are missing
+            pattern_audit = f"{case_name}_data_quality_audit_frac{frac:.1f}_*.json"
+            report_files = glob.glob(os.path.join(data_dir, pattern_audit))
             
-            if report_files:
-                report_file = sorted(report_files)[-1]
-                with open(report_file, 'r') as f:
-                    stats = json.load(f)
-                all_data[num_buses][frac] = stats
-                
-                total_scenarios += 1
-                total_successful += stats['successful']
-                total_failed += stats['failed']
-                
-                if len(stats['failed_with_contingency']) > 0:
-                    scenarios_with_failures.append({'case': case_name, 'fraction': frac, 'stats': stats})
+            if not report_files:
+                raise FileNotFoundError(
+                    f"Missing audit file for {case_name} at {frac*100:.1f}% renewable fraction. "
+                    f"Expected pattern: {pattern_audit} in {data_dir}. "
+                    f"Data generation may have failed or files were deleted."
+                )
+            
+            report_file = sorted(report_files)[-1]
+            with open(report_file, 'r') as f:
+                audit_data = json.load(f)
+            
+            # Extract convergence stats (new format has it in raw_convergence_stats)
+            if 'raw_convergence_stats' not in audit_data:
+                raise ValueError(
+                    f"Invalid audit file format: {report_file}. "
+                    f"Missing 'raw_convergence_stats' key. File may be corrupted or in legacy format."
+                )
+            
+            stats = audit_data['raw_convergence_stats']
+            
+            # Validate required keys exist
+            required_keys = ['successful', 'failed', 'total_timesteps', 'failed_with_contingency']
+            missing_keys = [key for key in required_keys if key not in stats]
+            if missing_keys:
+                raise KeyError(
+                    f"Missing required keys in audit file {report_file}: {missing_keys}. "
+                    f"File may be corrupted or incomplete."
+                )
+            
+            all_data[num_buses][frac] = stats
+            
+            total_scenarios += 1
+            total_successful += stats['successful']
+            total_failed += stats['failed']
+            
+            if len(stats['failed_with_contingency']) > 0:
+                scenarios_with_failures.append({'case': case_name, 'fraction': frac, 'stats': stats})
     
     # Print horizontal table header with fixed column width
     col_width = 17  # Fixed width for each case column
@@ -727,9 +805,17 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
         for num_buses in bus_systems:
             if frac in all_data[num_buses]:
                 stats = all_data[num_buses][frac]
-                has_cont_fail = len(stats['failed_with_contingency']) > 0
+                has_cont_fail = len(stats.get('failed_with_contingency', [])) > 0
                 status = "W" if has_cont_fail else "OK"
-                rate = stats['success_rate']
+                
+                # Calculate success_rate if not present (fallback for old data)
+                if 'success_rate' in stats:
+                    rate = stats['success_rate']
+                else:
+                    # Fallback calculation
+                    total = stats.get('total_timesteps', 0)
+                    successful = stats.get('successful', 0)
+                    rate = (successful / total * 100) if total > 0 else 0.0
                 
                 cell = f"{status} {rate:5.1f}%"
                 
@@ -755,6 +841,55 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
     print(f"\nOverall convergence: {overall_rate:.1f}% ({total_successful}/{total_timesteps} timesteps)")
     if scenarios_with_failures:
         print(f"Note: {len(scenarios_with_failures)} scenario(s) with contingency failures")
+    
+    # Display detailed contingency analysis for each scenario
+    print("\n" + "-"*80)
+    print("CONTINGENCY ANALYSIS")
+    print("-"*80)
+    
+    for scenario in scenarios_with_failures:
+        case_name = scenario['case']
+        frac = scenario['fraction']
+        stats = scenario['stats']
+        
+        # Try to load full audit data
+        pattern_audit = f"{case_name}_data_quality_audit_frac{frac:.1f}_*.json"
+        audit_files = glob.glob(os.path.join(data_dir, pattern_audit))
+        
+        if audit_files:
+            audit_file = sorted(audit_files)[-1]
+            with open(audit_file, 'r') as f:
+                audit_data = json.load(f)
+            
+            contingency_stats = audit_data.get('contingency_stats', {})
+            critical_lines = audit_data.get('critical_lines', {})
+            
+            print(f"\n{case_name.upper()} - {frac*100:.0f}% Renewable:")
+            print(f"  N-1 Scenarios: {contingency_stats.get('n1_scenarios_run', 0):,}")
+            print(f"  N-1 Robustness: {contingency_stats.get('n1_robustness_score', 0):.1f}%")
+            print(f"    - Safe (Strict): {contingency_stats.get('n1_safe', 0):,}")
+            print(f"    - Curtailed (Relaxed): {contingency_stats.get('n1_curtailed', 0):,}")
+            print(f"    - Collapsed (Failed): {contingency_stats.get('n1_collapsed', 0):,}")
+            
+            if critical_lines:
+                print(f"\n  Most Critical Lines (Top 3):")
+                sorted_lines = sorted(critical_lines.items(), 
+                                    key=lambda x: x[1].get('failure_count', 0), 
+                                    reverse=True)[:3]
+                for rank, (line_key, line_data) in enumerate(sorted_lines, 1):
+                    line_id = line_data.get('line_id', 'unknown')
+                    curtailment_rate = line_data.get('curtailment_rate', 0)
+                    failure_rate = line_data.get('failure_rate', 0)
+                    
+                    if curtailment_rate > 50:
+                        status = "Bottleneck"
+                    elif failure_rate > 5:
+                        status = "Islanding Risk"
+                    else:
+                        status = "Redundant"
+                    
+                    print(f"    {rank}. Line {line_id}: {curtailment_rate:.1f}% Curtailment Rate ({status})")
+    
     print("="*80)
 
 def force_clean_all_data(config) -> bool:

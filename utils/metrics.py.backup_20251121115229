@@ -1,0 +1,934 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict
+
+def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, config: object, bus_types: torch.Tensor, measurements: torch.Tensor = None) -> Dict[str, float]:
+    """
+    Computes both standard regression metrics and power system specific metrics.
+    
+    Args:
+        outputs: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+        targets: True unknowns [batch, buses, 2] (OPF: bus-type dependent)
+        ybus_batch: Ybus matrices for physics calculations
+        config: Configuration object
+        bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack] for OPF-specific metrics
+        measurements: Optional [batch, buses, 10] measurements for physics violation computation
+    """
+    import torch.nn.functional as F
+    
+    with torch.no_grad():
+        # Ensure outputs and targets have the same shape
+        if outputs.dim() != targets.dim():
+            if outputs.dim() == 2 and targets.dim() == 3:
+                # Model outputs flattened [batch_size, num_buses * features], targets are [batch_size, num_buses, features]
+                targets = targets.view(outputs.shape)
+            elif outputs.dim() == 3 and targets.dim() == 2:
+                # Model outputs [batch_size, num_buses, features], targets are flattened
+                outputs = outputs.view(targets.shape)
+            else:
+                raise ValueError(f"Cannot reconcile output shape {outputs.shape} with target shape {targets.shape}")
+        
+        # Standard regression metrics
+        mse = F.mse_loss(outputs, targets).item()
+        rmse = torch.sqrt(torch.tensor(mse, device=outputs.device)).item()
+        
+        # OPF: Bus-type-specific metrics
+        metrics = {
+            'mse': mse,
+            'rmse': rmse,
+        }
+        
+        # Compute bus-type-specific MSE for reporting
+        # PQ buses (0): [V, θ], PV buses (1): [Q, θ], Slack (2): [P, Q]
+        bus_types_cpu = bus_types.cpu() if bus_types.is_cuda else bus_types
+        
+        for bus_type_code, bus_type_name in [(0, 'PQ'), (1, 'PV'), (2, 'Slack')]:
+            mask = (bus_types_cpu == bus_type_code)
+            if mask.any():
+                outputs_type = outputs[mask]
+                targets_type = targets[mask]
+                mse_type = F.mse_loss(outputs_type, targets_type).item()
+                metrics[f'mse_{bus_type_name.lower()}'] = mse_type
+        
+        # Compute actual physics violations if measurements are available
+        if measurements is not None and bus_types is not None:
+            try:
+                from utils.physics_metrics import compute_physics_metrics
+                physics_metrics = compute_physics_metrics(
+                    outputs, measurements, ybus_batch, config, bus_types
+                )
+                metrics['power_violation'] = physics_metrics['power_violation']
+                metrics['voltage_violation'] = physics_metrics['voltage_violation']
+            except Exception as e:
+                # Fallback to 0.0 if computation fails
+                metrics['power_violation'] = 0.0
+                metrics['voltage_violation'] = 0.0
+        else:
+            # No measurements or bus_types available - cannot compute physics violations
+            metrics['power_violation'] = 0.0
+            metrics['voltage_violation'] = 0.0
+        
+        return metrics
+
+class PowerSystemLoss(nn.Module):
+    """
+    A comprehensive, physics-informed loss function for power system OPF.
+    This version correctly handles per-sample Ybus matrices and time-varying coefficients,
+    making it suitable for datasets with mixed scenarios (e.g., different renewable
+    fractions or N-1 contingencies).
+            else:
+                 raise ValueError(f"Shape mismatch: outputs {outputs_norm.shape}, targets {targets_norm.shape}")
+        
+        # Heteroscedastic: Model outputs [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        expected_features = 4
+        
+        # Ensure outputs are in correct format
+        if outputs_norm.dim() == 2:
+            # Flattened output: reshape to [batch, buses, expected_features]
+            batch_size = outputs_norm.shape[0]
+            num_buses = targets_norm.shape[1]  # Get num_buses from targets
+            expected_size = batch_size * num_buses * expected_features
+            actual_size = outputs_norm.numel()
+            if actual_size != expected_size:
+                raise ValueError(
+                    f"Cannot reshape outputs from {outputs_norm.shape} (size={actual_size}) "
+                    f"to [batch={batch_size}, buses={num_buses}, {expected_features}] (expected size={expected_size}). "
+                    f"Targets shape: {targets_norm.shape}"
+                )
+            outputs_norm = outputs_norm.view(batch_size, num_buses, expected_features)
+        elif outputs_norm.dim() == 3:
+            # Already 3D: check if it's correct shape
+            batch_size, num_buses = outputs_norm.shape[0], outputs_norm.shape[1]
+            total_features = outputs_norm.shape[-1]
+            actual_size = outputs_norm.numel()
+            expected_size = batch_size * num_buses * expected_features
+            
+            if total_features == expected_features:
+                # Correct shape
+                pass  # Already correct
+            elif total_features == num_buses * expected_features:
+                # Wrong shape: [batch, buses, buses*features] - this is a bug
+                raise ValueError(
+                    f"Model output has wrong shape: {outputs_norm.shape}. "
+                    f"Each bus has {total_features} features (should be {expected_features}). "
+                    f"This suggests the output layer is producing [batch, buses, buses*{expected_features}] instead of [batch, buses, {expected_features}]. "
+                    f"Actual size: {actual_size}, Expected: {expected_size}. "
+                    f"Targets shape: {targets_norm.shape}"
+                )
+            else:
+                raise ValueError(
+                    f"Unexpected output shape: {outputs_norm.shape} (size={actual_size}). "
+                    f"Expected [batch, buses, {expected_features}] (size={expected_size}). "
+                    f"Got last dim {total_features}, expected {expected_features}. "
+                    f"Targets shape: {targets_norm.shape}"
+                )
+        
+        # Extract natural parameters and compute loss
+        # Heteroscedastic: outputs_norm is [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
+        # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+        # where η1 = f1 (direct), η2 = -g+(f2) with g+ being softplus (numerically stable)
+        
+        eta1_var1_raw = outputs_norm[..., 0]  # [batch, buses] - η1 for variable 1
+        eta1_var2_raw = outputs_norm[..., 1]  # [batch, buses] - η1 for variable 2
+        f2_var1_raw = outputs_norm[..., 2]    # [batch, buses] - f2 for variable 1
+        f2_var2_raw = outputs_norm[..., 3]    # [batch, buses] - f2 for variable 2
+        
+        # Get softplus beta parameter
+        softplus_beta = getattr(self.config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
+        
+        # DEBUG: Check raw model outputs - ONLY PRINT WHEN NaN DETECTED
+        if torch.isnan(eta1_var1_raw).any() or torch.isnan(f2_var1_raw).any():
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] NaN in raw model outputs!")
+            print(f"{'='*80}")
+            print(f"  eta1_var1_raw: nan={torch.isnan(eta1_var1_raw).any().item()}, inf={torch.isinf(eta1_var1_raw).any().item()}, min={eta1_var1_raw.min().item():.6f}, max={eta1_var1_raw.max().item():.6f}")
+            print(f"  f2_var1_raw: nan={torch.isnan(f2_var1_raw).any().item()}, inf={torch.isinf(f2_var1_raw).any().item()}, min={f2_var1_raw.min().item():.6f}, max={f2_var1_raw.max().item():.6f}")
+            print(f"  eta1_var2_raw: nan={torch.isnan(eta1_var2_raw).any().item()}, inf={torch.isinf(eta1_var2_raw).any().item()}, min={eta1_var2_raw.min().item():.6f}, max={eta1_var2_raw.max().item():.6f}")
+            print(f"  f2_var2_raw: nan={torch.isnan(f2_var2_raw).any().item()}, inf={torch.isinf(f2_var2_raw).any().item()}, min={f2_var2_raw.min().item():.6f}, max={f2_var2_raw.max().item():.6f}")
+            print(f"{'='*80}")
+            import sys
+            sys.exit(1)
+        
+        # Compute g+(f2) using softplus - numerically stable (grows linearly for large x, prevents explosion)
+        # g+(x) = (1/β) * log(1 + exp(β*x))
+        # Units: f2_var1_raw is in normalized space (dimensionless), so g_plus is also dimensionless
+        g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)  # [batch, buses] - g+(f2) for variable 1 (dimensionless)
+        g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)  # [batch, buses] - g+(f2) for variable 2 (dimensionless)
+        
+        # DEBUG: Check g+ values - ONLY PRINT WHEN NaN DETECTED
+        if torch.isnan(g_plus_var1).any() or torch.isinf(g_plus_var1).any():
+            print(f"\n{'='*80}")
+            print(f"[DEBUG] NaN/Inf in g_plus_var1!")
+            print(f"{'='*80}")
+            print(f"  f2_var1_raw range: [{f2_var1_raw.min().item():.6f}, {f2_var1_raw.max().item():.6f}]")
+            print(f"  f2_var2_raw range: [{f2_var2_raw.min().item():.6f}, {f2_var2_raw.max().item():.6f}]")
+            print(f"  g_plus_var1 range: [{g_plus_var1.min().item():.6f}, {g_plus_var1.max().item():.6f}], nan={torch.isnan(g_plus_var1).any().item()}, inf={torch.isinf(g_plus_var1).any().item()}")
+            print(f"  g_plus_var2 range: [{g_plus_var2.min().item():.6f}, {g_plus_var2.max().item():.6f}], nan={torch.isnan(g_plus_var2).any().item()}, inf={torch.isinf(g_plus_var2).any().item()}")
+            print(f"{'='*80}")
+            import sys
+            sys.exit(1)
+        
+        # Compute natural parameters: η1 = f1 (direct), η2 = -g+(f2) < 0
+        # Units: All in normalized space (dimensionless)
+        eta1_var1 = eta1_var1_raw  # [batch, buses] - Natural parameter η1 for variable 1 (dimensionless)
+        eta1_var2 = eta1_var2_raw  # [batch, buses] - Natural parameter η1 for variable 2 (dimensionless)
+        eta2_var1 = -g_plus_var1  # [batch, buses] - Natural parameter η2 for variable 1 (dimensionless, guaranteed < 0)
+        eta2_var2 = -g_plus_var2  # [batch, buses] - Natural parameter η2 for variable 2 (dimensionless, guaranteed < 0)
+        
+        # Convert to mean and variance for predictions and MSE calculation
+        # Natural parametrization: μ = -η1/(2η2), σ² = -1/(2η2)
+        # Units: η1 and η2 are in normalized space (dimensionless after normalization)
+        #        μ is in normalized space (will be denormalized later for physical units)
+        #        σ² is variance in normalized space (dimensionless, relative uncertainty)
+        # Small epsilon to prevent division by zero (numerical safeguard)
+        eps = 1e-8
+        mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)  # [batch, buses] - Mean prediction (normalized, dimensionless)
+        mu_var2 = -eta1_var2 / (2.0 * eta2_var2 + eps)  # [batch, buses] - Mean prediction (normalized, dimensionless)
+        sigma2_var1 = -1.0 / (2.0 * eta2_var1 + eps)   # [batch, buses] - Variance (normalized, dimensionless)
+        sigma2_var2 = -1.0 / (2.0 * eta2_var2 + eps)   # [batch, buses] - Variance (normalized, dimensionless)
+        
+        # Natural parametrization loss is computed on normalized targets
+        # (since model outputs are in normalized space)
+        # Units: targets_norm are in normalized space (dimensionless after z-score normalization)
+        var1_true_norm = targets_norm[..., 0]  # [batch, buses] - True target variable 1 (normalized, dimensionless)
+        var2_true_norm = targets_norm[..., 1]  # [batch, buses] - True target variable 2 (normalized, dimensionless)
+        
+        # Compute natural parametrization negative log-likelihood (Equation 5 from paper)
+        # log p(y|x,θ) = [η1, η2]ᵀ[y, y²]ᵀ + η1²/(4η2) + ½log(-2η2) + const
+        # NLL = -log p(y|x,θ)
+        # Note: This is computed on normalized targets (y_norm) since η1, η2 are in normalized space
+        
+        # For variable 1: y = var1_true_norm (normalized)
+        y1 = var1_true_norm  # [batch, buses]
+        y1_sq = y1 ** 2  # [batch, buses]
+        
+        # Inner product: [η1, η2]ᵀ[y, y²]ᵀ = η1*y + η2*y²
+        inner1 = eta1_var1 * y1 + eta2_var1 * y1_sq  # [batch, buses]
+        
+        # Log partition: η1²/(4η2) + ½log(-2η2)
+        # Note: η2 < 0, so -2η2 > 0, log(-2η2) is valid
+        # Small epsilon to prevent division by zero and log(0) (numerical safeguard)
+        log_partition1 = (eta1_var1 ** 2) / (4.0 * eta2_var1 + eps) + 0.5 * torch.log(-2.0 * eta2_var1 + eps)  # [batch, buses]
+        
+        # NLL for variable 1: -inner - log_partition (constant term omitted)
+        nll_var1 = -inner1 - log_partition1  # [batch, buses]
+        
+        # For variable 2: y = var2_true_norm (normalized)
+        y2 = var2_true_norm  # [batch, buses]
+        y2_sq = y2 ** 2  # [batch, buses]
+        
+        inner2 = eta1_var2 * y2 + eta2_var2 * y2_sq  # [batch, buses]
+        log_partition2 = (eta1_var2 ** 2) / (4.0 * eta2_var2 + eps) + 0.5 * torch.log(-2.0 * eta2_var2 + eps)  # [batch, buses]
+        nll_var2 = -inner2 - log_partition2  # [batch, buses]
+        
+        # Total NLL: mean across batch and buses
+        data_loss = torch.mean(nll_var1) + torch.mean(nll_var2)
+        
+        # DEBUG: Check for NaN in natural parametrization
+        if torch.isnan(data_loss) or torch.isinf(data_loss):
+            print(f"\n[DEBUG] NaN/Inf detected in data_loss!")
+            print(f"  eta1_var1: min={eta1_var1.min().item():.6f}, max={eta1_var1.max().item():.6f}, nan={torch.isnan(eta1_var1).any().item()}")
+            print(f"  eta2_var1: min={eta2_var1.min().item():.6f}, max={eta2_var1.max().item():.6f}, nan={torch.isnan(eta2_var1).any().item()}")
+            print(f"  eta1_var2: min={eta1_var2.min().item():.6f}, max={eta1_var2.max().item():.6f}, nan={torch.isnan(eta1_var2).any().item()}")
+            print(f"  eta2_var2: min={eta2_var2.min().item():.6f}, max={eta2_var2.max().item():.6f}, nan={torch.isnan(eta2_var2).any().item()}")
+            print(f"  log_partition1: min={log_partition1.min().item():.6f}, max={log_partition1.max().item():.6f}, nan={torch.isnan(log_partition1).any().item()}")
+            print(f"  log_partition2: min={log_partition2.min().item():.6f}, max={log_partition2.max().item():.6f}, nan={torch.isnan(log_partition2).any().item()}")
+            print(f"  nll_var1: min={nll_var1.min().item():.6f}, max={nll_var1.max().item():.6f}, nan={torch.isnan(nll_var1).any().item()}")
+            print(f"  nll_var2: min={nll_var2.min().item():.6f}, max={nll_var2.max().item():.6f}, nan={torch.isnan(nll_var2).any().item()}")
+            print(f"  data_loss: {data_loss.item()}")
+            # Check division by zero
+            print(f"  eta2_var1 near zero: {(torch.abs(eta2_var1) < 1e-6).sum().item()} values")
+            print(f"  eta2_var2 near zero: {(torch.abs(eta2_var2) < 1e-6).sum().item()} values")
+            raise RuntimeError("NaN detected in natural parametrization loss - stopping training")
+        
+        # Compute MSE on NORMALIZED data for consistency with total loss (NLL is on normalized data)
+        # This ensures MSE + p_vio + v_viol ≈ total_loss (all in same scale)
+        mse_var1_norm = torch.mean((mu_var1 - var1_true_norm) ** 2)  # [batch, buses] -> scalar
+        mse_var2_norm = torch.mean((mu_var2 - var2_true_norm) ** 2)  # [batch, buses] -> scalar
+        unweighted_mse = mse_var1_norm + mse_var2_norm  # Normalized MSE (for consistency with total loss)
+        
+        # Also compute denormalized MSE for reporting (physical units)
+        # Stack normalized predictions for denormalization
+        mu_norm = torch.stack([mu_var1, mu_var2], dim=-1)  # [batch, buses, 2] - Normalized predictions (dimensionless)
+        # Denormalize: converts from normalized space back to physical units
+        # Units: After denormalization, predictions are in physical units (per-unit for voltages/power, radians for angles)
+        predictions_denorm = self.normalizer.denormalize(mu_norm)  # [batch, buses, 2] - Denormalized predictions (physical units)
+        var1_pred = predictions_denorm[..., 0]  # [batch, buses] - Predicted variable 1 (physical units: p.u. or rad)
+        var2_pred = predictions_denorm[..., 1]  # [batch, buses] - Predicted variable 2 (physical units: p.u. or rad)
+        # Denormalize targets for MSE calculation
+        targets_denorm_for_mse = self.normalizer.denormalize(targets_norm)  # [batch, buses, 2] - Denormalized targets (physical units)
+        var1_true = targets_denorm_for_mse[..., 0]  # [batch, buses] - True variable 1 (physical units: p.u. or rad)
+        var2_true = targets_denorm_for_mse[..., 1]  # [batch, buses] - True variable 2 (physical units: p.u. or rad)
+        # Compute MSE in physical units (for interpretability)
+        # Units: (physical_unit)² - e.g., (p.u.)² for voltages/power, (rad)² for angles
+        mse_var1_denorm = torch.mean((var1_pred - var1_true) ** 2)  # MSE in physical units (e.g., (p.u.)² or (rad)²)
+        mse_var2_denorm = torch.mean((var2_pred - var2_true) ** 2)  # MSE in physical units (e.g., (p.u.)² or (rad)²)
+        
+        # Compute sigma (standard deviation) for reporting and violations
+        # Note: sigma2 is in normalized space, but we report it as-is (relative uncertainty)
+        # Paper (Equation 3): σ² = -1/(2η2), so σ = sqrt(σ²)
+        # Units: sigma is in normalized space (dimensionless, represents relative uncertainty)
+        sigma_var1 = torch.sqrt(sigma2_var1)  # [batch, buses] - Standard deviation (normalized, dimensionless)
+        sigma_var2 = torch.sqrt(sigma2_var2)  # [batch, buses] - Standard deviation (normalized, dimensionless)
+        
+        # Store sigma tensors for use in violation calculations
+        self._sigma_var1_for_violations = sigma_var1  # [batch, buses]
+        self._sigma_var2_for_violations = sigma_var2  # [batch, buses]
+        
+        # If not physics-informed, we are done.
+        if not self.is_physics_informed:
+            # ML Engineering Best Practice: Report denormalized MSE (physical units) for interpretability
+            mse_denorm_val = mse_var1_denorm + mse_var2_denorm
+            total_loss_denorm_val = mse_denorm_val  # For non-physics, total = MSE
+            return {
+                'total_loss': data_loss,  # Normalized (for optimization)
+                'total_loss_denorm': total_loss_denorm_val,  # Denormalized (physical units - for display)
+                'mse': mse_denorm_val,  # Denormalized MSE (physical units - what ML engineers show)
+                'mse_normalized': unweighted_mse,  # Normalized MSE (for reference)
+                'mse_var1': mse_var1_norm,
+                'mse_var2': mse_var2_norm,
+                'power_violation': torch.tensor(0.0, device=data_loss.device),
+                'voltage_violation': torch.tensor(0.0, device=data_loss.device)
+            }
+
+        # Get denormalized predictions for physics calculations
+        outputs_denorm = predictions_denorm
+        
+        # In OPF mode, feature 0 varies by bus type (V for PQ, Q for PV, P for Slack)
+        # Only check for negative voltages on PQ buses (where V is predicted) - NO CLAMPING
+        pq_mask = (bus_types == 0)  # [batch, buses] - PQ buses only
+        if pq_mask.any():
+            vm_pu = outputs_denorm[..., 0]
+            vm_pq = vm_pu[pq_mask]  # Only check PQ buses
+            negative_vm_count = (vm_pq < 0).sum().item()
+            negative_vm_fraction = negative_vm_count / vm_pq.numel() if vm_pq.numel() > 0 else 0.0
+            
+            # Removed negative voltage warnings - model is still learning, these are expected during training
+            # if not hasattr(self, '_batch_count'):
+            #     self._batch_count = 0
+            # self._batch_count += 1
+            # if negative_vm_count > 0 and self._batch_count % 100 == 0:
+            #     min_vm = vm_pq.min().item()
+            #     max_vm = vm_pq.max().item()
+            #     print(f"Batch {self._batch_count}: {negative_vm_count} negative voltage predictions on PQ buses "
+            #           f"({negative_vm_fraction*100:.1f}%), VM range: [{min_vm:.4f}, {max_vm:.4f}]")
+        
+        if measurements_norm.dim() == 4:
+            # Sequential model: use last timestep [batch, seq_len, buses, 10] -> [batch, buses, 10]
+            measurements_norm = measurements_norm[:, -1, :, :]  # Take last timestep
+        elif measurements_norm.dim() != 3:
+            raise ValueError(
+                f"measurements_norm must be 3D [batch, buses, 10] or 4D [batch, seq_len, buses, 10], "
+                f"but got shape {measurements_norm.shape}"
+            )
+        measurements_denorm = self.normalizer.denormalize(measurements_norm)
+        
+        # Pass bus_types to power violation computation (critical for OPF mode)
+        # Use squared=True for training (MSE), but we'll compute RMSE for display
+        power_violation_mse_per_sample = self._compute_power_balance_violation(
+            predicted_voltages=outputs_denorm,
+            measured_power=measurements_denorm,
+            ybus_batch=ybus_batch,
+            bus_types=bus_types,  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
+            squared=True,  # MSE for training loss
+            debug=False  # Set to True for debugging
+        )
+        # Compute RMSE for display (more interpretable than MSE)
+        power_violation_rmse_per_sample = self._compute_power_balance_violation(
+            predicted_voltages=outputs_denorm,
+            measured_power=measurements_denorm,
+            ybus_batch=ybus_batch,
+            bus_types=bus_types,
+            squared=False,  # RMSE for display
+            debug=False
+        )
+        # Pass bus_types to voltage violation computation (only check PQ buses in OPF mode)
+        # Compute both MSE (for training) and RMSE (for display)
+        voltage_violation_mse_per_sample = self._compute_voltage_limit_violation(
+            outputs_denorm, bus_types=bus_types, squared=True  # MSE for training
+        )
+        voltage_violation_rmse_per_sample = self._compute_voltage_limit_violation(
+            outputs_denorm, bus_types=bus_types, squared=False  # RMSE for display
+        )
+
+        # Use MSE for training loss (squared, for optimization)
+        # Power balance violation: MSE of mismatch in (p.u.)²
+        # Per-unit system already provides normalization via S_base (constant)
+        # DO NOT divide by dynamic load - this makes loss non-stationary
+        # Units: power_violation_mse_per_sample is in (p.u.)², so mean is also in (p.u.)²
+        power_penalty = torch.mean(power_violation_mse_per_sample)  # [scalar] - Power violation MSE (p.u.)² for training
+        # Use RMSE for display (sqrt, more interpretable)
+        # Units: power_violation_rmse_per_sample is in p.u., so mean is also in p.u.
+        power_penalty_rmse = torch.mean(power_violation_rmse_per_sample)  # [scalar] - Power violation RMSE (p.u.) for display
+        # Units: voltage_violation_mse_per_sample is in (p.u.)², so mean is also in (p.u.)²
+        voltage_penalty = torch.mean(voltage_violation_mse_per_sample)  # [scalar] - Voltage violation MSE (p.u.)² for training
+        # Units: voltage_violation_rmse_per_sample is in p.u., so mean is also in p.u.
+        voltage_penalty_rmse = torch.mean(voltage_violation_rmse_per_sample)  # [scalar] - Voltage violation RMSE (p.u.) for display
+        
+        # Physics loss annealing: gradually introduce physics constraints to prevent early explosion
+        # Apply annealing to penalties (before weighting) so sigmas can still learn properly
+        if epoch is None:
+            epoch = 0  # Default to epoch 0 for backward compatibility
+        if self.is_physics_informed and epoch < self.physics_warmup_epochs:
+            # Linearly increase weight from 0 to 1 over warmup period
+            # Epoch 0: weight = 1/warmup, Epoch warmup-1: weight = 1.0
+            annealing_weight = float(epoch + 1) / float(self.physics_warmup_epochs)
+            power_penalty = power_penalty * annealing_weight
+            voltage_penalty = voltage_penalty * annealing_weight
+        # After warmup, annealing_weight = 1.0 (no change)
+        
+        # Heteroscedastic: Data loss uses natural parametrization (Immer et al., NeurIPS 2023)
+        # Data loss: pure natural parametrization NLL (paper Equation 5)
+        weighted_data_loss = data_loss  # Already computed as NLL
+        
+        # Physics losses: Use Kendall-style learnable weights (Kendall et al., CVPR 2018)
+        # Heteroscedastic paper does NOT address physics losses - only data loss
+        # Kendall-style weights are well-cited (2000+ citations) and appropriate for multi-task learning
+        # 
+        # CRITICAL ISSUE: If sigma_voltage becomes too large, the voltage penalty becomes negligible.
+        # Example: sigma_voltage = 10 → weight = 1/(2*100) = 0.005 (very small)
+        # This allows the model to "cheat" by accepting voltage violations because they're cheaper
+        # than fixing the underlying physics. This is why voltage predictions can be physically impossible.
+        #
+        # The model learns: "It's cheaper to accept 0.2 p.u. voltage violations than to learn correct physics."
+        # This is a fundamental training issue, not just a code bug.
+        #
+        # Units: sigma_power and sigma_voltage are dimensionless uncertainty parameters
+        # They represent the "uncertainty" of each loss term, learned via backpropagation
+        sigma_power = torch.exp(self.log_sigma_power)  # Dimensionless uncertainty parameter for power loss
+        sigma_voltage = torch.exp(self.log_sigma_voltage)  # Dimensionless uncertainty parameter for voltage loss
+        
+        # Weighted losses: penalty / (2*sigma²)
+        regularization = torch.log(sigma_power) + torch.log(sigma_voltage)  # Dimensionless regularization term
+        
+        total_loss = weighted_data_loss + weighted_power_loss + weighted_voltage_loss + regularization
+        
+        # Compute denormalized MSE for reporting (physical units - what ML engineers typically show)
+        # This is more interpretable than normalized MSE
+        mse_denorm = mse_var1_denorm + mse_var2_denorm  # Denormalized MSE (physical units)
+        mse_normalized = unweighted_mse  # Normalized MSE (for internal consistency)
+        
+        # Compute denormalized total_loss for display (physical units - interpretable)
+        # Use RMSE for violations in display (more interpretable than MSE)
+        # We keep normalized total_loss for optimization (backward pass, etc.)
+        if self.is_physics_informed:
+            # For display: use RMSE for violations (sqrt, per-unit) instead of MSE (squared, per-unit²)
+            # This makes violations more interpretable and shows actual per-unit mismatch
+            total_loss_denorm = mse_denorm + power_penalty_rmse + voltage_penalty  # Physical units (interpretable)
+        else:
+            total_loss_denorm = mse_denorm  # For non-physics models, just MSE
+        
+        # ML Engineering Best Practice: Report denormalized MSE and total_loss (physical units) for interpretability
+        # Total loss remains normalized (for optimization stability)
+        # Violations are already in physical units (per-unit)
+        if return_components and self.is_physics_informed:
+            result = {
+                'total_loss': total_loss,  # Normalized (for optimization - backward pass, etc.)
+                'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units - for display)
+                'mse': mse_denorm,  # Denormalized MSE (physical units - what ML engineers show)
+                'mse_normalized': mse_normalized,  # Normalized MSE (for reference)
+                'mse_var1': mse_var1_norm,
+                'mse_var2': mse_var2_norm,
+                'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
+                'power_violation_mse': power_penalty,  # MSE (per-unit²) for training - kept for reference
+                'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
+                'voltage_violation_mse': voltage_penalty,  # MSE (per-unit²) for training - kept for reference
+                'physics_loss': weighted_power_loss + weighted_voltage_loss
+            }
+            return result
+        else:
+            result = {
+                'total_loss': total_loss,  # Normalized (for optimization - backward pass, etc.)
+                'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units - for display)
+                'mse': mse_denorm,  # Denormalized MSE (physical units - what ML engineers show)
+                'mse_normalized': mse_normalized,  # Normalized MSE (for reference)
+                'mse_var1': mse_var1_norm,
+                'mse_var2': mse_var2_norm,
+                'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
+                'power_violation_mse': power_penalty,  # MSE (per-unit²) for training - kept for reference
+                'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
+                'voltage_violation_mse': voltage_penalty  # MSE (per-unit²) for training - kept for reference
+            }
+            return result
+
+    def _get_power_injections_pu(self, measurements: torch.Tensor):
+        """
+        Extracts power injections from MEASURED data and converts to per unit.
+        
+        Args:
+            measurements: Measurement tensor [batch, buses, 10]
+                         Format: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_partial, va_partial]
+                         Units: Power measurements (indices 0-7) are in MW/MVar (physical units)
+                                Voltage measurements (indices 8-9) are in per-unit/radians
+        
+        Returns:
+            p_inj_pu, q_inj_pu: Power injections in per-unit (p.u.)
+        """
+        # Extract power measurements (all in MW/MVar - physical units from data generation)
+        p_load_mw = measurements[..., 0]  # [batch, buses] - Active load in MW
+        q_load_mvar = measurements[..., 1]  # [batch, buses] - Reactive load in MVar
+        p_ext_mw = measurements[..., 2]  # [batch, buses] - External grid active power in MW
+        q_ext_mvar = measurements[..., 3]  # [batch, buses] - External grid reactive power in MVar
+        p_conv_mw = measurements[..., 4]  # [batch, buses] - Conventional generation active power in MW
+        q_conv_mvar = measurements[..., 5]  # [batch, buses] - Conventional generation reactive power in MVar
+        p_ren_mw = measurements[..., 6]  # [batch, buses] - Renewable generation active power in MW
+        q_ren_mvar = measurements[..., 7]  # [batch, buses] - Renewable generation reactive power in MVar
+        
+        # Total generation (all in MW/MVar)
+        p_gen_mw = p_conv_mw + p_ren_mw  # [batch, buses] - Total active generation in MW
+        q_gen_mvar = q_conv_mvar + q_ren_mvar  # [batch, buses] - Total reactive generation in MVar
+        
+        # Net power injection = generation - load (all in MW/MVar)
+        p_inj_mw = p_gen_mw - p_load_mw  # [batch, buses] - Net active power injection in MW
+        q_inj_mvar = q_gen_mvar - q_load_mvar  # [batch, buses] - Net reactive power injection in MVar
+        
+        # Convert from MW/MVar to per-unit: divide by system base power (S_base in MVA)
+        # Units: MW / MVA = p.u., MVar / MVA = p.u.
+        p_inj_pu = p_inj_mw / self.s_base_mva  # [batch, buses] - Active power injection in per-unit (p.u.)
+        q_inj_pu = q_inj_mvar / self.s_base_mva  # [batch, buses] - Reactive power injection in per-unit (p.u.)
+        
+        return p_inj_pu, q_inj_pu
+    
+    def _get_power_injections(self, state: torch.Tensor):
+        """Extracts power injections from the state tensor in original units (MW, MVAr)."""
+        p_load_mw = state[..., 2]
+        q_load_mvar = state[..., 3]
+        p_conv_mw = state[..., 6]
+        q_conv_mvar = state[..., 7]
+        p_ren_mw = state[..., 8]
+        q_ren_mvar = state[..., 9]
+        
+        p_gen_mw = p_conv_mw + p_ren_mw
+        q_gen_mvar = q_conv_mvar + q_ren_mvar
+        
+        p_inj_mw = p_gen_mw - p_load_mw
+        q_inj_mvar = q_gen_mvar - q_load_mvar
+        
+        return p_inj_mw, q_inj_mvar, p_load_mw, q_load_mvar
+    
+    def _reconstruct_voltage_state(self, predicted_unknowns: torch.Tensor, measured_power: torch.Tensor, bus_types: torch.Tensor) -> torch.Tensor:
+        """
+        Reconstructs full voltage state [V, θ] from bus-type-dependent predictions.
+        
+        CRITICAL: In OPF mode, predictions are bus-type dependent:
+        - PQ bus (0): [V, θ] - both unknown, use predictions directly
+        - PV bus (1): [Q, θ] - V is known (from measurements), Q and θ are predicted
+        - Slack bus (2): [P, Q] - V and θ are both known (from measurements), P and Q are predicted
+        
+        Args:
+            predicted_unknowns: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+            measured_power: Measured power [batch, buses, 10] = [p_load, q_load, ..., vm_meas, va_meas]
+            bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
+            
+        Returns:
+            Full voltage state [batch, buses, 2] = [vm_pu, va_rad] for ALL buses
+        """
+        if bus_types is None:
+            raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
+        
+        # Extract measured voltages from features (indices 8, 9)
+        # Units: measurements[..., 8] is vm_meas in per-unit, measurements[..., 9] is va_meas in radians
+        vm_meas_pu = measured_power[..., 8]  # [batch, buses] - Measured voltage magnitude in per-unit (p.u.)
+        va_meas_rad = measured_power[..., 9]  # [batch, buses] - Measured voltage angle in radians (rad)
+        
+        # OPF mode: bus-type dependent predictions
+        # Initialize voltage state arrays (will be filled based on bus type)
+        vm_pu = torch.zeros_like(vm_meas_pu)  # [batch, buses] - Voltage magnitudes in per-unit (p.u.)
+        va_rad = torch.zeros_like(va_meas_rad)  # [batch, buses] - Voltage angles in radians (rad)
+        
+        # Create masks for each bus type
+        pq_mask = (bus_types == 0)  # [batch, buses] - PQ buses (boolean mask)
+        pv_mask = (bus_types == 1)  # [batch, buses] - PV buses (boolean mask)
+        slack_mask = (bus_types == 2)  # [batch, buses] - Slack buses (boolean mask)
+        
+        # PQ buses: [V, θ] are both predicted (unknowns)
+        # Units: predicted_unknowns[..., 0] is V in per-unit, predicted_unknowns[..., 1] is θ in radians
+        vm_pu[pq_mask] = predicted_unknowns[..., 0][pq_mask]  # [batch, buses] - Predicted voltage in per-unit (p.u.)
+        va_rad[pq_mask] = predicted_unknowns[..., 1][pq_mask]  # [batch, buses] - Predicted angle in radians (rad)
+        
+        # PV buses: V is known (measured), θ is predicted
+        # Units: vm_meas_pu is in per-unit, predicted_unknowns[..., 1] is θ in radians
+        vm_pu[pv_mask] = vm_meas_pu[pv_mask]  # [batch, buses] - Use measured V in per-unit (p.u.)
+        va_rad[pv_mask] = predicted_unknowns[..., 1][pv_mask]  # [batch, buses] - Use predicted θ in radians (rad)
+        
+        # Slack buses: V and θ are both known (measured)
+        # Units: Both vm_meas_pu and va_meas_rad are in per-unit and radians respectively
+        vm_pu[slack_mask] = vm_meas_pu[slack_mask]  # [batch, buses] - Use measured V in per-unit (p.u.)
+        va_rad[slack_mask] = va_meas_rad[slack_mask]  # [batch, buses] - Use measured θ in radians (rad)
+        
+        # Return full voltage state [batch, buses, 2] = [vm_pu, va_rad]
+        # Units: vm_pu is in per-unit (p.u.), va_rad is in radians (rad)
+        return torch.stack([vm_pu, va_rad], dim=-1)  # [batch, buses, 2] - [voltage (p.u.), angle (rad)]
+    
+    def _compute_power_balance_violation(self, predicted_voltages, measured_power, ybus_batch, bus_types: torch.Tensor, squared=True, debug=False):
+        """
+        Computes power balance violation for OPF predictions.
+        
+        CRITICAL: In OPF mode, predictions are bus-type dependent:
+        - PQ bus (0): [V, θ] - both unknown, use predictions directly
+        - PV bus (1): [Q, θ] - V is known (from measurements), Q and θ are predicted
+        - Slack bus (2): [P, Q] - V and θ are known (from measurements), P and Q are predicted
+        
+        To compute power flow, we need full voltage state [V, θ] for ALL buses.
+        We reconstruct it by combining predictions with known measurements.
+        
+        Args:
+            predicted_voltages: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+            measured_power: Measured power injections [batch, buses, 10] = [p_load, q_load, ..., vm_meas, va_meas]
+            ybus_batch: Admittance matrices [batch, buses, buses]
+            bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
+            squared: If True, returns MSE (for training), if False, returns RMSE (for evaluation)
+            debug: If True, print debug information
+            
+        Returns:
+            Power balance violation per sample [batch]
+        """
+        if bus_types is None:
+            raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
+        
+        # Reconstruct full voltage state [V, θ] for ALL buses based on bus type
+        voltage_state = self._reconstruct_voltage_state(predicted_voltages, measured_power, bus_types)
+        vm_pu = voltage_state[..., 0]  # [batch, buses] - Voltage magnitudes in per-unit (p.u.)
+        va_rad = voltage_state[..., 1]  # [batch, buses] - Voltage angles in radians (rad)
+        
+        if debug:
+            pq_mask = (bus_types == 0)
+            pv_mask = (bus_types == 1)
+            slack_mask = (bus_types == 2)
+            print(f"[DEBUG] Bus type distribution: PQ={pq_mask.sum().item()}, PV={pv_mask.sum().item()}, Slack={slack_mask.sum().item()}")
+            print(f"[DEBUG] VM range: PQ={vm_pu[pq_mask].min().item():.4f} to {vm_pu[pq_mask].max().item():.4f}")
+            print(f"[DEBUG] VM range: PV={vm_pu[pv_mask].min().item():.4f} to {vm_pu[pv_mask].max().item():.4f}")
+            print(f"[DEBUG] VM range: Slack={vm_pu[slack_mask].min().item():.4f} to {vm_pu[slack_mask].max().item():.4f}")
+        
+        # Compute power flow using reconstructed voltage state
+        # Units: V is complex voltage in per-unit, I is complex current in per-unit (Ybus is in per-unit)
+        V = vm_pu * torch.exp(1j * va_rad)  # [batch, buses] - Complex voltage (p.u. + j*p.u.)
+        I = torch.einsum('bij,bj->bi', ybus_batch.cfloat(), V)  # [batch, buses] - Complex current (p.u. + j*p.u.)
+        # Ybus is in per-unit admittance (S_base normalized), so S = V*conj(I) is in per-unit power
+        S_calc_pu = V * torch.conj(I)  # [batch, buses] - Calculated complex power injection (p.u. + j*p.u.)
+        
+        # Get actual power injections from measurements (converted from MW/MVar to per-unit)
+        p_inj_pu, q_inj_pu = self._get_power_injections_pu(measured_power)  # [batch, buses] - Both in per-unit (p.u.)
+        
+        # Compute mismatch (both in per-unit, so mismatch is also in per-unit)
+        p_mismatch = p_inj_pu - S_calc_pu.real  # [batch, buses] - Active power mismatch (p.u.)
+        q_mismatch = q_inj_pu - S_calc_pu.imag  # [batch, buses] - Reactive power mismatch (p.u.)
+        
+        # Mismatch squared: (p.u.)² (for MSE calculation)
+        mismatch_squared = p_mismatch**2 + q_mismatch**2  # [batch, buses] - Squared mismatch (p.u.)²
+        
+        if debug:
+            print(f"[DEBUG] P mismatch range: {p_mismatch.min().item():.6f} to {p_mismatch.max().item():.6f}")
+            print(f"[DEBUG] Q mismatch range: {q_mismatch.min().item():.6f} to {q_mismatch.max().item():.6f}")
+            print(f"[DEBUG] Mismatch squared mean: {torch.mean(mismatch_squared).item():.6f}")
+            print(f"[DEBUG] P injection range: {p_inj_pu.min().item():.6f} to {p_inj_pu.max().item():.6f}")
+            print(f"[DEBUG] Q injection range: {q_inj_pu.min().item():.6f} to {q_inj_pu.max().item():.6f}")
+            print(f"[DEBUG] S_calc real range: {S_calc_pu.real.min().item():.6f} to {S_calc_pu.real.max().item():.6f}")
+            print(f"[DEBUG] S_calc imag range: {S_calc_pu.imag.min().item():.6f} to {S_calc_pu.imag.max().item():.6f}")
+        
+        if squared:
+            # Return MSE: mean of squared mismatches across buses
+            # Units: (p.u.)² - per-unit squared (for training loss)
+            return torch.mean(mismatch_squared, dim=-1)  # [batch] - MSE (p.u.)^2
+        else:
+            # Return RMSE: sqrt of mean squared mismatches
+            # Units: p.u. - per-unit (for evaluation/display)
+            return torch.sqrt(torch.mean(mismatch_squared, dim=-1))  # [batch] - RMSE (p.u.)
+
+    def _compute_voltage_limit_violation(self, state: torch.Tensor, bus_types: torch.Tensor, squared=True) -> torch.Tensor:
+        """
+        Calculates the violation of voltage limits.
+        
+        CRITICAL: In OPF mode, state[..., 0] is bus-type dependent:
+        - PQ bus: V (voltage magnitude) - check limits
+        - PV bus: Q (reactive power) - NO voltage limit check (V is known/specified)
+        - Slack bus: P (active power) - NO voltage limit check (V is known/specified)
+        
+        Args:
+            state: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+            bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
+            squared: If True, returns MSE (per-unit^2) for training, if False, returns RMSE (per-unit) for display
+            
+        Returns:
+            Voltage limit violation per sample [batch]
+        """
+        if bus_types is None:
+            raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
+        
+        # OPF mode: only check voltage limits for PQ buses (where V is predicted)
+        batch_size = state.shape[0]
+        vm_pu = state[..., 0]  # [batch, buses] - Voltage magnitudes in per-unit (p.u.)
+        
+        # Compute violations for all buses (will be zero for non-PQ buses)
+        # v_min and v_max are in per-unit (typically 0.95 and 1.05 p.u.)
+        v_below = F.relu(self.v_min - vm_pu)  # [batch, buses] - Violation below minimum (p.u.)
+        v_above = F.relu(vm_pu - self.v_max)  # [batch, buses] - Violation above maximum (p.u.)
+        # Violation squared: (p.u.)² (for MSE calculation)
+        violation_all = v_below**2 + v_above**2  # [batch, buses] - Squared violations (p.u.)^2
+        
+        # Mask out non-PQ buses (set their violations to zero)
+        pq_mask = (bus_types == 0)  # [batch, buses] - PQ buses (boolean mask)
+        violation_all = violation_all * pq_mask.float()  # Zero out non-PQ buses (p.u.)^2
+        
+        if squared:
+            # Return MSE: mean of squared violations across buses
+            # Units: (p.u.)² - per-unit squared (for training loss)
+            return torch.mean(violation_all, dim=-1)  # [batch] - MSE (p.u.)^2
+        else:
+            # Return RMSE: sqrt of mean squared violations
+            # Units: p.u. - per-unit (for evaluation/display)
+            return torch.sqrt(torch.mean(violation_all, dim=-1))  # [batch] - RMSE (p.u.)
+
+    def _compute_active_power_loss_pu(self, voltages: torch.Tensor, measurements: torch.Tensor, Ybus: torch.Tensor, bus_types: torch.Tensor) -> torch.Tensor:
+        """
+        Computes normalized active power loss using the accurate power loss formula from equation (3.5):
+        P_loss = Σ Σ Dij * [Rij/|Vit||Vjt| * (PitPjt + QitQjt) + Rij|Vit||Vjt|sin(θit-θjt)(QitPjt - QjtPit)]
+        
+        Vectorized implementation for better performance.
+        Normalized by total system load to ensure values are in [0, 1] range across all bus systems.
+        
+        CRITICAL: In OPF mode, voltages are bus-type dependent. This function reconstructs full voltage state.
+        
+        Args:
+            voltages: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+            measurements: Measured power [batch, buses, 10] = [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+            Ybus: Admittance matrix [batch, buses, buses]
+            bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
+        """
+        if bus_types is None:
+            raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
+        # Reconstruct full voltage state [V, θ] for ALL buses
+        voltage_state = self._reconstruct_voltage_state(voltages, measurements, bus_types)
+        Vm = voltage_state[..., 0]  # Voltage magnitudes (p.u.) [batch_size, num_buses]
+        Va = voltage_state[..., 1]  # Voltage angles (rad) [batch_size, num_buses]
+        
+        batch_size, num_buses = Vm.shape[:2]
+        
+        # Check if we have any data
+        if batch_size == 0 or num_buses == 0:
+            return torch.zeros(batch_size, device=Vm.device, dtype=Vm.dtype)
+        
+        # Calculate power losses from PREDICTED voltage state (model-dependent)
+        # Use power flow equations to calculate losses from predicted voltages
+        # Compute complex voltages: V = |V| * e^(jθ)
+        # Units: Vm is in per-unit (p.u.), Va is in radians (rad)
+        V = Vm * torch.exp(1j * Va)  # [batch_size, num_buses] - Complex voltage (p.u. + j*p.u.)
+        
+        # Calculate currents using Ybus: I = Ybus * V
+        # Units: Ybus is in per-unit admittance (S_base normalized), so I is in per-unit current
+        I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)  # [batch_size, num_buses] - Complex current (p.u. + j*p.u.)
+        
+        # Calculate complex power injections: S = V * conj(I)
+        # Units: S = V*conj(I) where V and I are in per-unit, so S is in per-unit power
+        S_inj = V * torch.conj(I)  # [batch_size, num_buses] - Complex power injection (p.u. + j*p.u.)
+        p_inj = S_inj.real  # [batch_size, num_buses] - Real power injection in per-unit (p.u.)
+        
+        # Calculate power loss from predicted state using power balance: P_loss = P_gen - P_load
+        # Get load from measurements (load is known, not predicted)
+        # Units: measurements[..., 0] is p_load in MW (physical units from data generation)
+        p_load_mw = measurements[..., 0]  # [batch_size, num_buses] - Load in MW (physical units)
+        # Convert load from MW to per-unit: divide by system base power (S_base in MVA)
+        p_load_total_pu = torch.sum(p_load_mw / self.s_base_mva, dim=-1)  # [batch_size] - Total load in per-unit (p.u.)
+        
+        # Calculate generation from predicted state: P_gen = sum of positive power injections
+        # Units: p_inj is already in per-unit, so p_gen_pred_pu is also in per-unit
+        p_gen_pred_pu = torch.sum(F.relu(p_inj), dim=-1)  # [batch_size] - Generation in per-unit (p.u.)
+        
+        # Power loss = generation - load (from power balance)
+        # Units: Both terms are in per-unit, so p_losses_pu is in per-unit
+        p_losses_pu = p_gen_pred_pu - p_load_total_pu  # [batch_size] - Losses in per-unit (p.u.)
+        
+        # Return raw per-unit losses for evaluation
+        # Units: per-unit (p.u.) - losses normalized by system base power (S_base)
+        # Physical interpretation: 0.01 p.u. = 1% of system base power
+        # NOTE: For evaluation/plotting, these are the actual physical losses.
+        # Large values (> 0.1 p.u.) indicate severe issues, but we don't clamp - we report the truth.
+        return torch.abs(p_losses_pu)  # [batch_size] - absolute losses in per-unit
+
+    def _compute_normalized_voltage_deviation(self, voltages: torch.Tensor, measurements: torch.Tensor, bus_types: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the normalized voltage deviation according to formula (3.6):
+        f2 = Σ_t Σ_i |Vit - ViNt|/|ViNt|
+        
+        CRITICAL: In OPF mode, voltages are bus-type dependent. This function reconstructs full voltage state.
+        Only checks PQ buses (where V is predicted).
+        
+        Args:
+            voltages: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+            measurements: Measured power [batch, buses, 10] (required for OPF mode to reconstruct voltage state)
+            bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
+            
+        Returns:
+            Tensor containing normalized voltage deviations [batch_size]
+        """
+        if bus_types is None:
+            raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
+        if measurements is None:
+            raise ValueError("measurements is required for OPF mode to reconstruct voltage state.")
+        
+        # Reconstruct full voltage state [V, θ] for ALL buses
+        voltage_state = self._reconstruct_voltage_state(voltages, measurements, bus_types)
+        Vm = voltage_state[..., 0]  # [batch_size, num_buses] - Voltage magnitudes in per-unit (p.u.)
+        # Only check PQ buses (where V is predicted)
+        pq_mask = (bus_types == 0)  # [batch, buses] - PQ buses (boolean mask)
+        Vm = Vm * pq_mask.float()  # Zero out non-PQ buses (p.u.)
+        
+        # Rated voltage is 1.0 p.u. (nominal voltage in per-unit system)
+        V_rated = torch.ones_like(Vm)  # [batch_size, num_buses] - Rated voltage in per-unit (p.u.)
+        
+        # Calculate absolute normalized deviation: |Vit - ViNt|/|ViNt|
+        # Units: Vm and V_rated are both in per-unit, so deviation is dimensionless (relative deviation)
+        voltage_deviation = torch.abs(Vm - V_rated) / V_rated  # [batch_size, num_buses] - Relative voltage deviation (dimensionless)
+        
+        # Take mean across buses for each sample
+        # Units: Mean of dimensionless deviations is still dimensionless
+        mean_deviation = torch.mean(voltage_deviation, dim=1)  # [batch_size] - Mean relative voltage deviation (dimensionless)
+        
+        return mean_deviation
+
+    def _compute_mean_power_flow_pu(self, voltages: torch.Tensor, measurements: torch.Tensor, Ybus: torch.Tensor, bus_types: torch.Tensor, epsilon: float = 1e-9) -> torch.Tensor:
+        """
+        Computes normalized power flow magnitudes using ACOPF equation (3.8):
+        P_i^DG + P_i = P_i^load + V_i Σ_(s=1)^(B_n) V_s (G_is cos θ_is + B_is sin θ_is)
+        Q_i^DG + Q_i = Q_i^load + V_i Σ_(s=1)^(B_n) V_s (G_is sin θ_is - B_is cos θ_is)
+        
+        This implementation calculates the actual power flow magnitudes through the network
+        using the standard AC power flow equations, same foundation as power balance violation
+        but measuring flow magnitudes instead of balance mismatches.
+        
+        CRITICAL: In OPF mode, voltages are bus-type dependent. This function reconstructs full voltage state.
+        
+        Args:
+            voltages: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
+            measurements: Measured power [batch, buses, 10] = [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+            Ybus: Admittance matrix [batch_size, num_buses, num_buses]
+            bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
+            epsilon: Small value to avoid division by zero
+            
+        Returns:
+            Tensor containing normalized power flow magnitudes [batch_size]
+        """
+        if bus_types is None:
+            raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
+        # Reconstruct full voltage state [V, θ] for ALL buses
+        voltage_state = self._reconstruct_voltage_state(voltages, measurements, bus_types)
+        vm_pu = voltage_state[..., 0]  # Voltage magnitudes (p.u.) [batch_size, num_buses]
+        va_rad = voltage_state[..., 1]  # Voltage angles (rad) [batch_size, num_buses]
+        
+        batch_size, num_buses = vm_pu.shape[:2]
+        
+        # Check if we have any data
+        if batch_size == 0 or num_buses == 0:
+            return torch.zeros(batch_size, device=voltages.device, dtype=voltages.dtype)
+        
+        # Calculate complex voltages: V = |V| * e^(jθ)
+        # Units: vm_pu is in per-unit (p.u.), va_rad is in radians (rad)
+        V = vm_pu * torch.exp(1j * va_rad)  # [batch_size, num_buses] - Complex voltage (p.u. + j*p.u.)
+        
+        # Calculate currents using Ybus: I = Ybus * V
+        # This implements: I_i = Σ_s Y_is * V_s
+        # Units: Ybus is in per-unit admittance (S_base normalized), V is in per-unit, so I is in per-unit current
+        I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)  # [batch_size, num_buses] - Complex current (p.u. + j*p.u.)
+        
+        # Calculate complex power flows: S = V * conj(I)
+        # This implements the ACOPF equation (3.8):
+        # S_i = V_i * conj(I_i) = V_i * Σ_s Y_is* * V_s*
+        # Where Y_is = G_is + jB_is, so:
+        # P_i = Re(S_i) = V_i Σ_s V_s (G_is cos θ_is + B_is sin θ_is)
+        # Q_i = Im(S_i) = V_i Σ_s V_s (G_is sin θ_is - B_is cos θ_is)
+        # Units: S = V*conj(I) where V and I are in per-unit, so S is in per-unit power
+        S_calc_pu = V * torch.conj(I)  # [batch_size, num_buses] - Complex power flow (p.u. + j*p.u.)
+        
+        # Extract active and reactive power flows (preserve signs for physics accuracy)
+        # Units: S_calc_pu is in per-unit complex power, so real/imag parts are in per-unit
+        p_flow_values = S_calc_pu.real  # [batch_size, num_buses] - Active power flow (p.u., can be negative for reverse flow)
+        q_flow_values = S_calc_pu.imag  # [batch_size, num_buses] - Reactive power flow (p.u., can be negative for reverse flow)
+        
+        # Calculate apparent power flow magnitude per bus (magnitude only for normalization)
+        # Units: Both p_flow and q_flow are in per-unit, so magnitude is also in per-unit
+        s_flow_magnitudes = torch.sqrt(p_flow_values**2 + q_flow_values**2)  # [batch_size, num_buses] - Apparent power flow magnitude (p.u.)
+        
+        # Calculate mean apparent power flow magnitude per bus (normalized metric)
+        # Units: Mean of per-unit magnitudes is still in per-unit
+        mean_flow_magnitude_per_bus = torch.mean(s_flow_magnitudes, dim=-1)  # [batch_size] - Mean flow magnitude per bus (p.u.)
+        
+        # Return raw per-unit power flow magnitudes for evaluation
+        # Units: per-unit (p.u.) - flow magnitudes normalized by system base power (S_base)
+            )
+        
+        # Reconstruct full voltage state from predictions
+        voltage_state = self._reconstruct_voltage_state(voltages, measurements, bus_types)
+        Vm = voltage_state[..., 0]  # [batch_size, num_buses] - Voltage magnitudes in per-unit (p.u.)
+        Va = voltage_state[..., 1]  # [batch_size, num_buses] - Voltage angles in radians (rad)
+        
+        # Calculate complex voltages: V = |V| * e^(jθ)
+        # Units: Vm is in per-unit, Va is in radians, so V is complex voltage in per-unit
+        V = Vm * torch.exp(1j * Va)  # [batch_size, num_buses] - Complex voltage (p.u. + j*p.u.)
+        
+        # Calculate currents: I = Ybus * V
+        # Units: Ybus is in per-unit admittance, V is in per-unit, so I is in per-unit current
+        I = torch.einsum('bij,bj->bi', Ybus.cfloat(), V)  # [batch_size, num_buses] - Complex current (p.u. + j*p.u.)
+        
+        # Calculate power injections: S = V * conj(I)
+        # Units: S = V*conj(I) where V and I are in per-unit, so S is in per-unit power
+        S_inj = V * torch.conj(I)  # [batch_size, num_buses] - Complex power injection (p.u. + j*p.u.)
+        p_inj = S_inj.real  # [batch_size, num_buses] - Real power injection in per-unit (p.u.)
+        
+        # Total generation from predicted state (positive injections)
+        # Units: p_inj is in per-unit, so p_gen_total_pred is in per-unit
+        p_gen_total_pred = torch.sum(F.relu(p_inj), dim=-1)  # [batch_size] - Total generation in per-unit (p.u.)
+        # Convert generation from per-unit to MW: multiply by system base power (S_base in MVA)
+        p_gen_total_pred_mw = p_gen_total_pred * self.s_base_mva  # [batch_size] - Total generation in MW (physical units)
+        
+        # Get renewable fraction from measurements (to determine conventional vs renewable split)
+        # Format: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas]
+        # Units: All power measurements are in MW (physical units from data generation)
+        p_ren_mw_meas = measurements[..., 6]  # [batch_size, num_buses] - Renewable generation in MW
+        p_conv_mw_meas = measurements[..., 4]  # [batch_size, num_buses] - Conventional generation in MW
+        total_ren_meas = torch.sum(p_ren_mw_meas, dim=-1)  # [batch_size] - Total renewable in MW
+        total_conv_meas = torch.sum(p_conv_mw_meas, dim=-1)  # [batch_size] - Total conventional in MW
+        total_gen_meas = total_ren_meas + total_conv_meas  # [batch_size] - Total generation in MW
+        
+        # Calculate renewable fraction from measurements (dimensionless ratio)
+        epsilon = 1e-9
+        ren_frac = total_ren_meas / (total_gen_meas + epsilon)  # [batch_size] - Renewable fraction (dimensionless, 0-1)
+        
+        # Apply renewable fraction to predicted total generation
+        # Units: p_gen_total_pred_mw is in MW, ren_frac is dimensionless, so result is in MW
+        total_ren_pred_mw = p_gen_total_pred_mw * ren_frac  # [batch_size] - Renewable generation in MW
+        total_conv_pred_mw = p_gen_total_pred_mw * (1.0 - ren_frac)  # [batch_size] - Conventional generation in MW
+        
+        # External grid: use predicted state to determine import/export
+        # Units: measurements[..., 0] is p_load in MW (physical units)
+        p_load_mw = measurements[..., 0]  # [batch_size, num_buses] - Load in MW (known from measurements)
+        p_load_total = torch.sum(p_load_mw, dim=-1)  # [batch_size] - Total load in MW
+        
+        # Net power needed = load - renewable generation
+        # Units: Both in MW, so result is in MW
+        p_net_needed = p_load_total - total_ren_pred_mw  # [batch_size] - Net power needed in MW
+        
+        # External grid import = max(0, net_power_needed - conventional_generation)
+        # If conventional generation is insufficient, import from grid
+        # Units: Both terms in MW, so result is in MW
+        p_ext_import_pred = F.relu(p_net_needed - total_conv_pred_mw)  # [batch_size] - External grid import in MW
+        
+        # Total carbon-emitting generation = conventional + grid imports
+        # Units: Both in MW, so result is in MW
+        total_carbon_emitting_gen = total_conv_pred_mw + p_ext_import_pred  # [batch_size] - Carbon-emitting generation in MW
+        total_renewable_gen = total_ren_pred_mw  # [batch_size] - Renewable generation in MW
+        
+        # Carbon intensity and energy coefficient are dimensionless ratios
+        carbon_intensity = time_carbon_coeff.squeeze(-1) if time_carbon_coeff.dim() > 1 else time_carbon_coeff  # [batch_size] - Dimensionless
+        energy_coefficient = time_energy_coeff.squeeze(-1) if time_energy_coeff.dim() > 1 else time_energy_coeff  # [batch_size] - Dimensionless
+        
+        # Raw emissions: (MW * dimensionless) / dimensionless = MW (but represents tCO2)
+        # Units: total_carbon_emitting_gen is in MW, carbon_intensity and energy_coefficient are dimensionless
+        raw_emissions = (total_carbon_emitting_gen * carbon_intensity) / (energy_coefficient + 1e-9)  # [batch_size] - Emissions in tCO2
+        total_generation = total_carbon_emitting_gen + total_renewable_gen  # [batch_size] - Total generation in MW
+        
+        # Normalized emissions: fraction of generation that is carbon-emitting
+        # Units: MW / MW = dimensionless ratio (0-1)
+        normalized_emissions = total_carbon_emitting_gen / (total_generation + epsilon)  # [batch_size] - Carbon-emitting fraction (dimensionless, 0-1)
+        
+        return {'raw': raw_emissions, 'normalized': normalized_emissions}

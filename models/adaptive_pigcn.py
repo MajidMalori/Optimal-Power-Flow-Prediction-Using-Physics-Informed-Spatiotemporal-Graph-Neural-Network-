@@ -2,20 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .base_model import BaseModel
+from .base_adaptive_gcn import BaseAdaptiveGCN
+from .professional_gcn_layer import ProfessionalGCNLayer
 
-class StateGraphLayer(nn.Module):
-    def __init__(self, in_features, out_features):
-        super(StateGraphLayer, self).__init__()
-        self.linear = nn.Linear(in_features, out_features)
-
-    def forward(self, x, adj):
-        # x shape: [batch_size, num_nodes, in_features]
-        # adj shape: [batch_size, num_nodes, num_nodes]
-        support = torch.bmm(adj, x) # Message passing
-        output = self.linear(support) # Transformation
-        return output
-
-class AdaptivePIGCN(BaseModel):
+class AdaptivePIGCN(BaseModel, BaseAdaptiveGCN):
     def __init__(self, feature_dim: int = 10, hidden_dim: int = 64,
                  num_gc_layers: int = 3, num_buses: int = 118, dropout: float = 0.3,
                  embedding_dim: int = 16, phi: float = 0.5, config=None, normalizer=None):
@@ -48,25 +38,30 @@ class AdaptivePIGCN(BaseModel):
         # Total output dimension for BaseModel (flattened)
         total_output_dim = num_buses * self.output_features_per_bus
         
-        super().__init__(feature_dim=feature_dim, hidden_dim=hidden_dim,
+        # Initialize nn.Module first
+        nn.Module.__init__(self)
+        
+        # Mark that we're handling initialization manually (for BaseModel.__init__)
+        self._skip_super_init = True
+        
+        # Initialize BaseAdaptiveGCN first (it won't call super due to _skip_super_init flag)
+        BaseAdaptiveGCN.__init__(self, num_buses=num_buses, embedding_dim=embedding_dim, phi=phi)
+        
+        # Then initialize BaseModel (it won't call super due to _skip_super_init flag)
+        BaseModel.__init__(self, feature_dim=feature_dim, hidden_dim=hidden_dim,
                         output_dim=total_output_dim, num_gc_layers=num_gc_layers,
                         num_buses=num_buses, physics_informed=True)
 
-        self.phi = phi
-        self.num_buses = num_buses
         self.feature_dim = feature_dim  # Legacy compatibility
-
-        # --- Adaptive Graph Learning Components ---
-        self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        self.node_embedding2 = nn.Parameter(torch.randn(num_buses, embedding_dim))
         
-        # --- Graph Convolution Layers (shared between both heads if twin) ---
+        # --- Graph Convolution Layers (Professional GCN with self-loops and normalization) ---
         self.gc_layers = nn.ModuleList()
         assert self.input_dim == feature_dim, f"Input dim mismatch: {self.input_dim} != {feature_dim}"
-        self.gc_layers.append(StateGraphLayer(self.input_dim, hidden_dim))
+        # First layer: feature_dim -> hidden_dim
+        self.gc_layers.append(ProfessionalGCNLayer(self.input_dim, hidden_dim, bias=True, activation='relu'))
         # Subsequent layers: hidden_dim -> hidden_dim
         for _ in range(num_gc_layers - 1):
-            self.gc_layers.append(StateGraphLayer(hidden_dim, hidden_dim))
+            self.gc_layers.append(ProfessionalGCNLayer(hidden_dim, hidden_dim, bias=True, activation='relu'))
 
         # --- Batch Normalization Layers ---
         self.batch_norms = nn.ModuleList([
@@ -98,30 +93,22 @@ class AdaptivePIGCN(BaseModel):
         batch_size = x.size(0)
 
         # --- 1. Construct the Adaptive Adjacency Matrix ---
-        # Learned (data-driven) adjacency matrix
-        learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
-        
-        # Adjacency matrix is guaranteed to be 3D [batch_size, num_buses, num_buses] from data loader
-        static_adj_batch = static_adj
-            
-        # Create learned adjacency batch: [batch_size, num_buses, num_buses]
-        # learned_adj is [num_buses, num_buses], expand to [batch_size, num_buses, num_buses]
-        learned_adj_batch = learned_adj.unsqueeze(0).repeat(batch_size, 1, 1)
-        
-        # Combine the static and learned matrices
-        adaptive_adj = self.phi * static_adj_batch + (1 - self.phi) * learned_adj_batch
+        # Use base class method to compute adaptive adjacency (normalizes the combined matrix)
+        adaptive_adj = self.compute_adaptive_adjacency(static_adj, batch_size, normalize=True)
 
-        # --- 2. Graph Convolution Layers (shared feature extraction) ---
+        # --- 2. Graph Convolution Layers (Professional GCN with self-loops and normalization) ---
         for i, gc_layer in enumerate(self.gc_layers):
-            x = gc_layer(x, adaptive_adj)
+            # ProfessionalGCNLayer: A_norm @ (x @ weight) + bias, then ReLU
+            # adaptive_adj is already normalized by compute_adaptive_adjacency
+            x = gc_layer(x, adaptive_adj, is_pre_normalized=True)  # [batch_size, num_buses, hidden_dim]
             
-            # The output of StateGraphLayer is [batch, nodes, features].
-            # BatchNorm1d expects [batch, features, length (nodes)].
-            x = x.transpose(1, 2)
+            # BatchNorm1d expects [batch, features, length (nodes)]
+            x = x.transpose(1, 2)  # [batch_size, hidden_dim, num_buses]
             x = self.batch_norms[i](x)
-            x = x.transpose(1, 2)
+            x = x.transpose(1, 2)  # [batch_size, num_buses, hidden_dim]
             
-            x = F.relu(x)
+            # ReLU is already applied in ProfessionalGCNLayer, but we keep it here for safety
+            # (ProfessionalGCNLayer applies ReLU internally, so this is redundant but harmless)
             
             if i < len(self.gc_layers) - 1:
                 x = self.dropout_layer(x)

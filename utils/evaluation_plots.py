@@ -43,8 +43,24 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
     if bus_types is None:
         raise ValueError("bus_types is required for OPF mode predicted vs actual plots")
     
-    # Create 2x3 grid: 2 rows (var1, var2) x 3 columns (PQ, PV, Slack)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # FIXED: Only iterate over available bus types (cleaner than checking each one)
+    from utils.bus_type_eda import get_available_bus_types
+    has_pq, has_pv, has_slack = get_available_bus_types(bus_types)
+    
+    # Build list of available bus types
+    available_bus_types = []
+    if has_pq:
+        available_bus_types.append((0, 'PQ'))
+    if has_pv:
+        available_bus_types.append((1, 'PV'))
+    if has_slack:
+        available_bus_types.append((2, 'Slack'))
+    
+    # Create grid based on available types: 2 rows x N columns
+    num_cols = len(available_bus_types) if available_bus_types else 1
+    fig, axes = plt.subplots(2, num_cols, figsize=(6 * num_cols, 12))
+    if num_cols == 1:
+        axes = axes.reshape(-1, 1)  # Ensure 2D array
     fig.suptitle(f'Predicted vs. Actual - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
                  fontsize=16, fontweight='bold')
     
@@ -55,23 +71,10 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
         2: {'var1': 'Active Power (p.u.)', 'var2': 'Reactive Power (p.u.)'}  # Slack
     }
     
-    for bus_type_code, bus_type_name in [(0, 'PQ'), (1, 'PV'), (2, 'Slack')]:
-        col = bus_type_code
-        
+    # Only iterate over available bus types
+    for col_idx, (bus_type_code, bus_type_name) in enumerate(available_bus_types):
         # Create mask for this bus type
         bus_type_mask = (bus_types == bus_type_code)  # [n_samples, n_buses]
-        
-        if not np.any(bus_type_mask):
-            # No buses of this type
-            axes[0, col].text(0.5, 0.5, f'No {bus_type_name} buses', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[0, col].axis('off')
-            axes[1, col].text(0.5, 0.5, f'No {bus_type_name} buses', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[1, col].axis('off')
-            continue
         
         # Extract predictions and targets for this bus type
         pred_var1_list = []
@@ -88,14 +91,7 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
                 targ_var2_list.append(targets[sample_idx, sample_bus_mask, 1])
         
         if len(pred_var1_list) == 0:
-            axes[0, col].text(0.5, 0.5, f'No {bus_type_name} data', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[0, col].axis('off')
-            axes[1, col].text(0.5, 0.5, f'No {bus_type_name} data', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[1, col].axis('off')
+            # This shouldn't happen since we only iterate over available types, but safety check
             continue
         
         # Concatenate all values
@@ -105,7 +101,7 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
         targ_var2 = np.concatenate(targ_var2_list)
         
         # Row 0: Variable 1
-        ax = axes[0, col]
+        ax = axes[0, col_idx]
         ax.scatter(targ_var1, pred_var1, alpha=0.5, s=10)
         # Perfect prediction line (y=x)
         min_val = min(targ_var1.min(), pred_var1.min())
@@ -127,7 +123,7 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
             pass
         
         # Row 1: Variable 2
-        ax = axes[1, col]
+        ax = axes[1, col_idx]
         ax.scatter(targ_var2, pred_var2, alpha=0.5, s=10)
         # Perfect prediction line (y=x)
         min_val = min(targ_var2.min(), pred_var2.min())
@@ -152,7 +148,8 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
     
     # Save plot
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, 'predicted_vs_actual.png')
+    filename = f'{model_name}_predicted_vs_actual.png' if model_name else 'predicted_vs_actual.png'
+    save_path = os.path.join(output_dir, filename)
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -174,8 +171,24 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
     if bus_types is None:
         raise ValueError("bus_types is required for OPF mode error distribution plots")
     
-    # Create 2x3 grid: 2 rows (var1, var2) x 3 columns (PQ, PV, Slack)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # FIXED: Only iterate over available bus types
+    from utils.bus_type_eda import get_available_bus_types
+    has_pq, has_pv, has_slack = get_available_bus_types(bus_types)
+    
+    # Build list of available bus types
+    available_bus_types = []
+    if has_pq:
+        available_bus_types.append((0, 'PQ'))
+    if has_pv:
+        available_bus_types.append((1, 'PV'))
+    if has_slack:
+        available_bus_types.append((2, 'Slack'))
+    
+    # Create grid based on available types: 2 rows x N columns
+    num_cols = len(available_bus_types) if available_bus_types else 1
+    fig, axes = plt.subplots(2, num_cols, figsize=(6 * num_cols, 12))
+    if num_cols == 1:
+        axes = axes.reshape(-1, 1)  # Ensure 2D array
     fig.suptitle(f'Error Distributions - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
                  fontsize=16, fontweight='bold')
     
@@ -186,22 +199,10 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
         2: {'var1': 'Active Power Error (p.u.)', 'var2': 'Reactive Power Error (p.u.)'}  # Slack
     }
     
-    for bus_type_code, bus_type_name in [(0, 'PQ'), (1, 'PV'), (2, 'Slack')]:
-        col = bus_type_code
-        
+    # Only iterate over available bus types
+    for col_idx, (bus_type_code, bus_type_name) in enumerate(available_bus_types):
         # Create mask for this bus type
         bus_type_mask = (bus_types == bus_type_code)
-        
-        if not np.any(bus_type_mask):
-            axes[0, col].text(0.5, 0.5, f'No {bus_type_name} buses', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[0, col].axis('off')
-            axes[1, col].text(0.5, 0.5, f'No {bus_type_name} buses', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[1, col].axis('off')
-            continue
         
         # Extract errors for this bus type
         errors_var1_list = []
@@ -216,14 +217,7 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
                 errors_var2_list.append(errors_var2)
         
         if len(errors_var1_list) == 0:
-            axes[0, col].text(0.5, 0.5, f'No {bus_type_name} data', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[0, col].axis('off')
-            axes[1, col].text(0.5, 0.5, f'No {bus_type_name} data', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[1, col].axis('off')
+            # This shouldn't happen since we only iterate over available types, but safety check
             continue
         
         # Concatenate all errors
@@ -231,7 +225,7 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
         errors_var2 = np.concatenate(errors_var2_list)
         
         # Row 0: Variable 1 errors
-        ax = axes[0, col]
+        ax = axes[0, col_idx]
         ax.hist(errors_var1, bins=50, alpha=0.7, edgecolor='black')
         ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero Error')
         ax.axvline(x=np.mean(errors_var1), color='g', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors_var1):.6f}')
@@ -248,7 +242,7 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
         # Row 1: Variable 2 errors
-        ax = axes[1, col]
+        ax = axes[1, col_idx]
         ax.hist(errors_var2, bins=50, alpha=0.7, edgecolor='black')
         ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero Error')
         ax.axvline(x=np.mean(errors_var2), color='g', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors_var2):.6f}')
@@ -268,7 +262,8 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
     
     # Save plot
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, 'error_distributions.png')
+    filename = f'{model_name}_error_distributions.png' if model_name else 'error_distributions.png'
+    save_path = os.path.join(output_dir, filename)
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -334,8 +329,24 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
     sigma_var2 = sigma_var2.numpy()
     targets_np = targets_tensor.numpy()
     
-    # Create 2x3 grid: 2 rows (var1, var2) x 3 columns (PQ, PV, Slack)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # FIXED: Only iterate over available bus types
+    from utils.bus_type_eda import get_available_bus_types
+    has_pq, has_pv, has_slack = get_available_bus_types(bus_types)
+    
+    # Build list of available bus types
+    available_bus_types = []
+    if has_pq:
+        available_bus_types.append((0, 'PQ'))
+    if has_pv:
+        available_bus_types.append((1, 'PV'))
+    if has_slack:
+        available_bus_types.append((2, 'Slack'))
+    
+    # Create grid based on available types: 2 rows x N columns
+    num_cols = len(available_bus_types) if available_bus_types else 1
+    fig, axes = plt.subplots(2, num_cols, figsize=(6 * num_cols, 12))
+    if num_cols == 1:
+        axes = axes.reshape(-1, 1)  # Ensure 2D array
     fig.suptitle(f'Calibration Diagram (Reliability) - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
                  fontsize=16, fontweight='bold')
     
@@ -349,22 +360,10 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
     # Confidence levels to test (from 10% to 90%)
     confidence_levels = np.arange(0.1, 1.0, 0.1)
     
-    for bus_type_code, bus_type_name in [(0, 'PQ'), (1, 'PV'), (2, 'Slack')]:
-        col = bus_type_code
-        
+    # Only iterate over available bus types
+    for col_idx, (bus_type_code, bus_type_name) in enumerate(available_bus_types):
         # Create mask for this bus type
         bus_type_mask = (bus_types == bus_type_code)
-        
-        if not np.any(bus_type_mask):
-            axes[0, col].text(0.5, 0.5, f'No {bus_type_name} buses', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[0, col].axis('off')
-            axes[1, col].text(0.5, 0.5, f'No {bus_type_name} buses', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[1, col].axis('off')
-            continue
         
         # Extract predictions, uncertainties, and targets for this bus type
         mu_var1_list = []
@@ -385,14 +384,7 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
                 targ_var2_list.append(targets_np[sample_idx, sample_bus_mask, 1])
         
         if len(mu_var1_list) == 0:
-            axes[0, col].text(0.5, 0.5, f'No {bus_type_name} data', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[0, col].axis('off')
-            axes[1, col].text(0.5, 0.5, f'No {bus_type_name} data', 
-                            ha='center', va='center', fontsize=12,
-                            bbox=dict(boxstyle='round', facecolor='lightgray'))
-            axes[1, col].axis('off')
+            # This shouldn't happen since we only iterate over available types, but safety check
             continue
         
         # Concatenate all values
@@ -404,7 +396,7 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
         targ_var2_flat = np.concatenate(targ_var2_list)
         
         # Row 0: Variable 1 calibration
-        ax = axes[0, col]
+        ax = axes[0, col_idx]
         actual_coverage = []
         for conf_level in confidence_levels:
             # Calculate z-score for this confidence level (two-tailed)
@@ -429,7 +421,7 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
         ax.set_ylim([0, 1])
         
         # Row 1: Variable 2 calibration
-        ax = axes[1, col]
+        ax = axes[1, col_idx]
         actual_coverage = []
         for conf_level in confidence_levels:
             z_score = norm.ppf(0.5 + conf_level / 2.0)

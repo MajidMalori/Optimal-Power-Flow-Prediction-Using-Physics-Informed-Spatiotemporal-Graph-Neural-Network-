@@ -27,11 +27,20 @@ def check_gpu_memory():
     }
 
 def clear_gpu_memory():
-    """Clear GPU memory cache"""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        gc.collect()
+    """
+    Clear GPU memory cache - ONLY call when actually hitting OOM errors.
+    
+    WARNING: Do NOT call this frequently - it forces CPU-GPU synchronization
+    and pauses execution. PyTorch's allocator manages memory efficiently.
+    Only use this when swapping models or when actually hitting OOM.
+    """
+    # REMOVED: Aggressive cleanup slows down training significantly
+    # Only clear cache if actually needed (OOM errors)
+    # if torch.cuda.is_available():
+    #     torch.cuda.empty_cache()
+    #     torch.cuda.synchronize()
+    #     gc.collect()
+    pass
 
 def log_memory_usage(stage_name):
     """Log memory usage at different stages"""
@@ -63,35 +72,38 @@ def get_adaptive_batch_size(num_buses, base_batch_size=32, use_gradient_accumula
             return base_batch_size  # Small systems: full batches (no change)
 
 def cleanup_bus_system_data():
-    """Clean up data between bus systems to free memory"""
-    global _features, _adjacency, _ybus_matrices, _targets
-    global _energy_coeffs, _carbon_coeffs, _renewable_fractions
+    """
+    Clean up data between bus systems to free memory.
     
-    # Clear large data structures
-    if '_features' in globals():
-        del _features
+    REMOVED: Aggressive gc.collect() and empty_cache() - these slow down execution.
+    Only clear references - let Python's GC handle the rest naturally.
+    """
+    global _file_metadata, _adjacency, _ybus_metadata, _normalizer
+    
+    # Clear data structures (metadata is lightweight, but clear for consistency)
+    if '_file_metadata' in globals():
+        del _file_metadata
     if '_adjacency' in globals():
         del _adjacency
-    if '_ybus_matrices' in globals():
-        del _ybus_matrices
-    if '_targets' in globals():
-        del _targets
-    if '_energy_coeffs' in globals():
-        del _energy_coeffs
-    if '_carbon_coeffs' in globals():
-        del _carbon_coeffs
-    if '_renewable_fractions' in globals():
-        del _renewable_fractions
+    if '_ybus_metadata' in globals():
+        del _ybus_metadata
+    if '_normalizer' in globals():
+        del _normalizer
     
-    # Force garbage collection
-    gc.collect()
+    # REMOVED: Force garbage collection - slows down execution
+    # gc.collect()
     
-    # Clear GPU cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # REMOVED: Clear GPU cache - only needed if actually hitting OOM
+    # if torch.cuda.is_available():
+    #     torch.cuda.empty_cache()
 
 def cleanup_model_resources(model, trainer, optimizer, criterion):
-    """Clean up model resources between different models"""
+    """
+    Clean up model resources between different models.
+    
+    REMOVED: Aggressive gc.collect() and empty_cache() - these slow down execution.
+    Only clear references - let Python's GC handle the rest naturally.
+    """
     # Delete model and related objects
     if model is not None:
         del model
@@ -102,12 +114,12 @@ def cleanup_model_resources(model, trainer, optimizer, criterion):
     if criterion is not None:
         del criterion
     
-    # Force garbage collection
-    gc.collect()
+    # REMOVED: Force garbage collection - slows down execution significantly
+    # gc.collect()
     
-    # Clear GPU cache
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # REMOVED: Clear GPU cache - only needed if actually hitting OOM
+    # if torch.cuda.is_available():
+    #     torch.cuda.empty_cache()
 
 def enable_gradient_checkpointing(model):
     """Enable gradient checkpointing for memory efficiency"""
@@ -159,7 +171,7 @@ from utils.data_profile_story import analyze_data_profiles
 from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
 from utils.evaluate_robustness import evaluate_model_robustness
 from trainers.model_trainer import PowerSystemTrainer
-from config import Config, Args
+from config import Config
 
 
 def setup_logging(log_path: str):
@@ -213,20 +225,22 @@ def main():
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         print("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
-    # Initialize arguments from centralized config
-    args = Args()
+    # FIXED: Load configuration from YAML (single source of truth)
+    # Args class has been removed - all settings come from YAML
     base_config = Config(
-        data_mode=args.data_mode, 
-        save_results=args.save_results, 
-        train_timesteps=Args.train_timesteps,
-        test_timesteps=args.test_timesteps, 
-        clear_results=args.clear_results,
-        hours_per_day=args.hours_per_day,
-        sequence_length=args.sequence_length
+        yaml_config_path='config.yaml',
+        load_yaml=True,
+        data_mode=getattr(Config, 'data_mode', 'test'),
+        save_results=getattr(Config, 'save_results', True),
+        train_timesteps=getattr(Config, 'train_timesteps', 12000),
+        test_timesteps=getattr(Config, 'test_timesteps', 960),
+        clear_results=getattr(Config, 'clear_results', True),
+        hours_per_day=24,  # Standard value
+        sequence_length=5   # Standard value
     )
     _config_instance = base_config  # Store for signal handler
     
-    # Parse bus systems to test
+    # Parse bus systems to test (from Config, not Args)
     def parse_bus_systems(bus_systems_arg):
         """Parse bus systems argument and return list of bus numbers to test."""
         if bus_systems_arg.lower() == 'all':
@@ -246,54 +260,93 @@ def main():
                     print(f"Warning: Invalid bus system '{bus_str}'. Skipping.")
             return bus_list if bus_list else base_config.NUM_BUSES
     
-    bus_systems_to_test = parse_bus_systems(args.bus_systems)
+    bus_systems_to_test = parse_bus_systems(getattr(Config, 'bus_systems', 'all'))
     
     # Track all results for comprehensive summary
     all_results = []
     
     # STEP 1: Concise run information (one line)
     run_info = base_config.get_run_info()
-    actual_timesteps = base_config.DATA_MODE_TIMESTEPS[args.data_mode]
+    data_mode = getattr(Config, 'data_mode', 'test')
+    actual_timesteps = base_config.DATA_MODE_TIMESTEPS[data_mode]
     
     # STEP 2: Validate data before training
     if not validate_data_before_training(base_config, bus_systems_to_test):
         print("Data validation failed. Exiting training.")
         return
     
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    # STEP 2.5: Generate all data plots BEFORE training (consolidated in one folder)
+    if base_config.PLOT_DATA_INFO:
+        try:
+            from utils.plot_consolidator import generate_all_data_plots
+            data_plots_dir = os.path.join(base_config.CURRENT_RUN_DIR, 'data_plots')
+            all_plot_paths = generate_all_data_plots(
+                config=base_config,
+                bus_systems=bus_systems_to_test,
+                data_plots_dir=data_plots_dir
+            )
+            print(f"All data plots saved to: {data_plots_dir}\n")
+        except Exception as e:
+            print(f"Warning: Could not generate consolidated data plots: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    seed = getattr(Config, 'SEED', 42)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     
     # === DEVICE AND PARALLEL CONFIGURATION ===
-    device, device_reason = get_safe_device(args.force_cpu, min_free_memory_gb=2.0)
+    force_cpu = getattr(Config, 'force_cpu', False)
+    device, device_reason = get_safe_device(force_cpu, min_free_memory_gb=2.0)
+    
+    # Store Config attributes for later use (replaces args object)
+    _config_attrs = {
+        'use_mosoa': getattr(Config, 'use_mosoa', True),
+        'save_results': getattr(Config, 'save_results', True),
+        'clear_results': getattr(Config, 'clear_results', True),
+    }
     is_gpu = device.type == 'cuda'
     clear_gpu_memory()
     
-    def get_optimal_workers():
-        if is_gpu and torch.cuda.is_available():
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            return gpu_memory, torch.cuda.get_device_name(0), 8 if gpu_memory >= 12 else (6 if gpu_memory >= 8 else 4)
-        else:
-            import psutil
-            cpu_count = psutil.cpu_count(logical=True)
-            memory_gb = psutil.virtual_memory().total / (1024**3)
-            workers = 4 if cpu_count >= 8 else (cpu_count - 1 if cpu_count >= 4 else (cpu_count if cpu_count >= 2 else 1))
-            return memory_gb, f"CPU {cpu_count}c", workers
+    # --- Device & Worker Auto-Configuration (Professional GPU Optimization) ---
+    # Auto-configure NUM_WORKERS based on CPU cores (heuristic: half cores, capped at 8)
+    data_workers_config = getattr(Config, 'data_workers', 'auto')
+    if data_workers_config == 'auto':
+        try:
+            cpu_cores = os.cpu_count()
+            # Heuristic: use half the CPU cores, but cap at 8 to avoid overhead
+            base_config.NUM_WORKERS = min(cpu_cores // 2, 8) if cpu_cores else 2
+        except:
+            base_config.NUM_WORKERS = 2  # Fallback
+    else:
+        base_config.NUM_WORKERS = data_workers_config
     
-    hw_size, hw_name, data_workers = get_optimal_workers()
-    data_workers = data_workers if args.data_workers == 'auto' else args.data_workers
-    base_config.NUM_WORKERS = data_workers if args.parallel_data_loading else 0
+    # Ensure parallel_data_loading setting is respected
+    parallel_data_loading = getattr(Config, 'parallel_data_loading', True)
+    if not parallel_data_loading:
+        base_config.NUM_WORKERS = 0
     
-    # Single concise line with all startup info
-    print(f"RUN: {run_info['run_id']} | {args.test_config} | {args.data_mode.upper()}({actual_timesteps}) | Buses: {bus_systems_to_test} | {hw_name}({hw_size:.1f}GB) | {base_config.NUM_WORKERS}w")
+    # Get GPU info for startup printout
+    if device.type == 'cuda' and torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        device_info = f"CUDA ({gpu_name}, {gpu_memory_gb:.1f}GB)"
+    else:
+        device_info = "CPU"
+    
+    # Single concise line with all startup info (enhanced with GPU details)
+    test_config = getattr(Config, 'test_config', 'all')
+    print(f"RUN: {run_info['run_id']} | Config: {test_config} | Mode: {data_mode.upper()} | Buses: {bus_systems_to_test} | Device: {device_info} | Workers: {base_config.NUM_WORKERS}")
 
     # Get model configurations from config
     model_class_map = base_config.get_model_class_map()
     model_config_map = base_config.model_config_map
-    models_to_test = base_config.get_models_to_test(args.test_config)
+    models_to_test = base_config.get_models_to_test(test_config)
     
     # Filter models based on user selection
-    if args.models_to_train != 'all':
-        selected_models = [m.strip() for m in args.models_to_train.split(',')]
+    models_to_train = getattr(Config, 'models_to_train', 'all')
+    if models_to_train != 'all':
+        selected_models = [m.strip() for m in models_to_train.split(',')]
         models_to_test = [m for m in models_to_test if m in selected_models]
         print(f"Selected models to train: {models_to_test}")
         if not models_to_test:
@@ -319,34 +372,16 @@ def main():
         base_config.CASE_NAME = case_name
         try:
             data_tuple = load_power_system_data(base_config, case_name)
-            _features, _adjacency, _ybus_matrices, _targets, _bus_types, _energy_coeffs, _carbon_coeffs, _renewable_fractions, _normalizer = data_tuple
+            # Unpack: (file_metadata, base_adjacency, ybus_metadata, normalizer, topology_cache, topology_ids)
+            if len(data_tuple) == 6:
+                _file_metadata, _adjacency, _ybus_metadata, _normalizer, _topology_cache, _topology_ids = data_tuple
+            else:
+                # Backward compatibility: old format returns 4 items
+                _file_metadata, _adjacency, _ybus_metadata, _normalizer = data_tuple[:4]
+                _topology_cache, _topology_ids = None, None
             
-            # Generate data validation and profile story plots if enabled (saved in bus folders)
-            if base_config.PLOT_DATA_INFO:
-                try:
-                    analyze_data_profiles(
-                        config=base_config,
-                        case_name=case_name,
-                        features=_features,  # Use current data mode (train/test)
-                        normalizer=_normalizer,
-                        renewable_fractions=_renewable_fractions
-                    )
-                except Exception as e:
-                    print(f"  Warning: Could not generate data profile story: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # Generate convergence story if enabled (part of data story)
-                try:
-                    from utils.convergence_story import analyze_convergence_story
-                    analyze_convergence_story(
-                        config=base_config,
-                        case_name=case_name
-                    )
-                except Exception as e:
-                    print(f"  Warning: Could not generate convergence story: {e}")
-                    import traceback
-                    traceback.print_exc()
+            # NOTE: Data plots are now generated BEFORE training starts (consolidated in data_plots folder)
+            # No need to generate plots here during training loop
             
             bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:
@@ -354,9 +389,7 @@ def main():
             continue
 
         for model_name in bus_models_to_test:
-            print(f"\n{'='*60}")
-            print(f"{model_name} on {num_buses}-bus")
-            print(f"{'='*60}")
+            print(f"\n{'='*60}\n{model_name} on {num_buses}-bus\n{'='*60}")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
@@ -388,8 +421,9 @@ def main():
                 run_name = generate_run_name(model_name, params, num_buses, is_sequential)
 
                 try:
-                    if run_config.SAVE_RESULTS:
-                        setup_logging(run_config.get_evaluation_path(f"{num_buses}bus/logs/{run_name}.log"))
+                    # REMOVED: Duplicate logging setup - now handled by base_trainer with consolidated log files
+                    # All logs go to: {num_buses}bus/log/{model_name}_{mode}.log
+                    # Multiple configurations append to the same file with nice separators
                     
                     # Clear GPU memory before starting
                     clear_gpu_memory()
@@ -414,15 +448,14 @@ def main():
                     log_memory_usage(f"Before loading {num_buses}-bus data")
                     
                     loaders = create_data_loaders(
-                        _features, _adjacency, _ybus_matrices, _targets,
-                        _energy_coeffs, _carbon_coeffs, _renewable_fractions, base_config, is_static=(not is_sequential),
-                        bus_types=_bus_types
+                        _file_metadata, _adjacency, _ybus_metadata, _normalizer, base_config, 
+                        is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids
                     )
                     train_loader, val_loader, test_loader = loaders
 
                     # Create model with optimized parameters
-                    # OPF mode: bus_types are required
-                    is_opf_mode = (_bus_types is not None)
+                    # OPF mode: bus_types are required (check if any metadata has bus_types_path)
+                    is_opf_mode = any(meta.get('bus_types_path') for meta in _file_metadata[:10]) if _file_metadata else False
                     model_kwargs = create_model_kwargs(
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph, 
                         model_name=model_name, is_opf_mode=is_opf_mode, config=run_config, normalizer=_normalizer
@@ -450,12 +483,12 @@ def main():
                             print(f"Retrying with reduced batch size: {run_config.BATCH_SIZE}")
                             # Recreate loaders with smaller batch size
                             loaders = create_data_loaders(
-                                _features, _adjacency, _ybus_matrices, _targets, 
-                                _energy_coeffs, _carbon_coeffs, _renewable_fractions, run_config, 
-                                is_static=(not is_sequential), bus_types=_bus_types
+                                _file_metadata, _adjacency, _ybus_metadata, _normalizer, run_config, 
+                                is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids
                             )
                             train_loader, val_loader, test_loader = loaders
                             model = model_class_map[model_name](**model_kwargs).to(device)
+                            # Apply collapse prevention initialization
                         else:
                             raise e
                     
@@ -477,8 +510,25 @@ def main():
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     
-                    # Train the model (pass model_name and num_buses for log file)
-                    trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses)
+                    # Prepare configuration parameters for logging
+                    config_params = {
+                        'learning_rate': learning_rate,
+                        'batch_size': run_config.BATCH_SIZE,
+                        'gradient_accumulation_steps': getattr(run_config, 'GRADIENT_ACCUMULATION_STEPS', 1),
+                        'num_epochs': run_config.NUM_EPOCHS,
+                        'early_stopping_patience': getattr(run_config, 'EARLY_STOPPING_PATIENCE', 10),
+                    }
+                    # Add model-specific parameters
+                    for key, value in params.items():
+                        config_params[key] = value
+                    
+                    # Print configuration at TOP (before training starts) - one-liner
+                    config_str = ", ".join([f"{k}={v:.6f}" if isinstance(v, float) else f"{k}={v}" 
+                                           for k, v in sorted(config_params.items())])
+                    print(f"  Config: {config_str}")
+                    
+                    # Train the model (pass model_name, num_buses, and config_params for consolidated logging)
+                    trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses, config_params=config_params)
 
                     # Get validation metrics for hyperparameter optimization (use normalized data like training)
                     val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
@@ -486,7 +536,7 @@ def main():
                     # Get test metrics for final evaluation
                     test_metrics = evaluate_model(model, test_loader, device, run_config, _normalizer, is_sequential)
 
-                    # Calculate total loss for optimization using validation metrics
+                    # Calculate objective score for MoSOA optimization (uses Validation MSE, not total_loss)
                     total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
 
                     # Store the training history with the results
@@ -520,7 +570,9 @@ def main():
                     return total_loss
                     
                 except Exception as e:
-                    logging.error(f"Run {run_name} failed: {e}", exc_info=True)
+                    # Sanitize error message for Windows encoding compatibility
+                    error_msg = str(e).replace('η', 'eta').replace('δ', 'delta').replace('σ', 'sigma').replace('λ', 'lambda')
+                    logging.error(f"Run {run_name} failed: {error_msg}", exc_info=True)
                     return float('inf')
                 finally:
                     # Clean up model and memory
@@ -532,7 +584,8 @@ def main():
                     )
                     log_memory_usage(f"After {model_name} training")
 
-            if args.use_mosoa:
+            use_mosoa = getattr(Config, 'use_mosoa', True)
+            if use_mosoa:
                 print(f"Optimizing with MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
                 best_score, best_position, history, iteration_details = mosoa_optimizer(
                     mosoa_params['num_seagulls'], 
@@ -574,7 +627,7 @@ def main():
 
             # Create model kwargs for best model
             # Detect OPF mode: check if bus_types exist (OPF) vs None (state estimation)
-            is_opf_mode = (_bus_types is not None)
+            is_opf_mode = any(meta.get('bus_types_path') for meta in _file_metadata[:10]) if _file_metadata else False
             model_kwargs_best = create_model_kwargs(
                 model_config, best_params, num_buses, is_sequential, uses_adaptive_graph, 
                 model_name=model_name, is_opf_mode=is_opf_mode, config=best_config, normalizer=_normalizer
@@ -582,9 +635,8 @@ def main():
 
             # Create data loaders for best model
             loaders_best = create_data_loaders(
-                _features, _adjacency, _ybus_matrices, _targets, 
-                _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                is_static=(not is_sequential), bus_types=_bus_types
+                _file_metadata, _adjacency, _ybus_metadata, _normalizer, best_config, 
+                is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids
             )
             _, _, test_loader_best = loaders_best
 
@@ -604,9 +656,8 @@ def main():
                     print(f"Retrying final evaluation with batch size: {best_config.BATCH_SIZE}")
                     # Recreate loaders with smaller batch size
                     loaders_best = create_data_loaders(
-                        _features, _adjacency, _ybus_matrices, _targets, 
-                        _energy_coeffs, _carbon_coeffs, _renewable_fractions, best_config, 
-                        is_static=(not is_sequential), bus_types=_bus_types
+                        _file_metadata, _adjacency, _ybus_metadata, _normalizer, best_config, 
+                        is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids
                     )
                     _, _, test_loader_best = loaders_best
                     model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
@@ -848,7 +899,7 @@ def main():
             'models_tested': [r['model_name'] for r in all_results],
             'total_models': len(all_results),
             'successful_models': len(successful_results),
-            'test_config': args.test_config,
+            'test_config': test_config,
             'best_model': best_model_name,
             'best_score': best_score_val,
             'bus_systems_tested': list(set(r['num_buses'] for r in all_results))
@@ -856,7 +907,8 @@ def main():
         
         base_config.finalize_run(run_summary)
     else:
-        base_config.finalize_run({'status': 'no_results', 'test_config': args.test_config})
+        test_config = getattr(base_config, 'test_config', 'all')
+        base_config.finalize_run({'status': 'no_results', 'test_config': test_config})
 
 
 def signal_handler_legacy(signum, _):
@@ -892,10 +944,12 @@ if __name__ == '__main__':
         import traceback
         traceback.print_exc()
     finally:
-        # Ensure clean exit
+        # Clean exit - only do minimal cleanup (final exit is fine to do GC)
+        # Note: This is OK at final exit, but not during training loops
         import gc
-        gc.collect()
+        gc.collect()  # OK at final exit
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+
+            torch.cuda.empty_cache()  # OK at final exit
         print("\nTraining script completed")
         sys.exit(0)

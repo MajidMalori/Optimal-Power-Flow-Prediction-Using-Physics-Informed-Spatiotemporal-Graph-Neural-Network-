@@ -57,17 +57,59 @@ class BaseTrainer(ABC):
         """Logic for a single validation epoch. Must be implemented by subclasses."""
         raise NotImplementedError
 
-    def train(self, train_loader, val_loader, model_name=None, num_buses=None):
-        """Main training loop."""
+    def train(self, train_loader, val_loader, model_name=None, num_buses=None, config_params=None):
+        """Main training loop.
+        
+        Args:
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            model_name: Name of the model
+            num_buses: Number of buses in the system
+            config_params: Dictionary of configuration parameters for this run (for logging)
+        """
         # Initialize training log file if config supports it
         if hasattr(self.config, 'get_training_log_path') and model_name is not None and num_buses is not None:
-            self.log_file_path = self.config.get_training_log_path(num_buses, model_name)
+            # Get mode from config (train/test)
+            mode = getattr(self.config, 'DATA_MODE', 'train')
+            self.log_file_path = self.config.get_training_log_path(num_buses, model_name, mode)
             os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
+            
+            # Check if file exists to determine if we should write header or append separator
+            file_exists = os.path.exists(self.log_file_path)
+            
             # Use UTF-8 encoding to handle Unicode characters (e.g., δ, σ, λ)
-            self.log_file = open(self.log_file_path, 'w', encoding='utf-8')
-            self.log_file.write(f"Training Log for {model_name} ({num_buses}-bus)\n")
-            self.log_file.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            self.log_file.write("=" * 80 + "\n\n")
+            # Use append mode ('a') to accumulate all configurations in one file
+            self.log_file = open(self.log_file_path, 'a', encoding='utf-8')
+            
+            if not file_exists:
+                # First time writing to this file - write header
+                self.log_file.write(f"{'='*80}\n")
+                self.log_file.write(f"Training Log for {model_name} ({num_buses}-bus) - {mode.upper()} Mode\n")
+                self.log_file.write(f"{'='*80}\n")
+                self.log_file.write(f"File created at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                self.log_file.write(f"{'='*80}\n\n")
+            
+            # Write configuration separator for this training run
+            self.log_file.write(f"\n{'#'*80}\n")
+            self.log_file.write(f"# Configuration Run - Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self.log_file.write(f"{'#'*80}\n")
+            
+            # Write configuration parameters if provided
+            if config_params:
+                self.log_file.write(f"\nConfiguration Parameters:\n")
+                self.log_file.write(f"{'-'*80}\n")
+                for key, value in sorted(config_params.items()):
+                    # Format parameter nicely
+                    if isinstance(value, float):
+                        self.log_file.write(f"  {key:30s}: {value:.6f}\n")
+                    elif isinstance(value, int):
+                        self.log_file.write(f"  {key:30s}: {value}\n")
+                    else:
+                        self.log_file.write(f"  {key:30s}: {value}\n")
+                self.log_file.write(f"{'-'*80}\n\n")
+            
+            self.log_file.write(f"Training started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self.log_file.write(f"{'='*80}\n\n")
         else:
             self.log_file = None
         
@@ -127,7 +169,7 @@ class BaseTrainer(ABC):
             if self.scheduler_type == 'CosineAnnealingLR':
                 t_max = getattr(self.config, 'COSINEANNEALINGLR_T_MAX', self.config.NUM_EPOCHS)
                 eta_min = getattr(self.config, 'COSINEANNEALINGLR_ETA_MIN', 1e-6)
-                scheduler_info = f"CosineLR(T_max={t_max}, η_min={eta_min:.2e})"
+                scheduler_info = f"CosineLR(T_max={t_max}, eta_min={eta_min:.2e})"
             else:
                 scheduler_info = "None"
         else:
@@ -137,15 +179,15 @@ class BaseTrainer(ABC):
         if use_eb and self.eb_optimizer is not None:
             eb_info = f" | EB(burn={self.eb_optimizer.burn_in_epochs}, freq={self.eb_optimizer.update_frequency})"
         
-        print(f"[Config] {scheduler_info}{eb_info}")
+        # Log config info to file (not terminal - cleaner training output)
+        _log(f"[Config] {scheduler_info}{eb_info}")
         
         for epoch in range(1, self.config.NUM_EPOCHS + 1):
             # Check for shutdown flag (set by signal handler)
             try:
                 from utils.shutdown_flag import get_shutdown
                 if get_shutdown():
-                    print("\nShutdown signal received. Finishing current epoch...")
-                    _log("Shutdown signal received - graceful exit")
+                    _log("Shutdown signal received - finishing current epoch and exiting gracefully")
                     break
             except:
                 pass  # If check fails, continue training
@@ -154,7 +196,7 @@ class BaseTrainer(ABC):
             
             train_metrics = self._train_epoch(train_loader)
 
-            self.history['train_total_loss'].append(train_metrics['loss'])
+            self.history['train_total_loss'].append(train_metrics['total_loss'])
             self.history['train_mse'].append(train_metrics['mse'])
             self.history['train_mse_var1'].append(train_metrics.get('mse_var1', 0.0))
             self.history['train_mse_var2'].append(train_metrics.get('mse_var2', 0.0))
@@ -169,7 +211,7 @@ class BaseTrainer(ABC):
             
             val_metrics = self._val_epoch(val_loader)
 
-            self.history['val_total_loss'].append(val_metrics['loss'])
+            self.history['val_total_loss'].append(val_metrics['total_loss'])
             self.history['val_mse'].append(val_metrics['mse'])
             self.history['val_mse_var1'].append(val_metrics.get('mse_var1', 0.0))
             self.history['val_mse_var2'].append(val_metrics.get('mse_var2', 0.0))
@@ -248,13 +290,16 @@ class BaseTrainer(ABC):
             # Early stopping: Stop if no improvement for patience epochs
             if self.epochs_no_improve >= self.config.EARLY_STOPPING_PATIENCE:
                 message = f"Early stopping: No improvement for {self.epochs_no_improve} epochs (best at epoch {self.best_epoch})."
-                print(f"\n{message}")
                 _log(message)
                 break
         
         # Close log file if it was opened
+        # Note: Each training run is a separate trainer instance, so closing is safe.
+        # The next configuration will open the file again in append mode and continue.
         if self.log_file:
             self.log_file.write(f"\nTraining completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self.log_file.write(f"{'='*80}\n")
+            self.log_file.flush()
             self.log_file.close()
             self.log_file = None
 

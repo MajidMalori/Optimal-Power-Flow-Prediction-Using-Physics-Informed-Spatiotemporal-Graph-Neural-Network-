@@ -160,51 +160,69 @@ class PowerSystemNormalizer:
             return denormalized_data.numpy()
         return denormalized_data
 
-class PowerSystemDataset(Dataset):
+class PowerSystemLazyDataset(Dataset):
     """
-    Custom PyTorch Dataset for power system time-series data.
-    Handles time-synchronized features, targets, and Ybus matrices.
-    Supports lazy Ybus reconstruction to save memory for large datasets.
+    Professional lazy-loading PyTorch Dataset for power system time-series data.
+    
+    This dataset only stores file paths and metadata, loading data on-demand in __getitem__.
+    This is the scalable, memory-efficient approach for large datasets (e.g., 118-bus with 72K samples).
+    
+    The dataset never holds the full data in RAM - only the specific timestep(s) needed for each batch.
+    
+    PERFORMANCE FIX: Pre-normalized adjacency matrices are cached for all unique topologies.
+    This eliminates redundant normalization operations during training.
     """
-    def __init__(self, features, adjacency_matrix, ybus_matrices, targets, 
-                 time_energy_coeffs, time_carbon_coeffs, renewable_fractions, is_static, sequence_length=1,
-                 hours_per_day=24, bus_types=None):
+    def __init__(self, file_metadata, adjacency_matrix, normalizer, ybus_metadata, 
+                 is_static, sequence_length=1, hours_per_day=24, topology_cache=None, topology_ids=None):
         """
         Args:
+            file_metadata: List of dicts, each containing file paths and metadata for one sample
+            adjacency_matrix: Base adjacency matrix [num_buses, num_buses] (for backward compatibility)
+            normalizer: PowerSystemNormalizer instance (computed once from sample data)
+            ybus_metadata: Dict with 'base_path', 'contingency_timesteps_path', 'contingency_matrices_path', 
+                          and 'contingency_lookup' (dict mapping global timestep -> contingency index)
+            is_static: Whether this is a static model (single timestep) or sequential
+            sequence_length: Length of input sequence for sequential models
             hours_per_day: Number of hours per day (always 24 for time-series mode)
+            topology_cache: Dict mapping topology_id -> pre-normalized adjacency tensor [num_buses, num_buses]
+                          If None, falls back to single pre-normalized base adjacency
+            topology_ids: Array mapping sample index -> topology_id (for lookup in topology_cache)
+                         If None, all samples use topology_id=0 (base)
         """
-        self.features = torch.from_numpy(features).float()
-        self.adjacency = torch.from_numpy(adjacency_matrix).float()
+        self.file_metadata = file_metadata  # List of dicts with file paths and indices
+        self.normalizer = normalizer
+        self.ybus_metadata = ybus_metadata
         self.hours_per_day = hours_per_day
-        
-        # Handle Ybus - either pre-loaded array or lazy reconstruction data
-        if isinstance(ybus_matrices, dict) and 'lazy' in ybus_matrices:
-            # Lazy loading mode for memory efficiency
-            self.ybus_lazy = True
-            self.ybus_base = torch.from_numpy(ybus_matrices['base']).cfloat()
-            self.ybus_contingency_timesteps = ybus_matrices['contingency_timesteps']
-            self.ybus_contingency_matrices = torch.from_numpy(ybus_matrices['contingency_matrices']).cfloat()
-            # Create lookup dict for fast contingency access
-            self.ybus_contingency_lookup = {int(t): i for i, t in enumerate(self.ybus_contingency_timesteps)}
-            self.ybus_matrices = None
-        else:
-            # Pre-loaded mode (for smaller datasets)
-            self.ybus_lazy = False
-            self.ybus_matrices = torch.from_numpy(ybus_matrices).cfloat()
-        
-        self.targets = torch.from_numpy(targets).float()
-        self.bus_types = torch.from_numpy(bus_types).long() if bus_types is not None else None  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
-        self.time_energy_coeffs = torch.from_numpy(time_energy_coeffs).float()
-        self.time_carbon_coeffs = torch.from_numpy(time_carbon_coeffs).float()
-        self.renewable_fractions = torch.from_numpy(renewable_fractions).float()
-        
-        # OPF Approach:
-        # Features: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_meas, va_meas] (10 measurements)
-        # Targets: [var1, var2] bus-type dependent (PQ: [V,θ], PV: [Q,θ], Slack: [P,Q])
-        
         self.is_static = is_static
         self.sequence_length = sequence_length
-        self.num_samples = len(features)
+        self.num_samples = len(file_metadata)
+        
+        # PERFORMANCE FIX: Use topology cache if available, otherwise fall back to single base adjacency
+        if topology_cache is not None and topology_ids is not None:
+            self.topology_cache = topology_cache  # Dict: topology_id -> normalized_adj_tensor
+            self.topology_ids = topology_ids  # Array: sample_idx -> topology_id
+            # Base adjacency is still stored for backward compatibility (but not used if cache exists)
+            self.adjacency = torch.from_numpy(adjacency_matrix).float()
+            # Using topology cache (silent)
+        else:
+            # Fallback: single pre-normalized base adjacency (old behavior)
+            self.topology_cache = None
+            self.topology_ids = None
+            # Pre-normalize the base adjacency once (performance fix)
+            self.adjacency = torch.from_numpy(pre_normalize_adjacency(adjacency_matrix)).float()
+            # Using single pre-normalized base adjacency (silent)
+        
+        # Load Ybus base matrix once (small, can stay in memory)
+        if ybus_metadata and 'base_path' in ybus_metadata:
+            self.ybus_base = torch.from_numpy(np.load(ybus_metadata['base_path'])).cfloat()
+            # Note: Contingency info is now stored per-file in metadata entries, not in global lookup
+            # Keep these for backward compatibility but they're not used
+            self.ybus_contingency_lookup = ybus_metadata.get('contingency_lookup', {})
+            self.ybus_contingency_matrices_path = None  # Not used anymore - each entry has its own path
+        else:
+            self.ybus_base = None
+            self.ybus_contingency_lookup = {}
+            self.ybus_contingency_matrices_path = None
         
     def __len__(self):
         # For static models: all samples are available
@@ -215,45 +233,116 @@ class PowerSystemDataset(Dataset):
             return self.num_samples - self.sequence_length
 
     def __getitem__(self, idx):
+        """
+        Load data on-demand from disk for a single sample or sequence.
+        This is the core of lazy loading - only the needed timestep(s) are loaded.
+        """
         if self.is_static:
-            # For static models, input and target are the same single time step
-            start_idx = idx
-            target_idx = idx
-            features_tensor = self.features[start_idx]
-            target_tensor = self.targets[target_idx]
+            # Static model: load a single time step
+            target_meta = self.file_metadata[idx]
+            target_idx_in_file = target_meta['index_in_file']
+            
+            # Load features for this timestep (copy to make writable for PyTorch)
+            features = np.load(target_meta['features_path'], mmap_mode='r')[target_idx_in_file].copy()
+            features_tensor = torch.from_numpy(features).float()
+            
+            # Load target for this timestep (copy to make writable)
+            targets = np.load(target_meta['targets_path'], mmap_mode='r')[target_idx_in_file].copy()
+            target_tensor = torch.from_numpy(targets).float()
+            
+            # Normalize on-the-fly
+            features_tensor = self.normalizer.normalize(features_tensor.unsqueeze(0)).squeeze(0)
+            target_tensor = self.normalizer.normalize(target_tensor.unsqueeze(0)).squeeze(0)
+            
         else:
-            # For sequential models, the input is a sequence
+            # Sequential model: load a sequence of timesteps
             start_idx = idx
             end_idx = idx + self.sequence_length
-            features_tensor = self.features[start_idx:end_idx]
-            
-            # The target is the single time step immediately following the input sequence
             target_idx = end_idx
-            target_tensor = self.targets[target_idx]
-
-        # Get Ybus matrix - either from pre-loaded array or reconstruct lazily
-        if self.ybus_lazy:
-            # Check if this timestep has a contingency
-            if target_idx in self.ybus_contingency_lookup and len(self.ybus_contingency_matrices) > 0:
-                cont_idx = self.ybus_contingency_lookup[target_idx]
-                if cont_idx < len(self.ybus_contingency_matrices):
-                    ybus_for_item = self.ybus_contingency_matrices[cont_idx]
-                else:
-                    ybus_for_item = self.ybus_base  # Fallback to base Ybus if index is out of bounds
+            
+            # Load features for the sequence (copy to make writable)
+            features_list = []
+            for i in range(start_idx, end_idx):
+                if i < len(self.file_metadata):
+                    meta = self.file_metadata[i]
+                    features = np.load(meta['features_path'], mmap_mode='r')[meta['index_in_file']].copy()
+                    features_list.append(features)
+            
+            # Load target (the timestep immediately following the sequence)
+            if target_idx < len(self.file_metadata):
+                target_meta = self.file_metadata[target_idx]
+                targets = np.load(target_meta['targets_path'], mmap_mode='r')[target_meta['index_in_file']].copy()
+                target_tensor = torch.from_numpy(targets).float()
             else:
-                # Use base Ybus
+                # Fallback if target_idx is out of bounds
+                raise IndexError(f"Target index {target_idx} out of bounds for dataset of size {len(self.file_metadata)}")
+            
+            # Stack features into sequence
+            features_array = np.stack(features_list, axis=0)
+            features_tensor = torch.from_numpy(features_array).float()
+            
+            # Normalize on-the-fly
+            features_tensor = self.normalizer.normalize(features_tensor)
+            target_tensor = self.normalizer.normalize(target_tensor.unsqueeze(0)).squeeze(0)
+        
+        # Get Ybus matrix - lazy load if contingency exists (copy to make writable)
+        # Use per-file contingency info from metadata (not global lookup)
+        if self.ybus_base is not None:
+            # Check if this timestep has a contingency in its file
+            file_contingency_path = target_meta.get('ybus_contingency_matrices_path', None)
+            cont_local_idx = target_meta.get('ybus_contingency_local_idx', None)
+            
+            if file_contingency_path and cont_local_idx is not None and os.path.exists(file_contingency_path):
+                # Load this file's contingency matrices
+                contingency_matrices = np.load(file_contingency_path, mmap_mode='r')
+                # Validate index is within bounds
+                if 0 <= cont_local_idx < contingency_matrices.shape[0]:
+                    ybus_for_item = torch.from_numpy(contingency_matrices[cont_local_idx].copy()).cfloat()
+                else:
+                    # Index out of bounds - this is a data corruption issue, raise error
+                    raise IndexError(
+                        f"Contingency index {cont_local_idx} out of bounds for file '{file_contingency_path}' "
+                        f"(size: {contingency_matrices.shape[0]}). This indicates data corruption or mismatch. "
+                        f"Global timestep: {target_meta.get('global_timestep', idx)}, "
+                        f"File index: {target_meta.get('index_in_file', 'unknown')}"
+                    )
+            else:
+                # Use base Ybus (no contingency for this timestep)
                 ybus_for_item = self.ybus_base
         else:
-            # Pre-loaded mode
-            ybus_for_item = self.ybus_matrices[target_idx]
+            # NO FALLBACK: Ybus is required for physics-informed models
+            raise RuntimeError(
+                f"Ybus base matrix not available for sample {idx}. "
+                f"Ybus metadata was not properly initialized during data loading. "
+                f"This indicates a data loading error."
+            )
         
-        time_energy = self.time_energy_coeffs[target_idx]
-        time_carbon = self.time_carbon_coeffs[target_idx]
-        renewable_fraction = self.renewable_fractions[target_idx]
-
-        # OPF: Targets have 2 features per bus (OPF unknowns, bus-type dependent)
-        # Extract generation components from FEATURES (measurements), not targets
-        # Import feature indices constants (single source of truth)
+        # Load coefficients and metadata
+        energy_coeffs = np.loadtxt(target_meta['energy_path'])
+        carbon_coeffs = np.loadtxt(target_meta['carbon_path'])
+        # Handle both 1D and 2D coefficient arrays
+        if energy_coeffs.ndim == 1:
+            time_energy = energy_coeffs[target_meta['index_in_file']] if len(energy_coeffs) > target_meta['index_in_file'] else energy_coeffs[0]
+        else:
+            time_energy = energy_coeffs[target_meta['index_in_file']]
+        
+        if carbon_coeffs.ndim == 1:
+            time_carbon = carbon_coeffs[target_meta['index_in_file']] if len(carbon_coeffs) > target_meta['index_in_file'] else carbon_coeffs[0]
+        else:
+            time_carbon = carbon_coeffs[target_meta['index_in_file']]
+        
+        renewable_fraction = target_meta['renewable_fraction']
+        
+        # Load bus types on-demand (copy to make writable)
+        bus_types_tensor = None
+        if target_meta.get('bus_types_path') and os.path.exists(target_meta['bus_types_path']):
+            bus_types = np.load(target_meta['bus_types_path'], mmap_mode='r')
+            if bus_types.ndim == 2:
+                bus_types_tensor = torch.from_numpy(bus_types[target_meta['index_in_file']].copy()).long()
+            else:
+                bus_types_tensor = torch.from_numpy(bus_types.copy()).long()
+        
+        # OPF: Extract generation components from FEATURES (measurements)
         from config import FeatureIndices
         
         if features_tensor.dim() == 3:
@@ -262,28 +351,41 @@ class PowerSystemDataset(Dataset):
         else:
             features_last = features_tensor
         
-        ext_grid_gen = features_last[:, FeatureIndices.P_EXT_GRID:FeatureIndices.Q_EXT_GRID+1]  # p_ext, q_ext
-        conventional_gen = features_last[:, FeatureIndices.P_CONV:FeatureIndices.Q_CONV+1]  # p_conv, q_conv
-        renewable_gen = features_last[:, FeatureIndices.P_REN:FeatureIndices.Q_REN+1]  # p_ren, q_ren
+        ext_grid_gen = features_last[:, FeatureIndices.P_EXT_GRID:FeatureIndices.Q_EXT_GRID+1]
+        conventional_gen = features_last[:, FeatureIndices.P_CONV:FeatureIndices.Q_CONV+1]
+        renewable_gen = features_last[:, FeatureIndices.P_REN:FeatureIndices.Q_REN+1]
         
-        # Get bus types for this timestep (OPF: needed for loss calculation)
-        bus_types_tensor = None
-        if self.bus_types is not None:
-            bus_types_tensor = self.bus_types[target_idx]
+        # PERFORMANCE FIX: Get pre-normalized adjacency from cache
+        # NO FALLBACKS: Topology cache is required for new format
+        if self.topology_cache is None or self.topology_ids is None:
+            raise RuntimeError(
+                f"Topology cache not initialized. This indicates a data loading error. "
+                f"Expected topology_cache and topology_ids to be set during data loading."
+            )
+        
+        topology_id = self.topology_ids[idx]
+        if topology_id not in self.topology_cache:
+            raise KeyError(
+                f"Topology ID {topology_id} not found in cache for sample {idx}. "
+                f"Available topology IDs: {list(self.topology_cache.keys())}. "
+                f"This indicates data corruption or mismatch between topology_ids and cache."
+            )
+        
+        adjacency_for_item = self.topology_cache[topology_id]
         
         return {
             'features': features_tensor,
-            'adjacency': self.adjacency,
+            'adjacency': adjacency_for_item,  # Pre-normalized adjacency (from cache or base)
             'ybus_matrix': ybus_for_item,
             'targets': target_tensor,
-            'bus_types': bus_types_tensor,  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
-            'time_energy_coeffs': time_energy,
-            'time_carbon_coeffs': time_carbon,
-            'renewable_fraction': renewable_fraction,
+            'bus_types': bus_types_tensor,
+            'time_energy_coeffs': torch.tensor(time_energy, dtype=torch.float32),
+            'time_carbon_coeffs': torch.tensor(time_carbon, dtype=torch.float32),
+            'renewable_fraction': torch.tensor(renewable_fraction, dtype=torch.float32),
             'ext_grid_gen': ext_grid_gen,
             'conventional_gen': conventional_gen,
             'renewable_gen': renewable_gen,
-            'timestep': target_idx  # Store actual timestep for temporal plotting
+            'timestep': target_meta.get('global_timestep', idx)
         }
 
 # ... all other functions below this line remain the same ...
@@ -297,143 +399,315 @@ def _convert_edge_index_to_adj(edge_index, num_nodes):
     adj[dest_nodes, source_nodes] = 1
     return adj
 
+def pre_normalize_adjacency(adj: np.ndarray) -> np.ndarray:
+    """
+    Pre-compute the symmetrically normalized adjacency matrix with self-loops.
+    
+    This is a CRITICAL performance optimization: for static graph topologies (like power systems),
+    the normalized adjacency matrix is constant and should be computed ONCE during data loading,
+    not millions of times during training.
+    
+    Implements: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
+    Where: A_hat = A + I (adjacency with self-loops)
+    
+    Args:
+        adj: Raw adjacency matrix [num_nodes, num_nodes] (numpy array)
+    
+    Returns:
+        Normalized adjacency matrix [num_nodes, num_nodes] (numpy array, float32)
+    """
+    import torch
+    
+    # Convert to torch tensor for computation
+    adj_tensor = torch.from_numpy(adj).float()
+    num_nodes = adj_tensor.shape[0]
+    
+    # Step 1: Add self-loops (A_hat = A + I)
+    identity = torch.eye(num_nodes, dtype=adj_tensor.dtype)
+    adj_hat = adj_tensor + identity  # [num_nodes, num_nodes]
+    
+    # Step 2: Compute degree matrix D_hat
+    degree = torch.sum(adj_hat, dim=1)  # [num_nodes] - degree of each node
+    
+    # Handle zero-degree nodes (isolated nodes) to avoid division by zero
+    epsilon = 1e-8
+    degree = degree + epsilon
+    
+    # Step 3: Symmetric normalization: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
+    degree_inv_sqrt = torch.pow(degree, -0.5)  # [num_nodes]
+    degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)  # Prevent extreme values
+    
+    # Create diagonal matrix: D_hat^(-0.5)
+    degree_matrix_inv_sqrt = torch.diag(degree_inv_sqrt)  # [num_nodes, num_nodes]
+    
+    # Symmetric normalization: D_hat^(-0.5) @ A_hat @ D_hat^(-0.5)
+    normalized_adj = degree_matrix_inv_sqrt @ adj_hat @ degree_matrix_inv_sqrt  # [num_nodes, num_nodes]
+    
+    # Convert back to numpy (float32 for memory efficiency)
+    return normalized_adj.numpy().astype(np.float32)
+
+def _build_topology_cache_from_ids(file_metadata, base_adjacency, num_buses, case_name, data_dir):
+    """
+    Build topology cache from topology_ids stored in metadata.
+    
+    This is the FULL performance optimization: pre-normalize all unique topologies
+    (base + all contingencies) once during data loading, then use O(1) lookup during training.
+    
+    Args:
+        file_metadata: List of metadata dicts with 'topology_id' for each sample
+        base_adjacency: Base adjacency matrix [num_buses, num_buses]
+        num_buses: Number of buses
+        case_name: Case name (e.g., '33bus') for loading network
+        data_dir: Data directory
+    
+    Returns:
+        topology_cache: Dict mapping topology_id -> pre-normalized adjacency tensor
+        topology_ids: Array mapping sample index -> topology_id
+    """
+    # Extract topology_ids from metadata
+    topology_ids = np.array([meta.get('topology_id', 0) for meta in file_metadata], dtype=np.int32)
+    unique_topology_ids = np.unique(topology_ids)
+    
+    base_count = np.sum(topology_ids == 0)
+    num_contingencies = len(unique_topology_ids) - 1  # Exclude base (ID=0)
+    # Building cache (silent - will print completion)
+    
+    # Pre-normalize base topology
+    topology_cache = {}
+    normalized_base = pre_normalize_adjacency(base_adjacency)
+    topology_cache[0] = torch.from_numpy(normalized_base).float()
+    
+    # Pre-normalize all contingency topologies
+    # NO FALLBACKS: All contingency topologies must be built correctly
+    if len(unique_topology_ids) > 1:
+        # Load pandapower network to modify adjacency for contingencies
+        try:
+            import pandapower.networks as pn
+        except ImportError:
+            raise ImportError(
+                "pandapower is required to build contingency topologies. "
+                "Install with: pip install pandapower"
+            )
+        
+        # Load network for case
+        if '33' in case_name:
+            net = pn.case33bw()
+        elif '57' in case_name:
+            net = pn.case57()
+        elif '118' in case_name:
+            net = pn.case118()
+        else:
+            raise ValueError(
+                f"Unknown case name: {case_name}. Supported cases: 33bus, 57bus, 118bus. "
+                f"Cannot build contingency topologies for unknown case."
+            )
+        
+        from utils.contingency_ybus import modify_adjacency_for_line_outage
+        
+        for topo_id in unique_topology_ids:
+            if topo_id > 0:  # Skip base (already done)
+                line_idx = topo_id - 1
+                
+                # Check if line exists - NO FALLBACK
+                if line_idx not in net.line.index:
+                    raise IndexError(
+                        f"Line index {line_idx} (from topology_id {topo_id}) not found in network {case_name}. "
+                        f"Valid line indices: {list(net.line.index)}. "
+                        f"This indicates data corruption or mismatch between topology_ids and network."
+                    )
+                
+                # Create contingency adjacency
+                contingency_adj = modify_adjacency_for_line_outage(base_adjacency, net, line_idx)
+                # Pre-normalize
+                normalized_cont = pre_normalize_adjacency(contingency_adj)
+                topology_cache[topo_id] = torch.from_numpy(normalized_cont).float()
+    
+    if num_contingencies > 0:
+        print(f"done. Cache: {len(topology_cache)} topologies (base + {num_contingencies} contingencies)", flush=True)
+    else:
+        print(f"done. Cache: {len(topology_cache)} topology (base only)", flush=True)
+    return topology_cache, topology_ids
+
 def load_power_system_data(config, case_name):
-    print(f"[Data] Loading {case_name} scenarios...")
+    """
+    Professional lazy-loading data loader.
+    
+    Creates a metadata manifest instead of loading all data into RAM.
+    Only loads a sample of data for normalization statistics computation.
+    The actual data is loaded on-demand in PowerSystemLazyDataset.__getitem__.
+    """
+    print(f"[Data] Creating lazy data manifest for {case_name}...", end=" ", flush=True)
     data_dir = getattr(config, 'DATA_DIR', './data')
     feature_files = sorted(glob.glob(os.path.join(data_dir, f"{case_name}_features_frac*.npy")))
     if not feature_files:
         raise FileNotFoundError(f"No data files found for pattern: '{case_name}_features_frac*.npy' in '{data_dir}'.")
+    
     try:
         # Extract number of buses from case name
         num_buses = int(''.join(filter(str.isdigit, case_name)))
         
-        # Load adjacency matrix (silently)
-        first_adj_path = feature_files[0].replace('features', 'adjacency')
-        adj_object_array = np.load(first_adj_path, allow_pickle=True)
+        # Load base adjacency matrix (new format: REQUIRED)
+        # NO FALLBACKS: Old format is not supported. Data must be regenerated with new format.
+        first_features_path = feature_files[0]
+        base_adj_path = first_features_path.replace('features', 'base_adjacency')
+        
+        if not os.path.exists(base_adj_path):
+            raise FileNotFoundError(
+                f"REQUIRED: base_adjacency file not found at {base_adj_path}\n"
+                f"The new topology caching system requires base_adjacency files.\n"
+                f"Please regenerate your data using the updated data generation script:\n"
+                f"  python data/gen_meas_best.py test <timesteps>\n"
+                f"Old format (adjacency_array) is no longer supported."
+            )
+        
+        # New format: base_adjacency file exists
+        # Loading base adjacency matrix from new format (silent)
+        adj_object_array = np.load(base_adj_path, allow_pickle=True)
         edge_index = adj_object_array[0]
+        raw_base_adjacency = _convert_edge_index_to_adj(edge_index, num_buses)
+        has_topology_ids = True
         
-        static_adjacency_matrix = _convert_edge_index_to_adj(edge_index, num_buses)
+        if raw_base_adjacency.ndim != 2 or raw_base_adjacency.shape[0] != raw_base_adjacency.shape[1]:
+            raise ValueError(f"Conversion to dense matrix failed. Final shape is not square: {raw_base_adjacency.shape}.")
         
-        if static_adjacency_matrix.ndim != 2 or static_adjacency_matrix.shape[0] != static_adjacency_matrix.shape[1]:
-             raise ValueError(f"Conversion to dense matrix failed. Final shape is not square: {static_adjacency_matrix.shape}.")
+        # Store raw base adjacency (will be used to build topology cache)
+        base_adjacency_matrix = raw_base_adjacency
     except Exception as e:
         print(f"\nError: Failed during adjacency matrix loading and conversion: {e}")
         raise
-
-    all_features, all_ybus, all_targets = [], [], []
-    all_bus_types = []  # OPF: Store bus types for each timestep
-    all_energy_coeffs, all_carbon_coeffs = [], []
-    all_renewable_fractions = []  # Track renewable fractions for each data file
     
+    # Build file metadata manifest (lightweight - only stores paths and indices)
+    file_metadata = []
+    global_timestep = 0
+    all_contingency_timesteps = []
+    ybus_base_path = None
+    ybus_contingency_timesteps_path = None
+    ybus_contingency_matrices_path = None
     
+    # Load one sample of each file type for normalization statistics (one-time memory hit)
+    print("Pre-loading sample data for normalization...", end=" ", flush=True)
+    all_features_for_norm = []
+    all_targets_for_norm = []
+    
+    import re
     for f_path in feature_files:
-        ybus_path = f_path.replace('features', 'ybus_matrices')
         targets_path = f_path.replace('features', 'targets')
+        bus_types_path = f_path.replace('features', 'bus_types')
         energy_path = f_path.replace('features', 'time_energy_coeffs').replace('.npy', '.txt')
         carbon_path = f_path.replace('features', 'time_carbon_coeffs').replace('.npy', '.txt')
         
-        # Extract renewable fraction from filename (e.g., "case33_features_frac0.2_timestamp.npy" -> 0.2)
-        import re
+        # Extract renewable fraction from filename
         frac_match = re.search(r'frac(\d+\.\d+)', os.path.basename(f_path))
         renewable_fraction = float(frac_match.group(1)) if frac_match else 0.0
         
-        try:
-            features_data = np.load(f_path)
-            all_features.append(features_data)
-            num_timesteps = features_data.shape[0]
-            
-            # Load Ybus matrix - support both sparse (new) and dense (old) formats
-            # Try sparse format first
+        # Get file shape without loading (use mmap to read shape only)
+        features_mmap = np.load(f_path, mmap_mode='r', allow_pickle=False)
+        num_timesteps = features_mmap.shape[0]
+        
+        # Load a sample for normalization (first 1000 timesteps or all if smaller)
+        sample_size = min(1000, num_timesteps)
+        all_features_for_norm.append(features_mmap[:sample_size].astype(np.float32))
+        targets_mmap = np.load(targets_path, mmap_mode='r', allow_pickle=False)
+        all_targets_for_norm.append(targets_mmap[:sample_size].astype(np.float32))
+        
+        # Get Ybus metadata (first file sets the pattern)
+        if ybus_base_path is None:
             ybus_base_path = f_path.replace('features', 'ybus_base')
             ybus_contingency_timesteps_path = f_path.replace('features', 'ybus_contingency_timesteps')
             ybus_contingency_matrices_path = f_path.replace('features', 'ybus_contingency_matrices')
-            convergence_report_path = f_path.replace('features', 'convergence_report').replace('.npy', '.json')
+        
+        # Load contingency timesteps if they exist (for this file)
+        file_contingency_timesteps_path = f_path.replace('features', 'ybus_contingency_timesteps')
+        file_contingency_matrices_path = f_path.replace('features', 'ybus_contingency_matrices')
+        
+        # Load topology_ids (REQUIRED for new format)
+        # NO FALLBACKS: topology_ids file is required
+        file_topology_ids_path = f_path.replace('features', 'topology_ids')
+        if not os.path.exists(file_topology_ids_path):
+            raise FileNotFoundError(
+                f"REQUIRED: topology_ids file not found at {file_topology_ids_path}\n"
+                f"The new topology caching system requires topology_ids files.\n"
+                f"Please regenerate your data using the updated data generation script:\n"
+                f"  python data/gen_meas_best.py test <timesteps>"
+            )
+        
+        file_topology_ids = np.load(file_topology_ids_path)
+        if len(file_topology_ids) != num_timesteps:
+            raise ValueError(
+                f"topology_ids length ({len(file_topology_ids)}) doesn't match timesteps ({num_timesteps}) "
+                f"for file {f_path}. This indicates data corruption or generation error."
+            )
+        
+        # Track local contingency indices for this file
+        file_contingency_local_indices = {}
+        if os.path.exists(file_contingency_timesteps_path):
+            contingency_timesteps = np.load(file_contingency_timesteps_path)
+            # Map LOCAL timestep indices (within this file) to LOCAL contingency matrix indices
+            for local_cont_idx, local_ts in enumerate(contingency_timesteps):
+                # Store: local file timestep -> local contingency matrix index
+                file_contingency_local_indices[int(local_ts)] = local_cont_idx
+        
+        # Create metadata entry for each timestep in this file
+        for i in range(num_timesteps):
+            # Get topology_id for this timestep (REQUIRED - no default)
+            topology_id = int(file_topology_ids[i])
             
-            if os.path.exists(ybus_base_path):
-                # New sparse format found - store lazy loading data
-                ybus_base = np.load(ybus_base_path)
-                contingency_timesteps = np.load(ybus_contingency_timesteps_path)
-                contingency_matrices = np.load(ybus_contingency_matrices_path)
-                
-                # Store in lazy format - adjust timestep indices for concatenated data
-                timestep_offset = sum(len(yb['contingency_timesteps']) if isinstance(yb, dict) else yb.shape[0] for yb in all_ybus)
-                adjusted_timesteps = contingency_timesteps + timestep_offset
-                
-                all_ybus.append({
-                    'lazy': True,
-                    'base': ybus_base,
-                    'contingency_timesteps': adjusted_timesteps,
-                    'contingency_matrices': contingency_matrices,
-                    'num_timesteps': num_timesteps
-                })
-            else:
-                # Old dense format (backward compatibility)
-                ybus_path = f_path.replace('features', 'ybus_matrices')
-                ybus_full = np.load(ybus_path)
-                all_ybus.append(ybus_full)
-            
-            all_targets.append(np.load(targets_path))
-            
-            # Load bus types (OPF: bus-type-dependent unknowns)
-            bus_types_path = f_path.replace('features', 'bus_types')
-            if os.path.exists(bus_types_path):
-                all_bus_types.append(np.load(bus_types_path))
-            else:
-                # Fallback: If bus_types not found, assume all PQ buses (backward compatibility)
-                print(f"Warning: bus_types file not found: {bus_types_path}. Assuming all PQ buses.")
-                all_bus_types.append(np.zeros((num_timesteps, num_buses), dtype=np.int32))
-            
-            all_energy_coeffs.append(np.loadtxt(energy_path))
-            all_carbon_coeffs.append(np.loadtxt(carbon_path))
-            
-            
-            # Create renewable fraction array for this data file
-            renewable_fractions_for_file = np.full(features_data.shape[0], renewable_fraction)
-            all_renewable_fractions.append(renewable_fractions_for_file)
-        except FileNotFoundError as e:
-            print(f"\nError: A required data file is missing: {e.filename}")
-            print("Please ensure you have run 'gen_meas_best.py' to generate all necessary data files.")
-            raise e
-
-    # Convert to float32 for memory efficiency (50% memory reduction vs float64)
-    concatenated_features = np.concatenate(all_features, axis=0).astype(np.float32)
-    concatenated_targets = np.concatenate(all_targets, axis=0).astype(np.float32)
-    concatenated_bus_types = np.concatenate(all_bus_types, axis=0).astype(np.int32) if all_bus_types else None
-    concatenated_energy_coeffs = np.concatenate(all_energy_coeffs, axis=0).astype(np.float32)
-    concatenated_carbon_coeffs = np.concatenate(all_carbon_coeffs, axis=0).astype(np.float32)
-    concatenated_renewable_fractions = np.concatenate(all_renewable_fractions, axis=0).astype(np.float32)
+            entry = {
+                'features_path': f_path,
+                'targets_path': targets_path,
+                'bus_types_path': bus_types_path if os.path.exists(bus_types_path) else None,
+                'energy_path': energy_path,
+                'carbon_path': carbon_path,
+                'index_in_file': i,
+                'global_timestep': global_timestep,
+                'renewable_fraction': renewable_fraction,
+                'topology_id': int(topology_id),  # Store topology_id in metadata
+                # Store contingency info per file (not global)
+                'ybus_contingency_matrices_path': file_contingency_matrices_path if os.path.exists(file_contingency_matrices_path) else None,
+                'ybus_contingency_local_idx': file_contingency_local_indices.get(i, None)  # Local index in file's contingency matrices
+            }
+            file_metadata.append(entry)
+            global_timestep += 1
     
-    # Handle Ybus - merge lazy loading data or concatenate pre-loaded arrays
-    if all(isinstance(yb, dict) and 'lazy' in yb for yb in all_ybus):
-        # All scenarios use lazy loading - merge them
-        # All scenarios should have the same base Ybus (same bus system)
-        concatenated_ybus = {
-            'lazy': True,
-            'base': all_ybus[0]['base'],  # Same for all scenarios
-            'contingency_timesteps': np.concatenate([yb['contingency_timesteps'] for yb in all_ybus]),
-            'contingency_matrices': np.concatenate([yb['contingency_matrices'] for yb in all_ybus], axis=0) if all(len(yb['contingency_matrices']) > 0 for yb in all_ybus) else np.array([]).reshape(0, all_ybus[0]['base'].shape[0], all_ybus[0]['base'].shape[1]).astype(np.complex128)
-        }
-    elif all(isinstance(yb, np.ndarray) for yb in all_ybus):
-        # All scenarios use pre-loaded arrays - concatenate normally
-        concatenated_ybus = np.concatenate(all_ybus, axis=0)
+    # Create normalizer from sample data (one-time memory hit)
+    concatenated_features_sample = np.concatenate(all_features_for_norm, axis=0)
+    concatenated_targets_sample = np.concatenate(all_targets_for_norm, axis=0)
+    normalizer = PowerSystemNormalizer(concatenated_features_sample, concatenated_targets_sample)
+    del all_features_for_norm, all_targets_for_norm  # Free memory immediately
+    import gc
+    # REMOVED: Aggressive GC slows down execution - only use if actually hitting OOM
+    # gc.collect()
+    print("done. Building manifest...", end=" ", flush=True)
+    
+    # Build Ybus metadata
+    ybus_metadata = {}
+    if ybus_base_path and os.path.exists(ybus_base_path):
+        ybus_metadata['base_path'] = ybus_base_path
+        # Note: contingency matrices are now stored per-file in metadata entries
+        # No need for global contingency_lookup anymore
+        ybus_metadata['contingency_lookup'] = {}  # Keep for backward compatibility, but not used
     else:
-        raise ValueError("Mixed Ybus formats detected - all scenarios must use the same format (lazy or pre-loaded)")
-
-    # Create normalizer with BOTH features and targets
-    normalizer = PowerSystemNormalizer(concatenated_features, concatenated_targets)
-    features_norm = normalizer.normalize(concatenated_features)
-    targets_norm = normalizer.normalize(concatenated_targets)
-    print(f"[Data] Loaded {len(feature_files)} scenarios -> {concatenated_features.shape[0]} samples")
-    print(f"[Data] Features shape: {concatenated_features.shape} (measurements: {concatenated_features.shape[-1]} dims)")
-    print(f"[Data] Targets shape: {concatenated_targets.shape} (unknowns: {concatenated_targets.shape[-1]} dims)")
-    print(f"[Data] Features normalized: mean={np.mean(features_norm):.4f}, std={np.std(features_norm):.4f}")
-    print(f"[Data] Targets normalized: mean={np.mean(targets_norm):.4f}, std={np.std(targets_norm):.4f}")
+        # Fallback: no Ybus metadata (will use None in dataset)
+        ybus_metadata = None
     
-    # Return concatenated arrays (OPF: features=measurements, targets=unknowns per bus type)
-    # Both are now normalized for consistent training
-    return (features_norm, static_adjacency_matrix, concatenated_ybus, targets_norm,
-            concatenated_bus_types, concatenated_energy_coeffs, concatenated_carbon_coeffs, 
-            concatenated_renewable_fractions, normalizer)
+    print(f"done. Manifest: {len(file_metadata)} samples | Features: [samples, buses, 10] | Targets: [samples, buses, 2] | Normalization: on-demand", flush=True)
+    
+    # PERFORMANCE FIX: Build topology cache with all unique topologies
+    # NO FALLBACKS: Topology cache is required for new format
+    if not has_topology_ids:
+        raise RuntimeError(
+            "Topology IDs not detected. The new topology caching system requires base_adjacency files.\n"
+            "Please regenerate your data using the updated data generation script."
+        )
+    
+    print(f"[Data] Building topology cache...", end=" ", flush=True)
+    topology_cache, topology_ids_array = _build_topology_cache_from_ids(
+        file_metadata, base_adjacency_matrix, num_buses, case_name, data_dir
+    )
+    
+    # Return metadata and lightweight objects (not full data arrays)
+    # The dataset will be created in create_data_loaders
+    return (file_metadata, base_adjacency_matrix, ybus_metadata, normalizer, topology_cache, topology_ids_array)
 
 def _collate_static(batch):
     """
@@ -496,111 +770,78 @@ def _collate_sequential_padded(batch):
     
     return collated_batch
 
-def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy_coeffs, time_carbon_coeffs, renewable_fractions, config, is_static, bus_types=None):
+def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, config, is_static, 
+                        topology_cache=None, topology_ids=None):
     """
-    Create data loaders for power system OPF data.
+    Create data loaders for power system OPF data using lazy loading.
     
     Args:
-        bus_types: Optional array of bus type codes [timesteps, buses] with values [0=PQ, 1=PV, 2=Slack]
+        file_metadata: List of dicts with file paths and metadata (from load_power_system_data)
+        adjacency: Static adjacency matrix [num_buses, num_buses]
+        ybus_metadata: Dict with Ybus file paths and contingency lookup
+        normalizer: PowerSystemNormalizer instance
+        config: Configuration object
+        is_static: Whether this is a static model (single timestep) or sequential
+        topology_cache: Dict mapping topology_id -> pre-normalized adjacency tensor (optional)
+        topology_ids: Array mapping sample index -> topology_id (optional)
     """
     seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
     hours_per_day = getattr(config, 'HOURS_PER_DAY', 24)
     
-    dataset = PowerSystemDataset(
-        features, adjacency, ybus_matrices, targets, 
-        time_energy_coeffs, time_carbon_coeffs, renewable_fractions,
-        is_static, seq_len, hours_per_day=hours_per_day, bus_types=bus_types
+    # Create lazy dataset
+    dataset = PowerSystemLazyDataset(
+        file_metadata, adjacency, normalizer, ybus_metadata,
+        is_static, seq_len, hours_per_day=hours_per_day,
+        topology_cache=topology_cache, topology_ids=topology_ids
     )
     dataset_size = len(dataset)
     
-    # Get split mode from config (default to 'blocked_timeseries' if not specified)
-    split_mode = getattr(config, 'DATA_SPLIT_MODE', 'blocked_timeseries')
+    # Extract renewable fractions from metadata for splitting
+    renewable_fractions = np.array([meta['renewable_fraction'] for meta in file_metadata])
     
-    # Backward compatibility: 'stratified' is an alias for 'blocked_timeseries'
+    # Get split mode from config
+    split_mode = getattr(config, 'DATA_SPLIT_MODE', 'blocked_timeseries')
     if split_mode == 'stratified':
         split_mode = 'blocked_timeseries'
     
     if split_mode == 'blocked_timeseries':
-        # BLOCKED TIME-SERIES SPLIT (Recommended for time-series forecasting)
-        # 
-        # This is the methodologically sound approach for time-series data with multiple scenarios.
-        # It combines the benefits of both chronological and stratified splitting:
-        # 1. Groups data into blocks by renewable_fraction (ensures all scenarios in train/val/test)
-        # 2. Splits each block chronologically (maintains temporal order, prevents data leakage)
-        # 3. Combines splits across blocks (final sets contain all renewable fractions)
-        #
-        # Why this is superior:
-        # - Zero data leakage: Temporal order is strictly maintained within each scenario block
-        # - Guaranteed representation: All renewable fractions appear in train/val/test sets
-        # - Fair evaluation: Model is tested on diverse scenarios while respecting time-series principles
-        # - Publication-ready: Defensible in top-tier ML/power systems journals
-        
-        # Group indices by renewable fraction
+        # BLOCKED TIME-SERIES SPLIT
         unique_fractions = np.unique(renewable_fractions)
         train_indices, val_indices, test_indices = [], [], []
         
         for frac in unique_fractions:
-            # STEP 1: BLOCK - Get all sample indices for this specific renewable fraction
             frac_mask = renewable_fractions == frac
             frac_indices = np.where(frac_mask)[0]
-            
-            # Filter indices to ensure they are valid for the dataset length
-            # (important for sequential models that may have padding/truncation)
             valid_frac_indices = [idx for idx in frac_indices if idx < dataset_size]
             
             if len(valid_frac_indices) == 0:
                 continue
             
             n_frac = len(valid_frac_indices)
-            
-            # STEP 2: SPLIT CHRONOLOGICALLY within the block
-            # The indices are already sorted by time within the block (from data generation)
             n_train = int(config.TRAIN_SPLIT * n_frac)
             n_val = int(config.VAL_SPLIT * n_frac)
-            # The rest goes to test, ensuring no data loss within the block
             n_test = n_frac - n_train - n_val
             
-            # Contiguous splits preserve temporal order within each block
             frac_train_indices = valid_frac_indices[:n_train]
             frac_val_indices = valid_frac_indices[n_train:n_train + n_val]
             frac_test_indices = valid_frac_indices[n_train + n_val:]
             
-            # Verify no data loss for this fraction
-            assert len(frac_train_indices) + len(frac_val_indices) + len(frac_test_indices) == n_frac, \
-                f"Data loss detected for fraction {frac}: {len(frac_train_indices)}+{len(frac_val_indices)}+{len(frac_test_indices)} != {n_frac}"
-            
-            # STEP 3: COMBINE - Add the split indices to the final lists
             train_indices.extend(frac_train_indices)
             val_indices.extend(frac_val_indices)
             test_indices.extend(frac_test_indices)
         
-        # Sort the final indices to maintain as much of the overall temporal structure as possible
-        # This helps with data loader efficiency and maintains some global temporal ordering
         train_indices.sort()
         val_indices.sort()
         test_indices.sort()
-        
         split_mode_str = "Blocked Time-Series"
         
     elif split_mode == 'chronological':
-        # SIMPLE CHRONOLOGICAL SPLIT (Alternative method)
-        # 
-        # Split by time order (train on past, test on future).
-        # This maintains strict temporal order but may result in test set missing some renewable fractions.
-        # Use this only if you specifically need a simple chronological split.
-        # 
-        # WARNING: This method may cause warnings like "No data for X% renewables" in test set,
-        # which is expected if your data generation creates blocks of scenarios sequentially.
-        
-        # All indices in chronological order (already sorted by time)
+        # SIMPLE CHRONOLOGICAL SPLIT
         all_indices = list(range(dataset_size))
-        
-        # Calculate split sizes
         n_train = int(config.TRAIN_SPLIT * dataset_size)
         n_val = int(config.VAL_SPLIT * dataset_size)
-        n_test = dataset_size - n_train - n_val  # Remaining goes to test (ensures no data loss)
+        n_test = dataset_size - n_train - n_val
         
-        # Split chronologically: first N% for train, next M% for val, remaining for test
         train_indices = all_indices[:n_train]
         val_indices = all_indices[n_train:n_train + n_val]
         test_indices = all_indices[n_train + n_val:n_train + n_val + n_test]
@@ -610,12 +851,12 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     else:
         raise ValueError(f"Unknown DATA_SPLIT_MODE: {split_mode}. Must be 'blocked_timeseries' or 'chronological'.")
     
-    # Verify NO DATA LOSS: train + val + test = total dataset size
+    # Verify NO DATA LOSS
     total_split_size = len(train_indices) + len(val_indices) + len(test_indices)
     assert total_split_size == dataset_size, \
         f"Data loss detected: {len(train_indices)}+{len(val_indices)}+{len(test_indices)} = {total_split_size} != {dataset_size}"
     
-    # Verify split ratios match config (within rounding tolerance)
+    # Verify split ratios
     train_ratio = len(train_indices) / dataset_size
     val_ratio = len(val_indices) / dataset_size
     test_ratio = len(test_indices) / dataset_size
@@ -635,14 +876,32 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
     
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
     
-    # OPTIMIZED DataLoader settings for memory efficiency
-    num_workers = min(config.NUM_WORKERS, 4)  # Cap at 4 workers
+    # OPTIMIZED DataLoader settings for professional GPU performance
+    # pin_memory=True is CRITICAL for fast CPU->GPU data transfer (only when CUDA available)
+    # Windows multiprocessing: Use num_workers=0 to avoid worker crashes
+    import sys
+    is_windows = sys.platform == 'win32'
+    use_cuda = torch.cuda.is_available()
+    
+    # Get num_workers from config
+    num_workers = config.NUM_WORKERS
+    
+    # On Windows, multiprocessing with DataLoader can cause worker crashes
+    # Always use num_workers=0 on Windows for reliability (multiprocessing issues)
+    if is_windows:
+        if num_workers > 0:
+            # Only print once per run (use module-level flag)
+            if not hasattr(create_data_loaders, '_windows_warning_printed'):
+                print(f"[DataLoader] Windows detected: Using num_workers=0 (was {num_workers}) to avoid multiprocessing crashes")
+                create_data_loaders._windows_warning_printed = True
+        num_workers = 0
+    
     train_dataloader_kwargs = {
         'batch_size': config.BATCH_SIZE,
         'shuffle': shuffle_train,  # Dynamic based on model type
         'num_workers': num_workers,
         'collate_fn': collate_fn_to_use,
-        'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
+        'pin_memory': use_cuda,  # Only enable when CUDA is available
         'persistent_workers': num_workers > 0,  # Only if using workers
         'prefetch_factor': 2 if num_workers > 0 else None,  # Only if using workers
     }
@@ -652,7 +911,7 @@ def create_data_loaders(features, adjacency, ybus_matrices, targets, time_energy
         'shuffle': False,  # Never shuffle val/test
         'num_workers': num_workers,
         'collate_fn': collate_fn_to_use,
-        'pin_memory': torch.cuda.is_available(),  # Pin memory for GPU
+        'pin_memory': use_cuda,  # Only enable when CUDA is available
         'persistent_workers': num_workers > 0,  # Only if using workers
         'prefetch_factor': 2 if num_workers > 0 else None,  # Only if using workers
     }

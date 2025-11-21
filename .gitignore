@@ -8,6 +8,7 @@ data/train/
 data/test/
 keep/
 tests/
+test_output/
 
 # Data files in root data folder
 data/*.npy

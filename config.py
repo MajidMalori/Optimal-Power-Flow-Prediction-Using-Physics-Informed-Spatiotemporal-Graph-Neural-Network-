@@ -2,84 +2,9 @@ import os
 import torch
 from datetime import datetime
 
-class Args:
-    """
-    Training arguments and configuration.
-    Centralized location for all training-related parameters.
-    
-    QUICK ACCESS - Modify these for your experiments
-    """
-    # === MODEL & SYSTEM CONFIGURATION ===
-    test_config = 'all'  # Options: 'quick', 'core', 'comprehensive', 'physics_only', 'non_physics_only', 'sequential_only', 'all'
-    bus_systems = 'all'  # Options: 'all', '33', '57', '118', or comma-separated like '33,57'
-    models_to_train = 'all'  # Options: 'all', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU', or comma-separated like 'PIGCLSTM,PIGCGRU'
-    seed = 42
-    
-    # === DATA CONFIGURATION ===
-    data_mode = 'test'  # Options: 'train' or 'test'
-    train_timesteps = 12000  # Number of timesteps for train mode (500 days = 300+100+100 for 60/20/20 split)
-    test_timesteps = 960  # Number of timesteps for test mode (45 complete days = 27+9+9 for 60/20/20 split)
-    
-    # Data plotting configuration
-    plot_data_info = True  # True: Generate data validation and profile story plots in bus folders, False: Skip (faster)
-    # When True, generates:
-    # - Data validation plots (if any) in each bus folder
-    # - Data profile story plots (load/generation profiles, integrity checks) in each bus folder
-    
-    # ┌──────────────────────────────────────────────────────────────────────────┐
-    # │ TIMESTEP REFERENCE TABLE (60/20/20 split with complete 24-hour cycles)  │
-    # ├────────────────┬───────────┬──────┬───────────┬──────────┬──────────────┤
-    # │ Purpose        │ Timesteps │ Days │ Train     │ Val      │ Test         │
-    # ├────────────────┼───────────┼──────┼───────────┼──────────┼──────────────┤
-    # │ Quick test     │    960    │  40  │ 24 days   │  8 days  │  8 days      │
-    # │ Recommended    │   1080    │  45  │ 27 days   │  9 days  │  9 days  ← ✓ │
-    # │ Thorough test  │   1200    │  50  │ 30 days   │ 10 days  │ 10 days      │
-    # │ Light train    │   9000    │ 375  │ 225 days  │ 75 days  │ 75 days      │
-    # │ Recommended    │  10080    │ 420  │ 252 days  │ 84 days  │ 84 days  ← ✓ │
-    # │ Heavy train    │  12000    │ 500  │ 300 days  │ 100 days │ 100 days     │
-    # └────────────────┴───────────┴──────┴───────────┴──────────┴──────────────┘
-    #       Timesteps must be multiples of 120 (5 days × 24 hours) for 60/20/20 split.
-    #       Use calculate_timesteps.py to compute custom configurations.
-    
-    # Time-series data configuration
-    hours_per_day = 24
-    sequence_length = 5     # Sequence length for LSTM/GRU models (past N hours to predict current)
-    
-    # === MODEL CAPACITY CONFIGURATION ===
-    # Control model size per bus system for experimentation
-    # Options: 'normal' (conservative), 'medium' (balanced), 'large' (maximum capacity)
-    #
-    # Capacity Presets (REDUCED RANGES for smaller, faster models):
-    # ┌─────────┬────────────────────┬──────────────────────┬─────────────────────┐
-    # │ System  │ normal             │ medium               │ large               │
-    # ├─────────┼────────────────────┼──────────────────────┼─────────────────────┤
-    # │ 33-bus  │ H:32-64, GC:1-4    │ H:48-96, GC:2-5     │ H:64-128, GC:3-7    │
-    # │ 57-bus  │ H:32-64, GC:1-4    │ H:48-96, GC:2-5     │ H:64-128, GC:3-7    │
-    # │ 118-bus │ H:64-128, GC:2-6   │ H:96-160, GC:4-9    │ H:128-256, GC:6-12  │
-    # └─────────┴────────────────────┴──────────────────────┴─────────────────────┘
-    # H=Hidden_dim, GC=GC_layers, E=Embedding_dim
-    # Reduced normal capacity: 33/57-bus capped at 64, 118-bus capped at 128
-    #
-    CAPACITY_33_BUS = 'normal'   # 33-bus: reduced to H:32-64, GC:1-4 (was 32-96, 1-6)
-    CAPACITY_57_BUS = 'normal'   # 57-bus: reduced to H:32-64, GC:1-4 (was 32-96, 1-6)
-    CAPACITY_118_BUS = 'large'  # 118-bus: reduced to H:64-128, GC:2-6 (was 64-128, 2-8
-    
-    # === RESULTS SAVING CONFIGURATION ===
-    save_results = True  # False: No files saved (console output only), True: Save all results
-    clear_results = True  # True: Delete experimental_results folder before running, False: Keep old results
-    
-    # === HYPERPARAMETER OPTIMIZATION CONFIGURATION ===
-    use_mosoa = True  # Use MoSOA from paper for hyperparameter optimization
-    
-    # === PARALLEL TRAINING CONFIGURATION ===
-    # Device configuration
-    force_cpu = False  # Set to True to force CPU training even if GPU is available
-    
-    # Parallel training mode
-    parallel_data_loading = True   # DISABLED for low-RAM systems (< 2GB available)
-    
-    # Worker configuration (auto-configured based on device if set to 'auto')
-    data_workers = 'auto'         # Number of data loading workers
+# FIXED: Args class has been REMOVED.
+# All experimental settings are now part of Config class and loaded from YAML.
+# See Config class below for experimental settings (test_config, bus_systems, etc.)
 
 class FeatureIndices:
     """
@@ -140,145 +65,53 @@ class ModelOutputIndices:
 
 class Config:
     """
-    Main configuration class for the project.
-    Contains global settings and nested classes for model-specific hyperparameters.
+    Configuration Module - YAML is the Single Source of Truth
+    
+    This module provides:
+    - Code constants (FeatureIndices, TargetIndices, ModelOutputIndices)
+    - Business logic methods (get_model_class_map, get_models_to_test, etc.)
+    - Computed properties (CURRENT_RUN_DIR, model_config_map)
+    - Computed runtime values (DEVICE, ROOT_DIR, etc.)
+    
+    ALL CONFIGURATION VALUES ARE LOADED FROM config.yaml - NO FALLBACK DEFAULTS.
+    If config.yaml is missing, initialization will fail immediately.
+    
+    This ensures:
+    - Single source of truth (no duplication)
+    - Fail-fast behavior (problems are caught immediately)
+    - Clear configuration management (all values in one place)
+    
+    See config.yaml for all configuration values.
     """
     
-    # --- Device & System Configuration ---
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    NUM_BUSES = [33, 57, 118]
-    SEED = 42
-    NUM_WORKERS = 2  # Conservative default - will be auto-configured based on system capabilities
+    # ============================================================================
+    # YAML IS THE SINGLE SOURCE OF TRUTH
+    # ============================================================================
+    # All configuration values are loaded from config.yaml.
+    # This file contains ONLY:
+    #   - Computed values (DEVICE, ROOT_DIR, etc.)
+    #   - Business logic methods (get_model_class_map, etc.)
+    #   - Constants (FeatureIndices, TargetIndices, ModelOutputIndices)
+    #   - Model configuration classes (_ModelConfig, etc.)
+    #
+    # NO DEFAULT VALUES - YAML is required and must contain all configuration.
+    # If YAML is missing, the code will fail immediately (no fallback).
+    # ============================================================================
     
-    # --- Training Parameters ---
-    BATCH_SIZE = 64  # Default, will be overridden by adaptive function
-    LEARNING_RATE = 0.0005  # Best from LR testing: 0.0005 works well for both GCN and AdaptivePIGCN
-    MAX_GRAD_NORM = 1.0  # Gradient clipping to prevent explosion (critical for natural parametrization with exp)
-    NUM_EPOCHS = 50  # Testing medium vs large capacity (set to 200 for full training)
+    # --- Computed Values (NOT in YAML - computed at runtime) ---
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # Auto-detected, can be overridden by YAML
+    ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = None  # Set in __init__ based on data_mode
+    EXPERIMENTAL_RESULTS_DIR = os.path.join(ROOT_DIR, 'experimental_results')
+    _CURRENT_RUN_TIMESTAMP = None  # Set during __init__
     
-    # --- Physics Loss Annealing ---
-    PHYSICS_WARMUP_EPOCHS = 10  # Gradually introduce physics losses over first N epochs (prevents early explosion)
-    # NOTE: Power violations are in (p.u.)² - per-unit system already provides normalization via S_base (constant)
-    # DO NOT divide by dynamic load in training loss - this makes loss non-stationary
-    # Learnable weights (Kendall-style) automatically handle scale differences between loss terms
-    EARLY_STOPPING_PATIENCE = 20  # Increased to prevent premature stopping on 118-bus
-    
-    # --- Gradient Accumulation Configuration ---
-    # Gradient accumulation is disabled (always uses actual batch size)
-    
-    # --- Learning Rate Scheduler Configuration ---
-    # Golden Configuration: Use CosineAnnealingLR only
-    # CosineAnnealingLR provides smooth learning rate decay, better generalization
-    USE_LEARNING_RATE_SCHEDULER = True  # Enable CosineAnnealingLR scheduler
-    COSINEANNEALINGLR_T_MAX = None  # None: Use NUM_EPOCHS (one full cosine cycle)
-    COSINEANNEALINGLR_ETA_MIN = 1e-6  # Minimum learning rate
-    
-    # --- Weight Decay Configuration ---
-    # Golden Configuration: Use AdamW with weight_decay=0.0, rely on Empirical Bayes for regularization
-    # AdamW decouples weight decay from gradient updates (better than Adam)
-    # Empirical Bayes provides intelligent regularization (better than fixed weight_decay)
-    WEIGHT_DECAY = 0.0  # Set to 0.0 - rely on Empirical Bayes for regularization
-    
-    TRAIN_SPLIT = 0.6  
-    VAL_SPLIT = 0.2
-    
-    # Data splitting mode
-    DATA_SPLIT_MODE = 'blocked_timeseries'  # Options: 'blocked_timeseries' (recommended), 'chronological'
-    # 'blocked_timeseries': Groups data by renewable_fraction, then splits each block chronologically.
-    #   This ensures all fractions appear in train/val/test while maintaining temporal order within each block.
-    #   This is the methodologically sound approach for time-series forecasting with multiple scenarios.
-    # 'chronological': Simple chronological split (first N% train, next M% val, rest test).
-    #   May result in test set missing some renewable fractions, but maintains strict temporal order.    
-    
-    # Mixed precision training (speeds up training but may reduce precision slightly)
-    # Mixed precision training disabled (use float32 for accuracy)
-    # Set to False for 33-bus or if you need maximum precision
-    
-    # --- Time-Series Configuration (Set during __init__ from Args) ---
-    
-    # --- Multi-Objective Optimization Weights (normalized to sum to 1.0) ---
-    MOOPF_WEIGHT_LOSS = 1/3
-    MOOPF_WEIGHT_VDEV = 1/3
-    MOOPF_WEIGHT_CARBON = 1/3
-    
-    # --- Physical Constraints ---
-    V_MIN = 0.90  # Minimum voltage limit
-    V_MAX = 1.10  # Maximum voltage limit
-    S_MAX = 1.2   # Maximum apparent power
-    # S_BASE_MVA is determined dynamically based on system type in metrics.py
-    # Case33: 10 MVA, Case57/118: 100 MVA
-    
-    
-    # --- Targeted Contingency Analysis ---
-    # Enables systematic testing of critical N-1 contingencies during evaluation
-    ENABLE_CONTINGENCY_ANALYSIS = True  # Enable targeted contingency analysis
-    CONTINGENCY_TOP_K = 10  # Number of critical lines to test (top K by power flow or centrality)
-    CONTINGENCY_METHOD = 'power_flow'  # Method to identify critical lines: 'power_flow', 'centrality', or 'historical'
-    
-    # Loss weighting method: Learnable Uncertainty Weighting (Kendall et al., CVPR 2018)
-    # Automatically learns optimal weights via backpropagation
-    # Paper: "Multi-Task Learning Using Uncertainty to Weigh Losses"
-    # Heteroscedastic: Model predicts uncertainty per sample (more expressive, requires model to output uncertainties)
-    
-    # Heteroscedastic loss formulation
-    # Natural Parametrization: Immer et al. (NeurIPS 2023) - "Effective Bayesian Heteroscedastic Regression"
-    # Paper: https://arxiv.org/abs/2306.17758, Citations: 27+ (as of Nov 2025)
-    # 
-    # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
-    # Model outputs: [η1_var1, η1_var2, f2_var1, f2_var2] where η2 = -g+(f2)
-    # g+ is exp or softplus (ensures η2 < 0, avoiding negative log variance issues)
-    # 
-    # Key advantages:
-    # 1. Jointly concave objective (more stable optimization)
-    # 2. Simpler gradients: ∇η1 = μ - y, ∇η2 = σ² - (y² - μ²) (separate residuals)
-    # 3. No negative log variance issues (η2 < 0 by construction)
-    # 4. Better generalization (empirical Bayes regularization)
-    
-    # Natural parametrization function: Always use softplus for numerical stability
-    # softplus: g+(x) = (1/β)*log(1+exp(β*x)) - grows linearly for large x, prevents explosion
-    HETEROSCEDASTIC_SOFTPLUS_BETA = 1.0  # Beta parameter for softplus function
-    
-    # Clamping for numerical stability (NOT in paper)
-    # Paper (Appendix E.2) does NOT use clamping - they compute natural parameters directly
-    # We add clamping to prevent: division by zero (η2 → 0), overflow (η2 → -∞)
-    # Set to False to match paper exactly (may have numerical issues)
-    HETEROSCEDASTIC_USE_CLAMPING = False  # True: Use clamping (not in paper), False: Match paper exactly
-    
-    # Violation weighting (NOT in paper - our addition for physics-informed models)
-    # Paper only does regression, not physics constraints
-    # If True: Weight violations using predicted uncertainties (BIV-style: violation/variance)
-    # If False: Use unweighted violations (match paper exactly - no physics constraints)
-    HETEROSCEDASTIC_WEIGHT_VIOLATIONS = True  # True: Weight violations (our addition), False: Unweighted (match paper)
-    
-    # Empirical Bayes (Section 4.3 from paper) - Automatic regularization via marginal likelihood optimization
-    # Paper: "Effective Bayesian Heteroscedastic Regression with Deep Neural Networks" (Immer et al., NeurIPS 2023)
-    # Automatically learns layer-wise prior precisions (δl) by maximizing marginal likelihood
-    # This provides automatic regularization and helps prevent overfitting
-    # TEST RESULTS (Nov 2025): EB significantly improves performance. Best configs use EB.
-    #   - GCN: EB_On_Conservative (burn_in=5, update_freq=5, steps=10, lr=0.001)
-    #   - AdaptivePIGCN: EB_On_Aggressive (burn_in=3, update_freq=3, steps=20, lr=0.01)
-    USE_EMPIRICAL_BAYES = True  # ENABLED: Test results show EB improves performance
-    # Optimal settings for stable and efficient EB optimization:
-    EB_BURN_IN_EPOCHS = 2  # Let model stabilize before starting EB optimization
-    EB_UPDATE_FREQUENCY = 5  # Update hyperparameters every 5 epochs (not every epoch - reduces noise and computation)
-    EB_HYPERPARAMETER_STEPS = 20  # Number of gradient steps for δ optimization (more steps = better convergence)
-    EB_HYPERPARAMETER_LR = 0.001  # Learning rate for δ optimization (conservative, stable)
-    # Rationale: EB should periodically adjust regularization, not constantly. Updating every 5 epochs
-    # gives the model time to adapt to the new regularization before re-optimizing, reducing noise
-    # and computational overhead while maintaining effective regularization.
-    
-    # HETEROSCEDASTIC_BETA removed - only BIV method is supported (no beta parameter needed)
+    # --- Configuration Attributes (loaded from YAML, no defaults here) ---
+    # All these are loaded from config.yaml via merge_yaml_with_config()
+    # If YAML is missing, these will be None and code will fail (as intended)
 
     
-    # --- Data Mode Configuration (Set during __init__ from Args) ---
-    # DATA_MODE and DATA_MODE_TIMESTEPS are set dynamically in __init__()
-    # Modify Args.data_mode, Args.train_timesteps, and Args.test_timesteps at the top of this file instead
-    
-    # --- Project Structure ---
-    ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(ROOT_DIR, 'data')
-    EXPERIMENTAL_RESULTS_DIR = os.path.join(ROOT_DIR, 'experimental_results')
-    _CURRENT_RUN_TIMESTAMP = None
+    # --- Project Structure (computed, not in YAML) ---
+    # These are already defined above, removing duplicate
     
     # --- Model Testing Configuration ---
     MODELS_TO_TEST = ['GCN', 'adaptiveGCN', 'AdaptivePIGCN', 'PIGCLSTM', 'PIGCGRU', 'ResnetPIGCLSTM', 'ResnetPIGCGRU']
@@ -343,13 +176,14 @@ class Config:
                 }
             }
             
-            # Get capacity setting from Args
+            # Get capacity setting from Config (moved from Args class)
+            # Note: This will be set from YAML or use default values
             if num_buses <= 33:
-                capacity = Args.CAPACITY_33_BUS
+                capacity = Config.CAPACITY_33_BUS
             elif num_buses <= 57:
-                capacity = Args.CAPACITY_57_BUS
+                capacity = Config.CAPACITY_57_BUS
             else:
-                capacity = Args.CAPACITY_118_BUS
+                capacity = Config.CAPACITY_118_BUS
             
             return capacity_settings[num_buses][capacity]
         
@@ -361,9 +195,9 @@ class Config:
             """
             capacity_settings = {
                 33: {
-                    'normal': (1, 4),     # Reduced: 1-4 (was 1-6)
-                    'medium': (2, 5),     # Reduced: 2-5 (was 3-7)
-                    'large': (3, 7)       # Reduced: 3-7 (was 5-9)
+                    'normal': (1, 4),     # Reverted: Allow original range
+                    'medium': (2, 5),     # Reverted: Allow original range
+                    'large': (3, 7)       # Reverted: Allow original range
                 },
                 57: {
                     'normal': (1, 4),     # Reduced: 1-4 (was 1-6)
@@ -377,13 +211,14 @@ class Config:
                 }
             }
             
-            # Get capacity setting from Args
+            # Get capacity setting from Config (moved from Args class)
+            # Note: This will be set from YAML or use default values
             if num_buses <= 33:
-                capacity = Args.CAPACITY_33_BUS
+                capacity = Config.CAPACITY_33_BUS
             elif num_buses <= 57:
-                capacity = Args.CAPACITY_57_BUS
+                capacity = Config.CAPACITY_57_BUS
             else:
-                capacity = Args.CAPACITY_118_BUS
+                capacity = Config.CAPACITY_118_BUS
             
             return capacity_settings[num_buses][capacity]
         
@@ -411,13 +246,14 @@ class Config:
                 }
             }
             
-            # Get capacity setting from Args
+            # Get capacity setting from Config (moved from Args class)
+            # Note: This will be set from YAML or use default values
             if num_buses <= 33:
-                capacity = Args.CAPACITY_33_BUS
+                capacity = Config.CAPACITY_33_BUS
             elif num_buses <= 57:
-                capacity = Args.CAPACITY_57_BUS
+                capacity = Config.CAPACITY_57_BUS
             else:
-                capacity = Args.CAPACITY_118_BUS
+                capacity = Config.CAPACITY_118_BUS
             
             return capacity_settings[num_buses][capacity]
         
@@ -437,24 +273,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 1,     
-                    'max_iterations': 1,   
+                    'num_seagulls': 4,     
+                    'max_iterations': 5,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 1,      
-                    'max_iterations': 1,   
+                    'num_seagulls': 3,      
+                    'max_iterations': 5,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 1,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 1,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 2,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 5,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -554,15 +390,65 @@ class Config:
         }
     
     def __init__(self, data_mode='train', save_results=True, train_timesteps=None, test_timesteps=100, clear_results=False, 
-                 hours_per_day=24, sequence_length=5):
-        """Initializes directories and sets up experimental run structure."""
-        # Set save_results flag
+                 hours_per_day=24, sequence_length=5, yaml_config_path=None, load_yaml=True):
+        """
+        Initializes directories and sets up experimental run structure.
+        
+        YAML CONFIGURATION IS REQUIRED - No fallback defaults.
+        If config.yaml is missing, this will raise an exception immediately.
+        
+        Args:
+            data_mode: 'train' or 'test'
+            save_results: Whether to save results to files
+            train_timesteps: Number of timesteps for train mode
+            test_timesteps: Number of timesteps for test mode
+            clear_results: Whether to clear experimental_results folder before running
+            hours_per_day: Hours per day for time-series data
+            sequence_length: Sequence length for LSTM/GRU models
+            yaml_config_path: Path to YAML configuration file (default: 'config.yaml')
+            load_yaml: Whether to load configuration from YAML file (default: True, REQUIRED)
+        
+        Raises:
+            FileNotFoundError: If config.yaml is missing
+            ImportError: If PyYAML is not installed
+            ValueError: If YAML is malformed or missing required keys
+        """
+        # YAML IS REQUIRED - Fail fast if missing (no fallback)
+        if load_yaml:
+            from utils.yaml_config import merge_yaml_with_config
+            yaml_path = yaml_config_path or 'config.yaml'
+            yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(self.ROOT_DIR, yaml_path)
+            
+            if not os.path.exists(yaml_full_path):
+                raise FileNotFoundError(
+                    f"REQUIRED: config.yaml not found at {yaml_full_path}\n"
+                    f"YAML is the single source of truth. No fallback defaults.\n"
+                    f"Please create config.yaml or specify correct path via yaml_config_path argument."
+                )
+            
+            try:
+                merge_yaml_with_config(yaml_path, self, verbose=False)
+                print(f"[Config] Loaded configuration from {yaml_path}")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load YAML configuration from {yaml_path}: {e}\n"
+                    f"YAML is required - no fallback defaults available."
+                ) from e
+        else:
+            raise ValueError(
+                "load_yaml=False is not allowed. YAML configuration is required.\n"
+                "Set load_yaml=True and ensure config.yaml exists."
+            )
+        
+        # Set save_results flag (from argument, can be overridden by YAML)
         self.SAVE_RESULTS = save_results
         
-        # Set data plotting flag from Args (controls both validation and profile story plots)
-        self.PLOT_DATA_INFO = Args.plot_data_info
+        # Set data plotting flag from YAML (required, no fallback)
+        self.PLOT_DATA_INFO = getattr(Config, 'plot_data_info', None)
+        if self.PLOT_DATA_INFO is None:
+            raise ValueError("plot_data_info not found in YAML. YAML is required - no fallback defaults.")
         # Backward compatibility: also set GENERATE_DATA_PROFILE_STORY (deprecated, use PLOT_DATA_INFO)
-        self.GENERATE_DATA_PROFILE_STORY = Args.plot_data_info
+        self.GENERATE_DATA_PROFILE_STORY = self.PLOT_DATA_INFO
         
         # Clear experimental results folder if requested
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
@@ -574,9 +460,14 @@ class Config:
             except Exception as e:
                 print(f"[Clear Results] Warning: Could not delete experimental_results folder: {e}")
         
-        # Initialize DATA_MODE_TIMESTEPS - use Args values if not provided, fallback to defaults
+        # Initialize DATA_MODE_TIMESTEPS - use argument if provided, otherwise from YAML (required)
         if train_timesteps is None:
-            train_timesteps = Args.train_timesteps
+            train_timesteps = getattr(Config, 'train_timesteps', None)
+            if train_timesteps is None:
+                raise ValueError("train_timesteps not found in YAML. YAML is required - no fallback defaults.")
+        test_timesteps_yaml = getattr(Config, 'test_timesteps', None)
+        if test_timesteps_yaml is not None:
+            test_timesteps = test_timesteps_yaml  # Override argument with YAML value
         self.DATA_MODE_TIMESTEPS = {'train': train_timesteps, 'test': test_timesteps}
         
         # Set data mode and validate
@@ -589,12 +480,11 @@ class Config:
         self.SEQUENCE_LENGTH = sequence_length
         
         print(f"Data mode: {self.DATA_MODE}, Timesteps: {self.DATA_MODE_TIMESTEPS[self.DATA_MODE]}")
-        print(f"Generation mode: Time-Series")
         
-        # Data directory structure: data/time_series/[train|test]
-        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', 'time_series', data_mode)
+        # Data directory structure: data/[train|test] (removed time_series subfolder)
+        self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', data_mode)
         
-        print(f"\n[Data Mode] Using time_series data in {data_mode} mode")
+        print(f"\n[Data Mode] Using time-series data in {data_mode} mode")
         print(f"[Data Directory] {self.DATA_DIR}")
         
         # Initialize timestamp only when actually starting a run
@@ -700,9 +590,23 @@ class Config:
         """Returns the summary CSV path for a specific model."""
         return os.path.join(self.get_model_eval_dir(num_buses, model_name), "summary.csv")
     
-    def get_training_log_path(self, num_buses: int, model_name: str) -> str:
-        """Returns the training log file path for a specific model."""
-        return os.path.join(self.get_model_eval_dir(num_buses, model_name), "training.log")
+    def get_training_log_path(self, num_buses: int, model_name: str, mode: str = None) -> str:
+        """Returns the training log file path for a specific model and mode.
+        
+        Structure: experimental_results/run_XXX/{num_buses}bus/log/{model_name}_{mode}.log
+        All configurations for the same model and mode append to the same file.
+        
+        Args:
+            num_buses: Number of buses in the system
+            model_name: Name of the model
+            mode: Training mode ('train' or 'test'). If None, uses DATA_MODE from config.
+        """
+        if mode is None:
+            mode = getattr(self, 'DATA_MODE', 'train')
+        
+        log_dir = os.path.join(self.EVALUATION_DIR, f"{num_buses}bus", "log")
+        os.makedirs(log_dir, exist_ok=True)  # Ensure log directory exists
+        return os.path.join(log_dir, f"{model_name}_{mode}.log")
     
     def _initialize_run_timestamp(self):
         """Initialize the run timestamp - always create new timestamp for each run."""

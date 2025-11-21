@@ -681,6 +681,40 @@ The training pipeline (`train.py`) automates the entire process:
 
 ### Configuration System
 
+The project supports **two configuration methods**:
+
+#### 1. YAML Configuration (Recommended)
+
+Edit `config.yaml` for version-controlled, reproducible configuration:
+
+```yaml
+# config.yaml
+training:
+  learning_rate: 0.0005
+  num_epochs: 50
+  batch_size: 64
+
+physics:
+  warmup_epochs: 10
+  voltage:
+    min: 0.90
+    max: 1.10
+
+data:
+  split_mode: "blocked_timeseries"
+  splits:
+    train: 0.6
+    val: 0.2
+```
+
+The `Config` class automatically loads from `config.yaml` when instantiated. To disable YAML loading:
+
+```python
+config = Config(data_mode='test', load_yaml=False)  # Use defaults from config.py
+```
+
+#### 2. Python Configuration (Legacy)
+
 The `config.py` file provides centralized configuration:
 
 ```python
@@ -701,8 +735,9 @@ class Args:
     
     # Hyperparameter optimization
     use_mosoa = True  # Use MoSOA algorithm
-    num_trials = 20  # If use_mosoa=False
 ```
+
+**Note**: YAML configuration takes precedence over Python defaults. If `config.yaml` exists, it will be loaded automatically.
 
 ### Training Loop
 
@@ -1052,9 +1087,8 @@ class Args:
 Physics_Informed_Machine_Learning/
 ├── data/
 │   ├── gen_meas_best.py          # Time-series data generation
-│   └── time_series/
-│       ├── train/                # Training data (generated)
-│       └── test/                 # Test data (generated)
+│   ├── train/                     # Training data (generated)
+│   └── test/                      # Test data (generated)
 │
 ├── models/
 │   ├── base_model.py             # Abstract base class for all models

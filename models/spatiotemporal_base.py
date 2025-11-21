@@ -4,9 +4,10 @@ import torch.nn.functional as F
 from typing import Optional
 from abc import abstractmethod
 from .base_model import BaseModel
+from .base_adaptive_gcn import BaseAdaptiveGCN
 
 
-class SpatioTemporalBase(BaseModel):
+class SpatioTemporalBase(BaseModel, BaseAdaptiveGCN):
     """
     Base class for spatio-temporal models (PIGCGRU, PIGCLSTM, ResnetPIGCGRU, ResnetPIGCLSTM).
     Handles common initialization and forward pass logic:
@@ -38,28 +39,35 @@ class SpatioTemporalBase(BaseModel):
         """
         # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
         output_dim = 4
-        super().__init__(
+        
+        # Initialize nn.Module first
+        nn.Module.__init__(self)
+        
+        # Mark that we're handling initialization manually (for BaseModel.__init__)
+        self._skip_super_init = True
+        
+        # Initialize BaseAdaptiveGCN first (it doesn't call super, so safe)
+        BaseAdaptiveGCN.__init__(self, num_buses=num_buses, embedding_dim=embedding_dim, phi=phi)
+        
+        # Then initialize BaseModel (it won't call super due to _skip_super_init flag)
+        BaseModel.__init__(
+            self,
             feature_dim=feature_dim, hidden_dim=hidden_dim, output_dim=output_dim,
             num_gc_layers=num_gc_layers, num_buses=num_buses, rnn_type=rnn_type,
             rnn_layers=rnn_layers, physics_informed=True, dropout=dropout
         )
         
-        # Validate phi
-        if not (0.0 <= phi <= 1.0):
-            raise ValueError(f"phi must be between 0 and 1, but got {phi}")
-        
-        self.phi = phi
-        self.embedding_dim = embedding_dim
-        
-        # Learnable node embeddings for adaptive adjacency matrix
-        self.node_embedding1 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        self.node_embedding2 = nn.Parameter(torch.randn(num_buses, embedding_dim))
-        
-        # Graph Convolutional layers
+        # Graph Convolutional layers (Professional GCN with self-loops and normalization)
+        # NOTE: These are kept for backward compatibility but are NO LONGER USED in SpatioTemporalRNN
+        # The graph convolution is now integrated inside ProfessionalGraphConvGRUCell/LSTMCell
+        # This eliminates redundant double convolution
+        from .professional_gcn_layer import ProfessionalGCNLayer
         self.gc_layers = nn.ModuleList()
-        self.gc_layers.append(nn.Linear(feature_dim, hidden_dim))
+        # First layer: feature_dim -> hidden_dim
+        self.gc_layers.append(ProfessionalGCNLayer(feature_dim, hidden_dim, bias=True, activation='relu'))
+        # Subsequent layers: hidden_dim -> hidden_dim
         for _ in range(num_gc_layers - 1):
-            self.gc_layers.append(nn.Linear(hidden_dim, hidden_dim))
+            self.gc_layers.append(ProfessionalGCNLayer(hidden_dim, hidden_dim, bias=True, activation='relu'))
         
         # Output Layer
         # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
@@ -69,30 +77,28 @@ class SpatioTemporalBase(BaseModel):
         self.dropout_layer = nn.Dropout(dropout)
         
     
-    def compute_adaptive_adjacency(self, adj: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
+    def compute_adaptive_adjacency_for_sequence(self, adj: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
         """
-        Compute adaptive adjacency matrix combining physical and learned graphs.
+        Compute adaptive adjacency matrix for temporal sequences.
         
         Args:
-            adj: Static physical adjacency matrix [num_nodes, num_nodes] or [batch_size, num_nodes, num_nodes]
+            adj: Static physical adjacency matrix [batch_size, num_nodes, num_nodes]
             batch_size: Batch size
             seq_len: Sequence length
             
         Returns:
             Expanded adaptive adjacency matrix [batch_size * seq_len, num_nodes, num_nodes]
         """
-        # Create learned adjacency matrix
-        learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
-        
-        # Adjacency matrix is guaranteed to be 3D [batch_size, num_nodes, num_nodes] from data loader
-        # Use first batch element for combining with learned adj (all batch elements are identical)
-        adj_2d = adj[0]  # Extract 2D matrix [num_nodes, num_nodes]
-        
-        # Combine with physical adjacency matrix
-        A_adp = self.phi * adj_2d + (1 - self.phi) * learned_adj
+        # Use base class method to compute adaptive adjacency for one batch
+        # Adjacency is guaranteed to be 3D [batch_size, num_nodes, num_nodes] from data loader
+        # Use first batch element (all are identical)
+        adj_single = adj[0:1]  # [1, num_nodes, num_nodes]
+        # Normalize the combined adaptive adjacency
+        A_adp_batch = self.compute_adaptive_adjacency(adj_single, batch_size=1, normalize=True)  # [1, num_nodes, num_nodes]
+        A_adp_2d = A_adp_batch[0]  # [num_nodes, num_nodes]
         
         # Expand for batch and sequence processing: [batch_size * seq_len, num_nodes, num_nodes]
-        A_adp_expanded = A_adp.unsqueeze(0).expand(batch_size * seq_len, -1, -1)
+        A_adp_expanded = A_adp_2d.unsqueeze(0).expand(batch_size * seq_len, -1, -1)
         
         return A_adp_expanded
     
@@ -108,11 +114,12 @@ class SpatioTemporalBase(BaseModel):
             Spatial features [batch_size * seq_len, num_nodes, hidden_dim]
         """
         h = x
-        for gc_layer in self.gc_layers:
-            # Aggregate features using adaptive adjacency, then transform
-            h_aggregated = torch.bmm(A_adp_expanded, h)
-            h = F.relu(gc_layer(h_aggregated))
-            h = self.dropout_layer(h)
+        for i, gc_layer in enumerate(self.gc_layers):
+            # ProfessionalGCNLayer: A_norm @ (h @ weight) + bias, then ReLU
+            # A_adp_expanded is already normalized by compute_adaptive_adjacency_for_sequence
+            h = gc_layer(h, A_adp_expanded, is_pre_normalized=True)  # [batch_size * seq_len, num_nodes, hidden_dim]
+            if i < len(self.gc_layers) - 1:  # Apply dropout to all but last layer
+                h = self.dropout_layer(h)
         
         return h
     

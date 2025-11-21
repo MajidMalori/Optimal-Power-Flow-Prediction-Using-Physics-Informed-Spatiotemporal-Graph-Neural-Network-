@@ -354,24 +354,40 @@ def format_params_concise(params: Dict[str, Any]) -> str:
 
 def calculate_objective_score(metrics: Dict[str, float], config: Any, is_physics_informed: bool) -> float:
     """
-    Calculate objective score for optimization based on model type.
+    Calculate objective score for MoSOA optimization.
+    
+    CRITICAL: We MUST use Validation MSE (Denormalized, Physical Units) as the objective.
+    We cannot use 'total_loss' because it contains learnable uncertainty weights (sigmas).
+    If we optimize 'total_loss', MoSOA will pick hyperparameters that inflate sigma 
+    to cheat the loss function, rather than improving accuracy.
+    
+    The loss function L = MSE/(2σ²) + log(σ) can be minimized by making σ→∞,
+    which makes the first term go to zero while log(σ) grows slowly.
+    This results in a numerically low "Total Loss" but terrible predictions.
+    
+    Validation MSE (denormalized) measures actual prediction error in physical units
+    (per-unit for voltages/power, radians for angles), which is what we actually care about.
     
     Args:
-        metrics: Dictionary of evaluation metrics
-        config: Configuration object with lambda values
-        is_physics_informed: Whether model is physics-informed
+        metrics: Dictionary of evaluation metrics from the VALIDATION set.
+        config: Configuration object.
+        is_physics_informed: Boolean flag (not used, but kept for compatibility).
         
     Returns:
-        Total objective score to minimize
+        float: The objective score to minimize (Validation MSE in physical units).
     """
-    if is_physics_informed:
-        # Loss weights are learnable (Kendall et al., CVPR 2018) - use total_loss directly
-        total_loss = metrics.get('total_loss', metrics['mse'])
-    else:
-        # For non-physics-informed models, only use MSE
-        total_loss = metrics['mse']
+    # ALWAYS use the denormalized MSE (physical units) as the gold standard.
+    # This allows fair comparison between PI and non-PI models, 
+    # and between models with different learned uncertainties.
     
-    return total_loss
+    if 'mse' in metrics:
+        return metrics['mse']  # This is the denormalized MSE from evaluation.py
+    elif 'mse_score' in metrics:
+        return metrics['mse_score']
+    else:
+        # Fallback (should not happen if evaluation.py is correct)
+        raise ValueError("Validation metrics missing 'mse'. Cannot compute objective. "
+                        "Metrics keys: " + str(list(metrics.keys())))
 
 
 def trial_based_search(num_trials: int, lower_bound: np.ndarray, upper_bound: np.ndarray,

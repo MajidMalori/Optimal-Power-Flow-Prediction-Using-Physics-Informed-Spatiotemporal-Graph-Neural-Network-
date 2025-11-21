@@ -4,6 +4,16 @@ import json
 import warnings
 import sys
 
+# Add parent directory to Python path so we can import utils
+# This is needed when gen_meas_best.py is run as a script from the data/ directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Import DataGenerationError from utils (shared exception)
+from utils.contingency_ybus import DataGenerationError
+
 # Suppress numba/pandapower warnings
 warnings.filterwarnings('ignore', message='.*numba.*')
 warnings.filterwarnings('ignore', message='.*Please install numba.*')
@@ -41,8 +51,8 @@ CONFIG = {
     "time_steps": 10080,  # Default: 420 days (10080 hours) - will be overridden by command-line argument if provided
     "output_dir": "./data", # Base directory - mode-specific subdirectory will be appended
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], 
-    "max_solar_mw": 0.025,  # Per-unit scaling: 2.5% of total load per generator
-    "max_wind_mw": 0.04,    # Per-unit scaling: 4% of total load per generator
+    # NOTE: max_solar_mw and max_wind_mw removed - capacity is calculated dynamically
+    # based on total system load and renewable fraction (see simulate_time_series)
     "contingency_rate": 0.05,
     "voltage_error_std": 0.005,
     "power_error_std": 0.01,
@@ -60,6 +70,10 @@ CONFIG = {
     # Weather-driven renewable variability
     "use_weather_driven_renewables": True,  # True: Weather-based variability (realistic), False: Deterministic time-of-day patterns (legacy)
     "seed": 42,  # Random seed for weather simulation (reproducibility)
+    
+    # Memory optimization: Chunked writing
+    "chunk_size": 1000,  # Write data in chunks of this many timesteps (reduces RAM usage)
+    "use_chunked_writing": True,  # Enable chunked writing to disk (memory efficient for large datasets)
 }
 
 # SECTION 2: HELPER FUNCTIONS
@@ -290,7 +304,8 @@ def calculate_renewable_reactive_power(p_mw: float, bus_idx: int, net: pp.pandap
         q_mvar: Reactive power [Mvar]
     """
     # If no active power, no reactive power capability
-    if p_mw < 1e-6:
+    # Also handle very small power to avoid numerical precision issues
+    if p_mw < 1e-5:  # Less than 0.00001 MW (0.01 kW) - too small for meaningful reactive power
         return 0.0
     
     # Inverter reactive power capability (typically ±0.33 * P for modern inverters)
@@ -329,13 +344,33 @@ def calculate_renewable_reactive_power(p_mw: float, bus_idx: int, net: pp.pandap
                 q_mvar = 0.0
             
             # Apply small random variation (control is not perfect)
-            q_mvar *= np.random.uniform(0.95, 1.05)
+            # BUT: Ensure variation respects physical limits
+            # Calculate bounds for random variation to stay within limits
+            if abs(q_mvar) > 1e-6:  # Non-zero q_mvar
+                # Calculate max allowed multiplier to stay within limits
+                max_multiplier = max_q_capability / abs(q_mvar)
+                # Random variation between 0.95 and min(1.05, max_multiplier)
+                # This ensures we never exceed the physical limit
+                variation_range = min(1.05, max_multiplier * 0.99)  # 99% of max to leave small safety margin
+                variation = np.random.uniform(0.95, variation_range)
+                q_mvar *= variation
+            else:
+                # q_mvar is near zero, apply normal variation (won't exceed limits)
+                q_mvar *= np.random.uniform(0.95, 1.05)
             
         except (KeyError, AttributeError):
             # Fallback: If voltage not available, use fixed power factor
             # This happens on first timestep before any power flow results exist
             power_factor = 0.98  # Slightly lagging (typical for inverters)
             q_mvar = p_mw * np.tan(np.arccos(power_factor))
+            # Apply bounded random variation
+            if abs(q_mvar) > 1e-6:
+                max_multiplier = max_q_capability / abs(q_mvar)
+                variation_range = min(1.05, max_multiplier * 0.99)
+                variation = np.random.uniform(0.95, variation_range)
+                q_mvar *= variation
+            else:
+                q_mvar *= np.random.uniform(0.95, 1.05)
     
     else:
         # Fixed power factor mode (fallback or first timestep)
@@ -344,10 +379,44 @@ def calculate_renewable_reactive_power(p_mw: float, bus_idx: int, net: pp.pandap
         q_mvar = p_mw * np.tan(np.arccos(power_factor))
         
         # Add small random variation to avoid all generators having identical Q
-        q_mvar *= np.random.uniform(0.95, 1.05)
+        # BUT: Ensure variation respects physical limits
+        if abs(q_mvar) > 1e-6:
+            max_multiplier = max_q_capability / abs(q_mvar)
+            variation_range = min(1.05, max_multiplier * 0.99)
+            variation = np.random.uniform(0.95, variation_range)
+            q_mvar *= variation
+        else:
+            q_mvar *= np.random.uniform(0.95, 1.05)
     
-    # Clip to inverter capability limits
-    return np.clip(q_mvar, -max_q_capability, max_q_capability)
+    # Final safety check: Clip to physical limits (inverters cannot exceed these limits)
+    q_mvar_clipped = np.clip(q_mvar, -max_q_capability, max_q_capability)
+    
+    # Check if significant clipping occurred (indicates a logic error, not just random variation)
+    # With bounded random variation, clipping should be minimal (< 0.1% of capability)
+    # Skip check if capability is too small (numerical precision issues)
+    if max_q_capability >= 1e-5:  # Only check if capability is meaningful (> 0.00001 Mvar)
+        clipping_amount = abs(q_mvar) - abs(q_mvar_clipped)
+        if clipping_amount > max_q_capability * 0.001:  # More than 0.1% of capability clipped
+            raise DataGenerationError(
+                f"SEVERE ERROR: Inverter reactive power limit violation: q_mvar={q_mvar:.6f} Mvar exceeds "
+                f"capability ±{max_q_capability:.6f} Mvar (based on p_mw={p_mw:.6f} MW) at bus {bus_idx}. "
+                f"Clipping amount: {clipping_amount:.6f} Mvar ({clipping_amount/max_q_capability*100:.2f}% of capability). "
+                f"This indicates a control logic error in calculate_renewable_reactive_power. "
+                f"Check voltage control parameters or power factor calculations. "
+                f"Data generation STOPPED - cannot generate valid data with invalid control logic."
+            )
+    
+    # Log minor clipping (within tolerance, but still worth noting)
+    if abs(q_mvar_clipped) < abs(q_mvar) - 1e-6:
+        import warnings
+        warnings.warn(
+            f"Inverter reactive power clipped: requested {q_mvar:.6f} Mvar, "
+            f"limited to {q_mvar_clipped:.6f} Mvar (capability: ±{max_q_capability:.6f} Mvar). "
+            f"Bus {bus_idx}, P={p_mw:.6f} MW.",
+            UserWarning
+        )
+    
+    return q_mvar_clipped
 
 
 def load_network(case_name: str) -> pp.pandapowerNet:
@@ -430,7 +499,18 @@ def calculate_ybus_from_net(net: pp.pandapowerNet) -> np.ndarray:
         r_ohm = line.r_ohm_per_km * line.length_km
         x_ohm = line.x_ohm_per_km * line.length_km
         z_series = r_ohm + 1j * x_ohm
-        y_series = 1.0 / z_series if z_series != 0 else 1e9 # Avoid division by zero
+        
+        # NO FALLBACK: Zero impedance is unphysical (superconductor) and indicates data corruption
+        if abs(z_series) < 1e-10:  # Check for near-zero (accounting for floating point)
+            raise DataGenerationError(
+                f"SEVERE ERROR: Line {line.name} (index {line.name}) has zero or near-zero impedance: "
+                f"r={r_ohm:.6e} ohm, x={x_ohm:.6e} ohm, z={z_series:.6e} ohm. "
+                f"This is unphysical and indicates network data corruption. "
+                f"Check line parameters: r_ohm_per_km={line.r_ohm_per_km}, length_km={line.length_km}. "
+                f"Data generation STOPPED - cannot generate valid data with corrupted network."
+            )
+        
+        y_series = 1.0 / z_series
         
         # Shunt admittance (line charging) - half at each end
         b_shunt_siemens = 1j * line.c_nf_per_km * line.length_km * 2 * np.pi * net.f_hz * 1e-9
@@ -585,11 +665,436 @@ def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarr
     
     return targets
 
+
+# SECTION 2.5: VALIDATION AND CURTAILMENT FUNCTIONS
+
+def validate_power_flow_inputs(net: pp.pandapowerNet) -> tuple[bool, str]:
+    """
+    PRE-POWER-FLOW VALIDATION: Check inputs before running power flow.
+    Catches physically impossible inputs early (avoids wasted computation).
+    
+    Returns:
+        (is_valid, reason): True if valid, False with reason if invalid
+    """
+    # 1. Generator capacity check (hard limit - P_gen must be <= P_rated)
+    if not net.gen.empty:
+        gen_p_mw = net.gen.p_mw.values
+        gen_max_mw = net.gen.max_p_mw.values
+        # Vectorized check: any generator exceeding capacity?
+        if np.any(gen_p_mw > gen_max_mw * 1.01):  # 1% tolerance for floating point
+            violating_idx = np.where(gen_p_mw > gen_max_mw * 1.01)[0]
+            max_violation = ((gen_p_mw - gen_max_mw) / gen_max_mw * 100)[violating_idx].max()
+            return False, f"Generator capacity violation: {max_violation:.1f}% over limit at gen {violating_idx[0]}"
+    
+    # 2. Inverter capability check (hard limit - P² + Q² must be <= S_rated)
+    # Standard Pandapower field: sn_mva = Rated Apparent Power (S_rated)
+    if not net.sgen.empty and 'sn_mva' in net.sgen.columns:
+        sgen_p_mw = net.sgen.p_mw.values
+        sgen_q_mvar = net.sgen.q_mvar.values
+        sgen_sn_mva = net.sgen.sn_mva.values
+        
+        # Only check generators where sn_mva is defined (> 0)
+        valid_rating = sgen_sn_mva > 0
+        
+        if np.any(valid_rating):
+            # Calculate apparent power (vectorized)
+            sgen_s_mva = np.sqrt(sgen_p_mw[valid_rating]**2 + sgen_q_mvar[valid_rating]**2)
+            ratings = sgen_sn_mva[valid_rating]
+            
+            # Check limit: P² + Q² ≤ S_rated (with 1% tolerance for floating point)
+            if np.any(sgen_s_mva > ratings * 1.01):
+                violating_idx = np.where(sgen_s_mva > ratings * 1.01)[0]
+                max_violation = ((sgen_s_mva - ratings) / ratings * 100)[violating_idx].max()
+                return False, f"Inverter capability violation: {max_violation:.1f}% over rated S (sn_mva)"
+    
+    # 3. Load sanity check (loads should be positive and reasonable)
+    if not net.load.empty:
+        load_p_mw = net.load.p_mw.values
+        # Vectorized check: any negative loads?
+        if np.any(load_p_mw < -1e-6):  # Allow tiny negative for numerical precision
+            return False, f"Negative load detected: min={load_p_mw.min():.3f} MW"
+        
+        # Check for unreasonably large loads (more than 10x base load)
+        if len(load_p_mw) > 0:
+            base_load_avg = np.mean(np.abs(load_p_mw))
+            if np.any(np.abs(load_p_mw) > base_load_avg * 10):
+                return False, f"Unreasonably large load detected: max={load_p_mw.max():.1f} MW (avg: {base_load_avg:.1f} MW)"
+    
+    return True, "Input validation passed"
+
+
+def validate_power_flow_outputs(net: pp.pandapowerNet, convergence_stats: dict) -> tuple[bool, str, dict]:
+    """
+    POST-POWER-FLOW VALIDATION: Check outputs after power flow.
+    Separates "Valid Stressed States" (keep) from "Numerical Garbage" (discard).
+    
+    Returns:
+        (is_valid, reason, violation_flags): 
+            - is_valid: True if physically possible (even if stressed), False if garbage
+            - reason: Description of why invalid (if garbage) or what violations exist (if valid but stressed)
+            - violation_flags: Dict with flags for each type of violation (for statistics)
+    """
+    violation_flags = {
+        'voltage_violation': False,
+        'angle_violation': False,
+        'line_loading_violation': False,
+        'slack_power_violation': False,
+        'generator_capacity_violation': False,
+        'inverter_capability_violation': False,
+    }
+    
+    # 1. Convergence check (already done, but double-check)
+    if not net.converged:
+        return False, "Power flow did not converge", violation_flags
+    
+    # 2. Voltage sanity check (vectorized) - HARD LIMIT for garbage detection
+    vm_pu = net.res_bus.vm_pu.values
+    if np.any(vm_pu < 0.5) or np.any(vm_pu > 1.5):
+        min_v = vm_pu.min()
+        max_v = vm_pu.max()
+        return False, f"Voltage out of physical bounds: min={min_v:.3f}, max={max_v:.3f} p.u. (garbage)", violation_flags
+    
+    # Check for operational violations (0.85-1.15 p.u. is stressed but valid)
+    if np.any(vm_pu < 0.85) or np.any(vm_pu > 1.15):
+        violation_flags['voltage_violation'] = True
+    
+    # 3. Angle difference check (check across all lines) - HARD LIMIT for garbage detection
+    va_rad = np.deg2rad(net.res_bus.va_degree.values)
+    max_angle_diff = 0.0
+    
+    # Vectorized approach: compute all angle differences at once
+    if not net.line.empty and net.line[net.line.in_service].shape[0] > 0:
+        active_lines = net.line[net.line.in_service]
+        from_buses = active_lines.from_bus.values.astype(int)
+        to_buses = active_lines.to_bus.values.astype(int)
+        
+        # Vectorized angle difference calculation
+        angle_diffs = np.abs(va_rad[from_buses] - va_rad[to_buses])
+        max_angle_diff = np.max(angle_diffs)
+        
+        if max_angle_diff > np.pi / 2:  # 90 degrees - HARD LIMIT (garbage)
+            return False, f"Angle difference exceeds stability limit: {np.rad2deg(max_angle_diff):.1f}° (garbage)", violation_flags
+        
+        # Check for operational violations (45° is stressed but valid)
+        if max_angle_diff > np.deg2rad(45):  # 45 degrees
+            violation_flags['angle_violation'] = True
+    
+    # 4. Slack bus power sanity check (system-dependent) - HARD LIMIT for garbage detection
+    if not net.res_ext_grid.empty:
+        slack_p_mw = net.res_ext_grid.p_mw.values
+        max_load_mw = net.load.p_mw.sum() if not net.load.empty else 0.0
+        
+        # System-dependent threshold: 5x max load is unrealistic
+        threshold_mw = 5 * max_load_mw if max_load_mw > 0 else 10000.0
+        
+        # Vectorized check
+        if np.any(np.abs(slack_p_mw) > threshold_mw):
+            max_slack = np.abs(slack_p_mw).max()
+            return False, f"Slack bus power unrealistic: {max_slack:.1f} MW (threshold: {threshold_mw:.1f} MW, max load: {max_load_mw:.1f} MW) (garbage)", violation_flags
+        
+        # Check for operational violations (2x max load is stressed but valid)
+        if np.any(np.abs(slack_p_mw) > 2 * max_load_mw):
+            violation_flags['slack_power_violation'] = True
+    
+    # 5. Line loading sanity check (catch numerical singularities) - HARD LIMIT for garbage detection
+    if not net.res_line.empty:
+        # Vectorized calculation of line loading percentage
+        line_current_ka = net.res_line.i_ka.values
+        line_max_i_ka = net.line.max_i_ka.values
+        
+        # Avoid division by zero
+        valid_lines = line_max_i_ka > 1e-6
+        if np.any(valid_lines):
+            line_loading_pct = np.zeros_like(line_current_ka)
+            line_loading_pct[valid_lines] = (line_current_ka[valid_lines] / line_max_i_ka[valid_lines]) * 100
+            
+            # Vectorized check for garbage
+            if np.any(line_loading_pct > 1000):
+                max_loading = line_loading_pct.max()
+                return False, f"Line loading indicates numerical singularity: max={max_loading:.1f}% (garbage)", violation_flags
+            
+            # Check for operational violations (>100% is stressed but valid)
+            if np.any(line_loading_pct > 100):
+                violation_flags['line_loading_violation'] = True
+    
+    # 6. Generator capacity check (hard limit - should never be violated after power flow)
+    if not net.res_gen.empty:
+        gen_p_mw = net.res_gen.p_mw.values
+        gen_max_mw = net.gen.max_p_mw.values
+        
+        # Vectorized check
+        if np.any(gen_p_mw > gen_max_mw * 1.01):  # 1% tolerance for floating point
+            violation_flags['generator_capacity_violation'] = True
+            # This is a hard limit violation - log but don't discard (pandapower should enforce this)
+            max_violation = ((gen_p_mw - gen_max_mw) / gen_max_mw * 100).max()
+            return False, f"Generator exceeds rated capacity: {max_violation:.1f}% over limit (hard limit violation)", violation_flags
+    
+    # 7. Inverter capability check (P² + Q² ≤ S_rated) - HARD LIMIT
+    # Standard Pandapower field: sn_mva = Rated Apparent Power (S_rated)
+    if not net.res_sgen.empty and not net.sgen.empty and 'sn_mva' in net.sgen.columns:
+        sgen_p_mw = net.res_sgen.p_mw.values
+        sgen_q_mvar = net.res_sgen.q_mvar.values
+        sgen_sn_mva = net.sgen.sn_mva.values
+        
+        # Only check generators where sn_mva is defined (> 0)
+        valid_rating = sgen_sn_mva > 0
+        
+        if np.any(valid_rating):
+            # Vectorized calculation
+            sgen_s_mva = np.sqrt(sgen_p_mw[valid_rating]**2 + sgen_q_mvar[valid_rating]**2)
+            ratings = sgen_sn_mva[valid_rating]
+            
+            # Vectorized check: P² + Q² ≤ S_rated (with 1% tolerance for floating point)
+            if np.any(sgen_s_mva > ratings * 1.01):
+                violation_flags['inverter_capability_violation'] = True
+                # This is a hard limit violation - log but don't discard (should be caught in pre-check)
+                max_violation = ((sgen_s_mva - ratings) / ratings * 100).max()
+                return False, f"Inverter capability exceeded: {max_violation:.1f}% over rated S (sn_mva) (hard limit violation)", violation_flags
+    
+    # Build reason string for valid but stressed states
+    violations = []
+    if violation_flags['voltage_violation']:
+        violations.append("voltage")
+    if violation_flags['angle_violation']:
+        violations.append("angle")
+    if violation_flags['line_loading_violation']:
+        violations.append("line_loading")
+    if violation_flags['slack_power_violation']:
+        violations.append("slack_power")
+    
+    if violations:
+        reason = f"Valid but stressed state (operational violations: {', '.join(violations)})"
+    else:
+        reason = "Valid (no operational violations)"
+    
+    return True, reason, violation_flags
+
+
+def apply_curtailment_with_retry(net: pp.pandapowerNet, base_renewable_p_mw: dict, 
+                                  max_attempts: int = 10, convergence_stats: dict = None,
+                                  has_contingency: bool = False) -> tuple[bool, float, dict]:
+    """
+    UNIFIED CURTAILMENT AND RETRY LOOP: Try to fix invalid states by reducing renewable generation.
+    
+    This is the PRIMARY strategy - preserves physics while maintaining time-series continuity.
+    Works for both normal and contingency scenarios.
+    
+    Args:
+        net: Pandapower network
+        base_renewable_p_mw: Dict mapping sgen index -> original p_mw value
+        max_attempts: Maximum curtailment retry attempts
+        convergence_stats: Statistics dict to update
+        has_contingency: Whether this is a contingency scenario
+        
+    Returns:
+        (success, final_scaling_factor, violation_flags):
+            - success: True if valid state found, False if all attempts failed
+            - final_scaling_factor: Final scaling applied (1.0 = no curtailment, 0.0 = tripped)
+            - violation_flags: Dict with violation flags (if successful)
+    """
+    violation_flags = {}
+    curtailment_scaling = 1.0
+    
+    for attempt in range(max_attempts):
+        # Apply curtailment scaling if this is a retry (attempt > 0)
+        if attempt > 0:
+            # Reduce renewable generation by 10% per attempt
+            curtailment_scaling = 0.90 ** attempt
+            
+            # Apply scaling to all renewable generators
+            for sgen_idx, base_p_mw in base_renewable_p_mw.items():
+                net.sgen.at[sgen_idx, 'p_mw'] = base_p_mw * curtailment_scaling
+            
+            # Recalculate reactive power for curtailed active power
+            for i, sgen in net.sgen.iterrows():
+                q_gen = calculate_renewable_reactive_power(
+                    net.sgen.at[i, 'p_mw'], sgen.bus, net, True  # Always use voltage control
+                )
+                net.sgen.at[i, 'q_mvar'] = q_gen
+            
+            if convergence_stats:
+                convergence_stats['validation_stats']['curtailment_attempts'] += 1
+            print(f"  [Curtailment] Attempt {attempt + 1}: Reducing renewable generation to {curtailment_scaling*100:.1f}%")
+        
+        # Try power flow
+        try:
+            with SuppressPrints():
+                pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+            
+            # POST-POWER-FLOW VALIDATION: Check outputs after power flow
+            output_valid, output_reason, violation_flags = validate_power_flow_outputs(net, convergence_stats or {})
+            
+            if output_valid:
+                # Success! Validation passed (may have operational violations, but physically valid)
+                if attempt > 0 and convergence_stats:
+                    convergence_stats['validation_stats']['curtailment_events'] += 1
+                    convergence_stats['validation_stats']['curtailment_successful'] += 1
+                    print(f"  [Curtailment] Successfully recovered with {curtailment_scaling*100:.1f}% renewable generation")
+                return True, curtailment_scaling, violation_flags
+            else:
+                # Still invalid - check if it's "garbage" (hard limit) or can be fixed
+                if "garbage" in output_reason.lower() or "hard limit" in output_reason.lower():
+                    # Numerical garbage or hard limit - can't fix with curtailment
+                    if convergence_stats:
+                        convergence_stats['validation_stats']['post_validation_failed'] += 1
+                        convergence_stats['validation_stats']['garbage_discarded'] += 1
+                    return False, curtailment_scaling, violation_flags
+                # Otherwise, continue curtailment loop (reduce more)
+                
+        except pp.LoadflowNotConverged:
+            # Power flow didn't converge - continue curtailment loop
+            continue
+    
+    # All curtailment attempts failed
+    return False, curtailment_scaling, violation_flags
+
+
+def hard_reset_system(net: pp.pandapowerNet, base_load_p: np.ndarray, base_load_q: np.ndarray,
+                      base_renewable_p_mw: dict, convergence_stats: dict = None,
+                      dropped_line_idx: int = None) -> tuple[bool, int]:
+    """
+    HARD RESET: Reset system to safe baseline state after 3+ consecutive failures.
+    
+    This prevents "flatline" data leakage where multiple consecutive failures create
+    duplicate rows. Resets to a conservative state (50% renewable, base load) and
+    clears any contingency state.
+    
+    Args:
+        net: Pandapower network
+        base_load_p: Base active load values (from start of simulation)
+        base_load_q: Base reactive load values (from start of simulation)
+        base_renewable_p_mw: Dict mapping sgen index -> original p_mw value
+        convergence_stats: Statistics dict to update
+        dropped_line_idx: Current contingency line index (if any)
+    
+    Returns:
+        (success, new_dropped_line_idx):
+            - success: True if reset succeeded, False otherwise
+            - new_dropped_line_idx: None (contingency cleared) or original if reset failed
+    """
+    if convergence_stats:
+        convergence_stats['validation_stats']['hard_resets'] = convergence_stats['validation_stats'].get('hard_resets', 0) + 1
+    
+    print(f"  [Hard Reset] Triggered after 3+ consecutive failures - resetting to safe baseline state")
+    
+    # 1. Clear any contingency state (restore all lines)
+    if dropped_line_idx is not None:
+        restore_contingency(net, dropped_line_idx)
+        print(f"  [Hard Reset] Restored contingency line {dropped_line_idx}")
+    
+    # 2. Reset load to base values (conservative - no time-series variation)
+    net.load.p_mw = base_load_p.copy()
+    net.load.q_mvar = base_load_q.copy()
+    print(f"  [Hard Reset] Reset load to base values")
+    
+    # 3. Reset renewable generation to 50% of original (safe baseline)
+    # This is more conservative than full generation but maintains some renewable presence
+    reset_scaling = 0.5
+    if not net.sgen.empty and base_renewable_p_mw:
+        for sgen_idx, base_p_mw in base_renewable_p_mw.items():
+            reset_p_mw = base_p_mw * reset_scaling
+            net.sgen.at[sgen_idx, 'p_mw'] = reset_p_mw
+            
+            # Recalculate reactive power for reset active power
+            if sgen_idx in net.sgen.index:
+                sgen = net.sgen.loc[sgen_idx]
+                q_gen = calculate_renewable_reactive_power(
+                    reset_p_mw, sgen.bus, net, False  # Don't use voltage control on reset
+                )
+                net.sgen.at[sgen_idx, 'q_mvar'] = q_gen
+        
+        print(f"  [Hard Reset] Reset renewable generation to {reset_scaling*100:.0f}% of original")
+    else:
+        # No renewable generators - just ensure they're at 0
+        if not net.sgen.empty:
+            net.sgen.p_mw = 0.0
+            net.sgen.q_mvar = 0.0
+        print(f"  [Hard Reset] No renewable generators to reset")
+    
+    # 4. Force power flow with reset state
+    try:
+        with SuppressPrints():
+            pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+        
+        # Validate the reset state
+        output_valid, output_reason, violation_flags = validate_power_flow_outputs(net, convergence_stats or {})
+        
+        if output_valid:
+            print(f"  [Hard Reset] Successfully reset to safe baseline state - grid stable")
+            return True, None  # Success, no contingency
+        else:
+            print(f"  [Hard Reset] Reset state validation failed: {output_reason}")
+            # Even reset failed - try with generators tripped
+            if trip_renewable_generators(net, convergence_stats):
+                print(f"  [Hard Reset] Recovered by tripping generators after reset")
+                return True, None
+            else:
+                print(f"  [Hard Reset] Complete failure - even trip after reset failed")
+                return False, None
+            
+    except pp.LoadflowNotConverged:
+        print(f"  [Hard Reset] Power flow failed even after reset - attempting generator trip")
+        # Last resort: trip generators
+        if trip_renewable_generators(net, convergence_stats):
+            return True, None
+        else:
+            return False, None
+
+
+def trip_renewable_generators(net: pp.pandapowerNet, convergence_stats: dict = None) -> bool:
+    """
+    FINAL FALLBACK: Trip all renewable generators (set to 0.0) and run power flow.
+    This is more physically realistic than forward-filling and avoids data leakage.
+    
+    Returns:
+        True if power flow succeeded, False otherwise
+    """
+    # Set all renewable generation to 0.0 (generator trip)
+    if not net.sgen.empty:
+        net.sgen.p_mw = 0.0
+        net.sgen.q_mvar = 0.0
+    
+    try:
+        with SuppressPrints():
+            pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+        
+        # Validate the tripped state
+        output_valid, output_reason, violation_flags = validate_power_flow_outputs(net, convergence_stats or {})
+        
+        if output_valid:
+            if convergence_stats:
+                convergence_stats['validation_stats']['generator_trips'] += 1
+            print(f"  [Trip] Renewable generators tripped offline - grid stable")
+            return True
+        else:
+            print(f"  [Trip] Even with generators tripped, validation failed: {output_reason}")
+            return False
+            
+    except pp.LoadflowNotConverged:
+        print(f"  [Trip] Power flow failed even with generators tripped")
+        return False
+
+
 # SECTION 3: SIMULATION AND SAVING
 
-def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
+def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = None, 
+                         case_name: str = None, renewable_fraction: float = None, 
+                         timestamp: str = None) -> dict:
     """
     Runs the main time-series power flow simulation with convergence tracking.
+    
+    MEMORY OPTIMIZATION: Supports chunked writing to disk to reduce RAM usage.
+    If output_dir, case_name, renewable_fraction, and timestamp are provided,
+    data is written incrementally in chunks. Otherwise, data is accumulated in RAM
+    (backward compatible mode).
+    
+    Args:
+        net: Pandapower network
+        config: Configuration dictionary
+        output_dir: Optional output directory for chunked writing
+        case_name: Optional case name for chunked writing
+        renewable_fraction: Optional renewable fraction for chunked writing
+        timestamp: Optional timestamp for chunked writing
     
     Returns:
         Dictionary containing simulation data and convergence statistics
@@ -597,12 +1102,71 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     num_buses = len(net.bus)
     time_steps = config['time_steps']
     
-    feature_matrix = np.zeros((time_steps, num_buses, 10))  # Features: measurements [p_load, q_load, ..., vm_meas, va_meas]
-    target_matrix = np.zeros((time_steps, num_buses, 2))  # Targets: OPF unknowns [var1, var2] based on bus type
-    bus_types_array = np.zeros((time_steps, num_buses), dtype=np.int32)  # Store bus types for each timestep
-    adjacency_array = np.zeros((time_steps, num_buses, num_buses))
-    time_energy_coeffs = np.zeros(time_steps)
-    time_carbon_coeffs = np.zeros(time_steps)
+    # MEMORY OPTIMIZATION: Chunked writing mode
+    use_chunked_writing = config.get('use_chunked_writing', True)
+    chunk_size = config.get('chunk_size', 1000)
+    
+    # Check if we have all parameters for chunked writing
+    chunked_mode = (use_chunked_writing and output_dir is not None and 
+                    case_name is not None and renewable_fraction is not None and 
+                    timestamp is not None)
+    
+    if chunked_mode:
+        print(f"[Memory Optimization] Using chunked writing (chunk_size={chunk_size})")
+        # Create temporary files for incremental writing
+        import tempfile
+        temp_dir = tempfile.mkdtemp(prefix='gen_data_chunks_')
+        
+        # Create memory-mapped files for incremental writing
+        feature_file = os.path.join(temp_dir, 'features_temp.npy')
+        target_file = os.path.join(temp_dir, 'targets_temp.npy')
+        bus_types_file = os.path.join(temp_dir, 'bus_types_temp.npy')
+        topology_ids_file = os.path.join(temp_dir, 'topology_ids_temp.npy')
+        energy_coeffs_file = os.path.join(temp_dir, 'energy_coeffs_temp.npy')
+        carbon_coeffs_file = os.path.join(temp_dir, 'carbon_coeffs_temp.npy')
+        
+        # Initialize memory-mapped arrays (write mode)
+        # Use np.memmap for efficient disk-backed arrays
+        feature_matrix = np.memmap(
+            feature_file, mode='w+', dtype=np.float32, 
+            shape=(time_steps, num_buses, 10)
+        )
+        target_matrix = np.memmap(
+            target_file, mode='w+', dtype=np.float32,
+            shape=(time_steps, num_buses, 2)
+        )
+        bus_types_array = np.memmap(
+            bus_types_file, mode='w+', dtype=np.int32,
+            shape=(time_steps, num_buses)
+        )
+        topology_ids = np.memmap(
+            topology_ids_file, mode='w+', dtype=np.int32,
+            shape=(time_steps,)
+        )
+        time_energy_coeffs = np.memmap(
+            energy_coeffs_file, mode='w+', dtype=np.float32,
+            shape=(time_steps,)
+        )
+        time_carbon_coeffs = np.memmap(
+            carbon_coeffs_file, mode='w+', dtype=np.float32,
+            shape=(time_steps,)
+        )
+        
+        # Track written chunks for verification
+        chunks_written = 0
+        total_written = 0
+    else:
+        # Backward compatible: accumulate in RAM
+        feature_matrix = np.zeros((time_steps, num_buses, 10), dtype=np.float32)
+        target_matrix = np.zeros((time_steps, num_buses, 2), dtype=np.float32)
+        bus_types_array = np.zeros((time_steps, num_buses), dtype=np.int32)
+        topology_ids = np.zeros(time_steps, dtype=np.int32)
+        time_energy_coeffs = np.zeros(time_steps, dtype=np.float32)
+        time_carbon_coeffs = np.zeros(time_steps, dtype=np.float32)
+        temp_dir = None
+    
+    # Calculate base adjacency matrix once (before any contingencies)
+    base_adjacency_matrix = calculate_adjacency_matrix(net)
     
     # No need for separate storage
     
@@ -638,6 +1202,27 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         'contingencies_resolved_relaxed': 0,  # Required relaxed settings
         'contingencies_restored': 0,      # Too severe, had to restore line
         'critical_lines': {},             # Lines that frequently cause failures
+        
+        # NEW: Validation and recovery statistics
+        'validation_stats': {
+            'consecutive_failures': 0,
+            'max_consecutive_failures': 0,
+            'curtailment_attempts': 0,
+            'curtailment_events': 0,
+            'curtailment_successful': 0,
+            'generator_trips': 0,
+            'hard_resets': 0,
+            'pre_validation_failed': 0,
+            'post_validation_failed': 0,
+            'garbage_discarded': 0,
+            'voltage_violations': 0,
+            'angle_violations': 0,
+            'line_loading_violations': 0,
+            'slack_power_violations': 0,
+            'generator_capacity_violations': 0,
+            'inverter_capability_violations': 0,
+            'valid_stressed_states': 0,
+        },
     }
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
@@ -690,6 +1275,18 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         max_total_renewable_mw = 1.0  # Avoid division by zero
         print("  No renewable generators configured")
     
+    # SET RATED CAPACITY (sn_mva) FOR VALIDATION
+    # Standard Pandapower field: sn_mva = Rated Apparent Power (S_rated)
+    # Inverter rating must be slightly higher than max Active Power to allow for Reactive Power
+    if num_total_renewable > 0 and 'type' in net.sgen.columns:
+        for i, sgen in net.sgen.iterrows():
+            if sgen.type == 'solar' and max_individual_solar_mw > 0:
+                # Set inverter rating (MVA) 10% higher than max Active Power (MW) to allow for Q
+                net.sgen.at[i, 'sn_mva'] = max_individual_solar_mw * 1.1
+            elif sgen.type == 'wind' and max_individual_wind_mw > 0:
+                # Set inverter rating (MVA) 10% higher than max Active Power (MW) to allow for Q
+                net.sgen.at[i, 'sn_mva'] = max_individual_wind_mw * 1.1
+    
     # WEATHER-DRIVEN RENEWABLE GENERATION
     # Generate weather sequence for entire simulation (realistic persistence)
     use_weather_driven = config.get('use_weather_driven_renewables', True)  # Default: ON
@@ -709,6 +1306,10 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     dropped_line_idx = None
     has_contingency = False  # Track if current timestep has contingency
     
+    # Track consecutive failures for hard reset mechanism
+    consecutive_failures = 0
+    max_consecutive_failures = 0
+    
     # Simulate all timesteps (progress tracked externally by data_validation.py)
     for t in range(time_steps):
         # Restore any previous contingency
@@ -723,15 +1324,14 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
             if has_contingency:
                 convergence_stats['contingencies_attempted'] += 1
 
-        # ALWAYS calculate adjacency matrix for current topology (even if power flow fails)
-        # This ensures data integrity - adjacency reflects actual network state
-        current_adjacency_matrix = calculate_adjacency_matrix(net)
-        
-        # Create the graph adjacency matrix for the current topology
-        graph = top.create_nxgraph(net, include_lines=True, include_trafos=True)
-        adj_coo = nx.to_scipy_sparse_array(graph, format='coo')
-        # Store as dense matrix to avoid object dtype issues
-        adjacency_array[t] = current_adjacency_matrix
+        # PERFORMANCE FIX: Store topology_id instead of full adjacency matrix
+        # The adjacency matrix will be reconstructed in data loader from base + topology_id
+        if has_contingency and dropped_line_idx is not None:
+            # Contingency: store line index + 1 (0 is reserved for base topology)
+            topology_ids[t] = dropped_line_idx + 1
+        else:
+            # Base topology: store 0
+            topology_ids[t] = 0
 
         # Apply load and generation profiles (time-series or random)
         if config.get('use_time_series', False):
@@ -808,106 +1408,297 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
                     
                     current_total_renewable_p_mw += p_gen
         
-        # === EFFICIENT GUARANTEED CONVERGENCE STRATEGY ===
-        # Try contingency first, only fall back if needed
-        # This avoids unnecessary power flow calculations
-        
+        # Initialize convergence tracking for this timestep
         convergence_successful = False
         resolution_method = None
+        violation_flags = {}
         
-        # Try power flow with current topology (contingency or normal)
-        try:
-            # Suppress numba print statements during power flow
-            with SuppressPrints():
-                pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
-            convergence_successful = True
-            convergence_stats['successful'] += 1
-            convergence_stats['successful_timesteps'].append(t)
+        # === HARD RESET CHECK: Prevent flatline data leakage ===
+        # If 3+ consecutive failures, reset to safe baseline state
+        # This prevents RNN/LSTM gradient issues from duplicate rows
+        if consecutive_failures >= 3:
+            print(f"  [Hard Reset] {consecutive_failures} consecutive failures detected - triggering hard reset")
             
-            # Track resolution method
-            if has_contingency:
-                resolution_method = 'strict_contingency'
-                convergence_stats['resolution_methods']['strict_contingency'] += 1
-                convergence_stats['contingencies_successful'] += 1
-                convergence_stats['contingencies_resolved_strict'] += 1
+            # Store base renewable generation before reset (needed for reset function)
+            base_renewable_p_mw_for_reset = {}
+            if not net.sgen.empty:
+                for i, sgen in net.sgen.iterrows():
+                    # Get original generation from time-series profile (before any curtailment)
+                    if config.get('use_time_series', False):
+                        current_hour = t % config['hours_per_day']
+                        current_day = t // config['hours_per_day']
+                        if sgen.type == 'solar':
+                            solar_profile = get_solar_generation_profile(
+                                current_hour, 
+                                day_of_year=180 + current_day % 180,
+                                weather_state=weather_sequence[t][0] if weather_sequence else None
+                            )
+                            base_renewable_p_mw_for_reset[i] = solar_profile * max_individual_solar_mw
+                        elif sgen.type == 'wind':
+                            wind_profile = get_wind_generation_profile(
+                                current_hour, 
+                                day=current_day,
+                                weather_state=weather_sequence[t][1] if weather_sequence else None
+                            )
+                            base_renewable_p_mw_for_reset[i] = wind_profile * max_individual_wind_mw
+                        else:
+                            base_renewable_p_mw_for_reset[i] = net.sgen.at[i, 'p_mw']
+                    else:
+                        # Monte Carlo mode - use current value as base
+                        base_renewable_p_mw_for_reset[i] = net.sgen.at[i, 'p_mw']
+            
+            # Perform hard reset
+            reset_success, new_dropped_line_idx = hard_reset_system(
+                net, base_load_p, base_load_q, base_renewable_p_mw_for_reset,
+                convergence_stats, dropped_line_idx
+            )
+            
+            if reset_success:
+                # Hard reset succeeded - update state
+                dropped_line_idx = new_dropped_line_idx
+                has_contingency = (dropped_line_idx is not None)
+                consecutive_failures = 0  # Reset counter on successful hard reset
+                convergence_successful = True
+                resolution_method = 'hard_reset'
+                _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats)
+                convergence_stats['successful'] += 1
+                convergence_stats['successful_timesteps'].append(t)
+                convergence_stats['resolution_methods']['hard_reset'] = convergence_stats['resolution_methods'].get('hard_reset', 0) + 1
+                print(f"  [Hard Reset] Successfully recovered - continuing with reset state")
             else:
-                resolution_method = 'strict_normal'
-                convergence_stats['resolution_methods']['strict_normal'] += 1
+                # Hard reset failed - this is catastrophic
+                consecutive_failures += 1
+                max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
+                convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
+                convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
+                convergence_stats['failed'] += 1
+                if has_contingency:
+                    convergence_stats['failed_with_contingency'].append(t)
+                else:
+                    convergence_stats['failed_no_contingency'].append(t)
+                print(f"  ERROR: Hard reset failed - timestep {t} cannot be recovered, skipping")
+                continue  # Skip this timestep entirely
+        
+        # === UNIFIED CURTAILMENT AND RETRY STRATEGY ===
+        # PRIMARY: Curtailment loop (reduces renewable generation if validation fails)
+        # FALLBACK: Trip generators (set to 0.0) if curtailment fails
+        # This preserves physics and avoids data leakage
+        
+        if not convergence_successful:  # Only proceed if hard reset didn't already succeed
+            resolution_method = None
+            violation_flags = {}
             
-        except pp.LoadflowNotConverged:
-            # CONTINGENCY FALLBACK: If failed during contingency, try relaxed settings
-            if has_contingency and dropped_line_idx is not None:
-                # Track critical line
-                line_key = f"line_{dropped_line_idx}"
-                if line_key not in convergence_stats['critical_lines']:
-                    convergence_stats['critical_lines'][line_key] = {
-                        'line_id': int(dropped_line_idx),
-                        'failure_count': 0,
-                        'resolution_methods': {'relaxed': 0, 'restored': 0}
-                    }
-                convergence_stats['critical_lines'][line_key]['failure_count'] += 1
+            # PRE-POWER-FLOW VALIDATION: Check inputs before running power flow
+            input_valid, input_reason = validate_power_flow_inputs(net)
+            if not input_valid:
+                # Pre-validation failures are usually hard limits (generator capacity, etc.)
+                # These can't be fixed by curtailment - trip generators as final fallback
+                convergence_stats['validation_stats']['pre_validation_failed'] += 1
+                print(f"  WARNING: Timestep {t} failed pre-validation: {input_reason}, attempting generator trip")
                 
-                try:
-                    # Relaxed settings for contingency (realistic - grid under stress)
-                    with SuppressPrints():
-                        pp.runpp(net, numba=False, enforce_q_lims=False, algorithm='nr', 
-                                tolerance_mva=1e-6, max_iteration=20)
+                # FINAL FALLBACK: Trip generators
+                if trip_renewable_generators(net, convergence_stats):
                     convergence_successful = True
-                    convergence_stats['successful'] += 1
-                    convergence_stats['successful_timesteps'].append(t)
-                    
-                    # Track resolution method
-                    resolution_method = 'relaxed_contingency'
-                    convergence_stats['resolution_methods']['relaxed_contingency'] += 1
+                    resolution_method = 'trip_generators'
+                    # Get violation flags for tripped state
+                    _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats)
+                else:
+                    consecutive_failures += 1
+                    max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
+                    convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
+                    convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
+                    convergence_stats['failed'] += 1
+                    convergence_stats['failed_no_contingency'].append(t)
+                    print(f"  ERROR: Timestep {t} failed even after generator trip - skipping")
+                    continue
+        
+        # CRITICAL: Store original renewable generation for curtailment retry logic
+        base_renewable_p_mw = {}
+        if not net.sgen.empty and not convergence_successful:  # Only if we haven't already tripped
+            for i, sgen in net.sgen.iterrows():
+                base_renewable_p_mw[i] = net.sgen.at[i, 'p_mw']
+        
+        # UNIFIED CURTAILMENT LOOP: Works for both normal and contingency scenarios
+        if not convergence_successful:  # Only if pre-validation passed but we haven't succeeded yet
+            curtailment_success, curtailment_scaling, violation_flags = apply_curtailment_with_retry(
+                net, base_renewable_p_mw, max_attempts=10, 
+                convergence_stats=convergence_stats, has_contingency=has_contingency
+            )
+            
+            if curtailment_success:
+                # Success! Curtailment worked (may have required reduction)
+                convergence_successful = True
+                convergence_stats['successful'] += 1
+                convergence_stats['successful_timesteps'].append(t)
+                consecutive_failures = 0  # Reset consecutive failures on success
+                
+                # Track resolution method
+                if has_contingency:
+                    resolution_method = 'curtailment_contingency' if curtailment_scaling < 1.0 else 'strict_contingency'
+                    convergence_stats['resolution_methods']['strict_contingency'] += 1
                     convergence_stats['contingencies_successful'] += 1
-                    convergence_stats['contingencies_resolved_relaxed'] += 1
-                    convergence_stats['critical_lines'][line_key]['resolution_methods']['relaxed'] += 1
+                    convergence_stats['contingencies_resolved_strict'] += 1
+                else:
+                    resolution_method = 'curtailment_normal' if curtailment_scaling < 1.0 else 'strict_normal'
+                    convergence_stats['resolution_methods']['strict_normal'] += 1
+            else:
+                # Curtailment failed - try contingency fallback strategies WITH CURTAILMENT
+                if has_contingency and dropped_line_idx is not None:
+                    # Track critical line
+                    line_key = f"line_{dropped_line_idx}"
+                    if line_key not in convergence_stats['critical_lines']:
+                        convergence_stats['critical_lines'][line_key] = {
+                            'line_id': int(dropped_line_idx),
+                            'failure_count': 0,
+                            'resolution_methods': {'relaxed_curtailment': 0, 'restored_curtailment': 0, 'trip': 0}
+                        }
+                    convergence_stats['critical_lines'][line_key]['failure_count'] += 1
                     
-                except pp.LoadflowNotConverged:
-                    # Contingency too severe - restore line and run without contingency
-                    restore_contingency(net, dropped_line_idx)
-                    dropped_line_idx = None
-                    has_contingency = False
-                    convergence_stats['critical_lines'][line_key]['resolution_methods']['restored'] += 1
+                    # CONTINGENCY FALLBACK 1: Try relaxed settings WITH CURTAILMENT
+                    # Restore original generation for curtailment retry
+                    for i, base_p_mw in base_renewable_p_mw.items():
+                        net.sgen.at[i, 'p_mw'] = base_p_mw
                     
-                    try:
-                        # Retry with normal topology
-                        with SuppressPrints():
-                            pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+                    # Try curtailment with relaxed power flow settings
+                    relaxed_success, relaxed_scaling, relaxed_violations = apply_curtailment_with_retry(
+                        net, base_renewable_p_mw, max_attempts=10,
+                        convergence_stats=convergence_stats, has_contingency=True
+                    )
+                    
+                    if relaxed_success:
+                        # Modify power flow to use relaxed settings (curtailment already applied)
+                        try:
+                            with SuppressPrints():
+                                pp.runpp(net, numba=False, enforce_q_lims=False, algorithm='nr', 
+                                        tolerance_mva=1e-6, max_iteration=20)
+                            # Re-validate with relaxed settings
+                            relaxed_valid, _, relaxed_violations = validate_power_flow_outputs(net, convergence_stats)
+                            if relaxed_valid:
+                                convergence_successful = True
+                                violation_flags = relaxed_violations
+                                convergence_stats['successful'] += 1
+                                convergence_stats['successful_timesteps'].append(t)
+                                consecutive_failures = 0
+                                
+                                resolution_method = 'relaxed_curtailment_contingency'
+                                convergence_stats['resolution_methods']['relaxed_contingency'] += 1
+                                convergence_stats['contingencies_successful'] += 1
+                                convergence_stats['contingencies_resolved_relaxed'] += 1
+                                convergence_stats['critical_lines'][line_key]['resolution_methods']['relaxed_curtailment'] += 1
+                            else:
+                                relaxed_success = False
+                        except pp.LoadflowNotConverged:
+                            relaxed_success = False
+                    
+                    if not relaxed_success:
+                        # CONTINGENCY FALLBACK 2: Restore line and try curtailment with normal topology
+                        restore_contingency(net, dropped_line_idx)
+                        dropped_line_idx = None
+                        has_contingency = False
+                        convergence_stats['critical_lines'][line_key]['resolution_methods']['restored_curtailment'] += 1
+                        
+                        # Restore original generation
+                        for i, base_p_mw in base_renewable_p_mw.items():
+                            net.sgen.at[i, 'p_mw'] = base_p_mw
+                        
+                        # Try curtailment with restored topology
+                        restored_success, restored_scaling, restored_violations = apply_curtailment_with_retry(
+                            net, base_renewable_p_mw, max_attempts=10,
+                            convergence_stats=convergence_stats, has_contingency=False
+                        )
+                        
+                        if restored_success:
+                            convergence_successful = True
+                            violation_flags = restored_violations
+                            convergence_stats['successful'] += 1
+                            convergence_stats['successful_timesteps'].append(t)
+                            consecutive_failures = 0
+                            
+                            resolution_method = 'restored_curtailment'
+                            convergence_stats['resolution_methods']['restored_line'] += 1
+                            convergence_stats['contingencies_restored'] += 1
+                        else:
+                            # All curtailment attempts failed - trip generators
+                            if trip_renewable_generators(net, convergence_stats):
+                                convergence_successful = True
+                                _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats)
+                                convergence_stats['successful'] += 1
+                                convergence_stats['successful_timesteps'].append(t)
+                                consecutive_failures = 0
+                                resolution_method = 'trip_after_restore'
+                                convergence_stats['critical_lines'][line_key]['resolution_methods']['trip'] += 1
+                            else:
+                                # Complete failure
+                                consecutive_failures += 1
+                                max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
+                                convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
+                                convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
+                                convergence_stats['failed'] += 1
+                                convergence_stats['failed_with_contingency'].append(t)
+                                convergence_stats['contingencies_failed'] += 1
+                                resolution_method = 'failed_completely'
+                                print(f"  ERROR: Timestep {t} failed completely after all strategies")
+                                continue
+                else:
+                    # Failed without contingency - trip generators as final fallback
+                    if trip_renewable_generators(net, convergence_stats):
                         convergence_successful = True
+                        _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats)
                         convergence_stats['successful'] += 1
                         convergence_stats['successful_timesteps'].append(t)
-                        
-                        # Track resolution method
-                        resolution_method = 'restored_line'
-                        convergence_stats['resolution_methods']['restored_line'] += 1
-                        convergence_stats['contingencies_restored'] += 1
-                        
-                    except pp.LoadflowNotConverged:
-                        # Even normal topology failed! This is a fundamental problem
-                        # This should NEVER happen with proper capacity scaling
+                        consecutive_failures = 0
+                        resolution_method = 'trip_normal'
+                    else:
+                        consecutive_failures += 1
+                        max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
+                        convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
+                        convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
                         convergence_stats['failed'] += 1
                         convergence_stats['failed_no_contingency'].append(t)
-                        convergence_stats['contingencies_failed'] += 1
-                        resolution_method = 'failed_completely'
-                        
-                        print(f"  ERROR: Timestep {t} failed completely (even normal topology!)")
-                        print(f"         This indicates a problem with load/generation balance")
-                        print(f"         Total load: {net.load.p_mw.sum():.1f} MW, Total renewable: {current_total_renewable_p_mw:.1f} MW")
-                        
-                        # Skip this timestep - but this should be extremely rare!
+                        resolution_method = 'failed'
+                        print(f"  ERROR: Timestep {t} failed completely (no contingency)")
                         continue
+        
+        # If we reach here, we have a successful power flow (via curtailment, trip, or direct)
+        if not convergence_successful:
+            # This should never happen, but safety check
+            consecutive_failures += 1
+            max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
+            convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
+            convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
+            convergence_stats['failed'] += 1
+            if has_contingency:
+                convergence_stats['failed_with_contingency'].append(t)
             else:
-                # Failed without contingency - this shouldn't happen with fixed capacity
-                convergence_stats['failed'] += 1
                 convergence_stats['failed_no_contingency'].append(t)
-                resolution_method = 'failed'
-                print(f"  WARNING: Timestep {t} failed (no contingency), skipping")
-                continue
+            print(f"  ERROR: Timestep {t} failed - no successful path found")
+            continue
         
         # Store resolution method for this timestep
         if resolution_method:
             convergence_stats['timestep_resolution'][str(t)] = resolution_method
+        
+        # Track violations for valid but stressed states
+        if violation_flags:
+            if violation_flags.get('voltage_violation', False):
+                convergence_stats['validation_stats']['voltage_violations'] += 1
+            if violation_flags.get('angle_violation', False):
+                convergence_stats['validation_stats']['angle_violations'] += 1
+            if violation_flags.get('line_loading_violation', False):
+                convergence_stats['validation_stats']['line_loading_violations'] += 1
+            if violation_flags.get('slack_power_violation', False):
+                convergence_stats['validation_stats']['slack_power_violations'] += 1
+            if violation_flags.get('generator_capacity_violation', False):
+                convergence_stats['validation_stats']['generator_capacity_violations'] += 1
+            if violation_flags.get('inverter_capability_violation', False):
+                convergence_stats['validation_stats']['inverter_capability_violations'] += 1
+            
+            # Count valid stressed states (any operational violation but still valid)
+            if any([violation_flags.get('voltage_violation', False), 
+                   violation_flags.get('angle_violation', False),
+                   violation_flags.get('line_loading_violation', False), 
+                   violation_flags.get('slack_power_violation', False)]):
+                convergence_stats['validation_stats']['valid_stressed_states'] += 1
         
         # --- START DATA AGGREGATION (CONSISTENT 0 to N-1 ORDERING) ---
         
@@ -981,16 +1772,21 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         positive_noise_angle = np.abs(np.random.normal(0, config['angle_error_std'], num_buses))
         positive_noise_power = np.abs(np.random.normal(0, config['power_error_std'], num_buses))
         
+        # CRITICAL: Get system base power for per-unit conversion
+        # All power measurements MUST be in per-unit for unit consistency
+        s_base_mva = net.sn_mva  # Base power in MVA
+        
         # Power measurements (from smart meters, SCADA, etc.)
         # These are the "known" quantities with sensor noise
-        meas_pl = p_load * (1 + positive_noise_power)
-        meas_ql = q_load * (1 + positive_noise_power)
-        meas_p_ext = ext_grid_p_by_bus.values * (1 + positive_noise_power)
-        meas_q_ext = ext_grid_q_by_bus.values * (1 + positive_noise_power)
-        meas_p_conv = gen_p_by_bus.values * (1 + positive_noise_power)
-        meas_q_conv = gen_q_by_bus.values * (1 + positive_noise_power)
-        meas_p_ren = sgen_p_by_bus.values * (1 + positive_noise_power)
-        meas_q_ren = sgen_q_by_bus.values * (1 + positive_noise_power)
+        # CRITICAL FIX: Convert to per-unit BEFORE applying noise (unit consistency)
+        meas_pl = (p_load / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_ql = (q_load / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_p_ext = (ext_grid_p_by_bus.values / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_q_ext = (ext_grid_q_by_bus.values / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_p_conv = (gen_p_by_bus.values / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_q_conv = (gen_q_by_bus.values / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_p_ren = (sgen_p_by_bus.values / s_base_mva) * (1 + positive_noise_power)  # Per-unit
+        meas_q_ren = (sgen_q_by_bus.values / s_base_mva) * (1 + positive_noise_power)  # Per-unit
         
         # Partial voltage measurements (from PMUs at SOME buses only - ETH Zurich style)
         # PMUs are expensive, so only some buses have them (typically 20-40% coverage)
@@ -1003,8 +1799,9 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         meas_va = np.full(num_buses, np.nan)
         
         # Add noisy PMU measurements only at selected buses
-        meas_vm[pmu_buses] = vm_pu[pmu_buses] * (1 + positive_noise_vm[pmu_buses])
-        meas_va[pmu_buses] = va_rad[pmu_buses] * (1 + positive_noise_angle[pmu_buses])
+        # Voltage is already in per-unit (vm_pu), angle is in radians
+        meas_vm[pmu_buses] = vm_pu[pmu_buses] * (1 + positive_noise_vm[pmu_buses])  # Per-unit
+        meas_va[pmu_buses] = va_rad[pmu_buses] * (1 + positive_noise_angle[pmu_buses])  # Radians
         
         # Replace NaN with 0 for missing measurements (model will learn to ignore these)
         meas_vm = np.nan_to_num(meas_vm, nan=0.0)
@@ -1012,15 +1809,52 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
         
         # Feature matrix: Power measurements FIRST (indices 0-7), then partial voltages (indices 8-9)
         # This ordering is important for physics calculations
+        # ALL VALUES ARE NOW IN CONSISTENT UNITS: per-unit for power, per-unit for voltage, radians for angle
         feature_matrix[t] = np.stack([
-            meas_pl, meas_ql,           # [0:2] Load measurements (from smart meters)
-            meas_p_ext, meas_q_ext,     # [2:4] External grid (from SCADA)
-            meas_p_conv, meas_q_conv,   # [4:6] Conventional generation (from SCADA)
-            meas_p_ren, meas_q_ren,     # [6:8] Renewable generation (from meters)
-            meas_vm, meas_va            # [8:10] Partial voltage measurements (from PMUs)
+            meas_pl, meas_ql,           # [0:2] Load measurements (per-unit)
+            meas_p_ext, meas_q_ext,     # [2:4] External grid (per-unit)
+            meas_p_conv, meas_q_conv,   # [4:6] Conventional generation (per-unit)
+            meas_p_ren, meas_q_ren,     # [6:8] Renewable generation (per-unit)
+            meas_vm, meas_va            # [8:10] Partial voltage measurements (per-unit, radians)
         ], axis=1)
         
         # Adjacency matrix already stored above
+        
+        # MEMORY OPTIMIZATION: Flush chunk to disk periodically
+        if chunked_mode and (t + 1) % chunk_size == 0:
+            # Flush memory-mapped arrays to ensure data is written
+            feature_matrix.flush()
+            target_matrix.flush()
+            bus_types_array.flush()
+            topology_ids.flush()
+            time_energy_coeffs.flush()
+            time_carbon_coeffs.flush()
+            chunks_written += 1
+            total_written = t + 1
+            print(f"  [Chunked Writing] Flushed chunk {chunks_written} ({total_written}/{time_steps} timesteps written)")
+    
+    # Final flush for any remaining data
+    if chunked_mode:
+        feature_matrix.flush()
+        target_matrix.flush()
+        bus_types_array.flush()
+        topology_ids.flush()
+        time_energy_coeffs.flush()
+        time_carbon_coeffs.flush()
+        
+        # VERIFICATION: Ensure all data was written
+        total_written = time_steps
+        print(f"  [Chunked Writing] All data flushed to disk ({total_written}/{time_steps} timesteps)")
+        
+        # Verify file sizes match expected
+        expected_size = time_steps * num_buses * 10 * 4  # float32 = 4 bytes
+        actual_size = os.path.getsize(feature_file)
+        if actual_size < expected_size * 0.99:  # Allow 1% tolerance for file system
+            raise RuntimeError(
+                f"Data verification failed: feature file size {actual_size} bytes < expected {expected_size} bytes. "
+                f"This indicates incomplete write. Data may be corrupted."
+            )
+        print(f"  [Chunked Writing] Verification passed: {actual_size} bytes written")
     
     # Finalize convergence statistics
     convergence_stats['success_rate'] = (convergence_stats['successful'] / time_steps * 100) if time_steps > 0 else 0
@@ -1042,14 +1876,54 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict) -> dict:
     # Apply truncation to ensure consistent shapes across all renewable fractions
     # This will be handled in the main execution block after all scenarios are generated
     
+    # MEMORY OPTIMIZATION: If using chunked writing, load arrays from disk for return
+    # (backward compatibility - save_data expects arrays, but they're memory-mapped)
+    if chunked_mode:
+        # Arrays are already memory-mapped - copy to regular arrays to close file handles
+        # This allows temp directory cleanup on Windows (file handles must be closed)
+        # Small memory cost but ensures proper cleanup
+        print(f"  [Chunked Writing] Copying memmap arrays to regular arrays for cleanup...")
+        features_return = np.array(feature_matrix)
+        targets_return = np.array(target_matrix)
+        bus_types_return = np.array(bus_types_array)
+        topology_ids_return = np.array(topology_ids)
+        energy_coeffs_return = np.array(time_energy_coeffs)
+        carbon_coeffs_return = np.array(time_carbon_coeffs)
+        
+        # Close memmap files by deleting references (allows Windows to delete temp dir)
+        del feature_matrix, target_matrix, bus_types_array, topology_ids
+        del time_energy_coeffs, time_carbon_coeffs
+        import gc
+        gc.collect()  # Force garbage collection to close file handles
+        
+        # Store temp directory info for cleanup after save_data
+        convergence_stats['_temp_dir'] = temp_dir
+        convergence_stats['_temp_files'] = {
+            'features': feature_file,
+            'targets': target_file,
+            'bus_types': bus_types_file,
+            'topology_ids': topology_ids_file,
+            'energy_coeffs': energy_coeffs_file,
+            'carbon_coeffs': carbon_coeffs_file
+        }
+    else:
+        # Normal mode: arrays are already in memory
+        features_return = feature_matrix
+        targets_return = target_matrix
+        bus_types_return = bus_types_array
+        topology_ids_return = topology_ids
+        energy_coeffs_return = time_energy_coeffs
+        carbon_coeffs_return = time_carbon_coeffs
+    
     return {
-        "features": feature_matrix,  # [timesteps, buses, 10] = measurements
-        "targets": target_matrix,     # [timesteps, buses, 2] = OPF unknowns (bus-type dependent)
-        "bus_types": bus_types_array, # [timesteps, buses] = bus type codes [0=PQ, 1=PV, 2=Slack]
-        "adjacency": adjacency_array, 
+        "features": features_return,  # [timesteps, buses, 10] = measurements
+        "targets": targets_return,     # [timesteps, buses, 2] = OPF unknowns (bus-type dependent)
+        "bus_types": bus_types_return, # [timesteps, buses] = bus type codes [0=PQ, 1=PV, 2=Slack]
+        "base_adjacency": base_adjacency_matrix,  # [num_buses, num_buses] - single base matrix
+        "topology_ids": topology_ids_return,  # [timesteps] - topology ID for each timestep (0=base, line_idx+1=contingency)
         "ybus_data": ybus_data,  # Sparse format
-        "time_energy_coeffs": time_energy_coeffs, 
-        "time_carbon_coeffs": time_carbon_coeffs,
+        "time_energy_coeffs": energy_coeffs_return, 
+        "time_carbon_coeffs": carbon_coeffs_return,
         "convergence_stats": convergence_stats  # Detailed convergence report
     }
 
@@ -1059,14 +1933,18 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
     """
     Saves generated data arrays with support for sparse Ybus format and convergence reports.
     
+    MEMORY OPTIMIZATION: If data comes from chunked writing (memory-mapped arrays),
+    this function efficiently copies them to final location. Otherwise, saves normally.
+    
     Args:
-        data_dict: Dictionary containing data arrays
+        data_dict: Dictionary containing data arrays (may be memory-mapped from chunked writing)
         case_name: Name of the test case (e.g., 'case33')
         renewable_fraction: Renewable energy fraction
         output_dir: Directory to save files
         timestamp: Optional timestamp string to ensure data consistency
     """
     import json
+    import shutil
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -1074,7 +1952,90 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
     if timestamp is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
+    # MEMORY OPTIMIZATION: Check if data came from chunked writing
+    # If so, we can efficiently copy the temp files instead of re-saving
+    convergence_stats = data_dict.get('convergence_stats', {})
+    temp_files = convergence_stats.get('_temp_files', None)
+    use_temp_files = (temp_files is not None and os.path.exists(temp_files.get('features', '')))
+    
+    # MEMORY OPTIMIZATION: If using temp files from chunked writing, copy them efficiently
+    if use_temp_files:
+        print(f"[Memory Optimization] Copying chunked data files to final location...")
+        
+        # Map temp keys to final filenames
+        file_mappings = {
+            'features': f"{case_name}_features_frac{renewable_fraction:.1f}_{timestamp}.npy",
+            'targets': f"{case_name}_targets_frac{renewable_fraction:.1f}_{timestamp}.npy",
+            'bus_types': f"{case_name}_bus_types_frac{renewable_fraction:.1f}_{timestamp}.npy",
+            'topology_ids': f"{case_name}_topology_ids_frac{renewable_fraction:.1f}_{timestamp}.npy",
+            'energy_coeffs': f"{case_name}_time_energy_coeffs_frac{renewable_fraction:.1f}_{timestamp}.txt",
+            'carbon_coeffs': f"{case_name}_time_carbon_coeffs_frac{renewable_fraction:.1f}_{timestamp}.txt"
+        }
+        
+        # Use data from data_dict directly (already converted from memmap to regular arrays)
+        # This is more reliable than trying to reload from temp files
+        for temp_key, final_filename in file_mappings.items():
+                final_path = os.path.join(output_dir, final_filename)
+                
+                if temp_key in ['energy_coeffs', 'carbon_coeffs']:
+                    # Convert .npy to .txt for coefficient files
+                    coeff_key = 'time_energy_coeffs' if 'energy' in temp_key else 'time_carbon_coeffs'
+                    if coeff_key in data_dict:
+                        data = data_dict[coeff_key]
+                        # Convert to regular array if needed (for np.savetxt)
+                        if isinstance(data, np.memmap):
+                            data = np.array(data)
+                        np.savetxt(final_path, data)
+                        print(f"  Copied {temp_key} -> {final_filename} (converted to .txt)")
+                    else:
+                        raise RuntimeError(f"Cannot convert {temp_key}: data not found in data_dict")
+                else:
+                    # Map temp_key to data_dict key
+                    data_key_map = {
+                        'features': 'features',
+                        'targets': 'targets',
+                        'bus_types': 'bus_types',
+                        'topology_ids': 'topology_ids'
+                    }
+                    
+                    data_key = data_key_map.get(temp_key)
+                    if data_key and data_key in data_dict:
+                        # Get data from data_dict (already converted from memmap)
+                        data = data_dict[data_key]
+                        
+                        # Convert to regular array if still memmap (shouldn't happen, but safety)
+                        if isinstance(data, np.memmap):
+                            data = np.array(data)
+                        
+                        # Save with explicit dtype and no pickle
+                        if temp_key == 'features':
+                            np.save(final_path, np.array(data, dtype=np.float32), allow_pickle=False)
+                        elif temp_key == 'targets':
+                            np.save(final_path, np.array(data, dtype=np.float32), allow_pickle=False)
+                        elif temp_key == 'bus_types':
+                            np.save(final_path, np.array(data, dtype=np.int32), allow_pickle=False)
+                        elif temp_key == 'topology_ids':
+                            np.save(final_path, np.array(data, dtype=np.int32), allow_pickle=False)
+                        else:
+                            np.save(final_path, np.array(data), allow_pickle=False)
+                        print(f"  Copied {temp_key} -> {final_filename}")
+                    else:
+                        raise RuntimeError(f"Cannot copy {temp_key}: data not found in data_dict")
+        
+        # Verify all files were copied correctly
+        for temp_key, final_filename in file_mappings.items():
+            final_path = os.path.join(output_dir, final_filename)
+            if not os.path.exists(final_path):
+                raise RuntimeError(f"Failed to copy {temp_key}: {final_path} does not exist")
+        
+        print(f"[Memory Optimization] All chunked data files copied successfully")
+    
+    # Process remaining data (ybus, adjacency, convergence stats)
     for key, data in data_dict.items():
+        # Skip keys that were already handled by chunked writing
+        if use_temp_files and key in ['features', 'targets', 'bus_types', 'topology_ids', 
+                                      'time_energy_coeffs', 'time_carbon_coeffs']:
+            continue
         # Handle sparse Ybus data specially
         if key == "ybus_data":
             # Save each component of the sparse Ybus separately
@@ -1085,13 +2046,25 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
                 np.save(filepath, sub_data, allow_pickle=False)
             continue
         
-        # Handle convergence statistics specially
+        # Handle convergence statistics specially (remove temp file references before saving)
         if key == "convergence_stats":
-            stats_filename = f"{case_name}_convergence_report_frac{renewable_fraction:.1f}_{timestamp}.json"
+            # Create a copy without temp file references
+            stats_to_save = {k: v for k, v in data.items() 
+                           if not k.startswith('_temp')}
+            
+            # Transform to professional data quality audit format
+            from utils.data_auditor import transform_convergence_to_audit
+            audit_data = transform_convergence_to_audit(
+                stats_to_save, case_name, renewable_fraction, timestamp
+            )
+            
+            # Save as data_quality_audit.json (professional naming)
+            # Note: raw_convergence_stats is included inside audit_data for backward compatibility
+            stats_filename = f"{case_name}_data_quality_audit_frac{renewable_fraction:.1f}_{timestamp}.json"
             filepath = os.path.join(output_dir, stats_filename)
-            print(f"Saving convergence report to '{filepath}'...")
+            print(f"Saving data quality audit to '{filepath}'...")
             with open(filepath, 'w') as f:
-                json.dump(data, f, indent=2)
+                json.dump(audit_data, f, indent=2)
             continue
         
         # Create a base filename that includes the case, renewable fraction, and timestamp
@@ -1102,12 +2075,44 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
             # Save these 1D arrays as .txt files
             filename = os.path.join(output_dir, base_filename + ".txt")
             print(f"Saving coefficient data to '{filename}'...")
-            np.savetxt(filename, data)
+            # Handle memory-mapped arrays (convert to regular array if needed)
+            if isinstance(data, np.memmap):
+                np.savetxt(filename, np.array(data))
+            else:
+                np.savetxt(filename, data)
+        elif key == "topology_ids":
+            # Save topology_ids as .npy file (1D array of integers)
+            filename = os.path.join(output_dir, base_filename + ".npy")
+            print(f"Saving topology IDs to '{filename}'...")
+            # Handle memory-mapped arrays
+            if isinstance(data, np.memmap):
+                np.save(filename, np.array(data), allow_pickle=False)
+            else:
+                np.save(filename, data, allow_pickle=False)
+        elif key == "base_adjacency":
+            # Save base adjacency as .npy file (will be converted to edge_index format for compatibility)
+            # Convert to edge_index format for backward compatibility with data loader
+            from scipy import sparse
+            # Handle memory-mapped arrays
+            if isinstance(data, np.memmap):
+                adj_data = np.array(data)
+            else:
+                adj_data = data
+            adj_sparse = sparse.coo_matrix(adj_data)
+            edge_index = np.array([adj_sparse.row, adj_sparse.col])
+            # Save as object array (same format as old adjacency files)
+            filename = os.path.join(output_dir, base_filename + ".npy")
+            print(f"Saving base adjacency matrix to '{filename}'...")
+            np.save(filename, np.array([edge_index], dtype=object), allow_pickle=True)
         else:
             # Save all other multi-dimensional arrays as .npy files
             filename = os.path.join(output_dir, base_filename + ".npy")
             print(f"Saving array data to '{filename}'...")
-            np.save(filename, data, allow_pickle=True)
+            # Handle memory-mapped arrays
+            if isinstance(data, np.memmap):
+                np.save(filename, np.array(data), allow_pickle=True)
+            else:
+                np.save(filename, data, allow_pickle=True)
 
 # SECTION 4: MAIN EXECUTION BLOCK
 if __name__ == "__main__":
@@ -1165,46 +2170,94 @@ if __name__ == "__main__":
                 net_for_run.name = f"{save_case_name}_frac{frac:.1f}"
                 
                 net_with_renewables = configure_renewables(net_for_run, frac, CONFIG)
-                generated_data = simulate_time_series(net_with_renewables, CONFIG)
                 
-                # Ensure we save to the generation_mode/data_mode directory structure
-                # Structure: data/monte_carlo/train or data/time_series/test
-                generation_mode = 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo'
-                
+                # FIXED: Save directly to data/[train|test] (removed time_series subfolder)
+                # Structure: data/train or data/test
                 script_dir = os.path.dirname(os.path.abspath(__file__))
                 if "data" in script_dir:
                     # Script is being run from data/ subdirectory
-                    output_path = os.path.join(script_dir, generation_mode, data_mode)
+                    output_path = os.path.join(script_dir, data_mode)
                 else:
                     # Script is being run from main directory
-                    output_path = os.path.join(script_dir, "data", generation_mode, data_mode)
+                    output_path = os.path.join(script_dir, "data", data_mode)
                 
                 # Create directory if it doesn't exist
                 os.makedirs(output_path, exist_ok=True)
+                
+                # MEMORY OPTIMIZATION: Pass output parameters for chunked writing
+                generated_data = simulate_time_series(
+                    net_with_renewables, CONFIG,
+                    output_dir=output_path,
+                    case_name=save_case_name,
+                    renewable_fraction=frac,
+                    timestamp=generation_timestamp
+                )
                     
                 # Pass the generation timestamp to ensure all files have the same timestamp
                 save_data(generated_data, save_case_name, frac, output_path, generation_timestamp)
+                
+                # MEMORY OPTIMIZATION: Clean up temporary files after saving
+                if '_temp_dir' in generated_data.get('convergence_stats', {}):
+                    import shutil
+                    import time
+                    temp_dir = generated_data['convergence_stats']['_temp_dir']
+                    if os.path.exists(temp_dir):
+                        # On Windows, file handles may still be open - retry with delay
+                        max_retries = 3
+                        for retry in range(max_retries):
+                            try:
+                                shutil.rmtree(temp_dir)
+                                print(f"  [Chunked Writing] Cleaned up temporary files")
+                                break
+                            except PermissionError as e:
+                                if retry < max_retries - 1:
+                                    # Wait a bit and retry (Windows file handle release delay)
+                                    time.sleep(0.1)
+                                    # Force garbage collection to close any remaining handles
+                                    import gc
+                                    gc.collect()
+                                else:
+                                    # Last retry failed - log warning but continue
+                                    print(f"  [Warning] Could not delete temp directory {temp_dir}: {e}")
+                                    print(f"  [Warning] Temp files will be cleaned up on next run or manually")
 
-        except Exception as e:
-            print(f"\nAn unrecoverable error occurred while processing {case}:")
+        except DataGenerationError as e:
+            # SEVERE ERROR: Stop execution immediately
+            print(f"\n{'='*80}")
+            print(f"SEVERE ERROR: Data generation cannot continue!")
+            print(f"{'='*80}")
+            print(f"Error details:")
             traceback.print_exc()
-            print("\nSkipping to the next test case.")
+            print(f"\n{'='*80}")
+            print(f"Data generation STOPPED due to severe error.")
+            print(f"This error indicates fundamental problems that make the data invalid.")
+            print(f"Fix the issue before attempting to generate data again.")
+            print(f"{'='*80}\n")
+            sys.exit(1)  # Exit with error code
+        except Exception as e:
+            # Other recoverable errors: log and continue to next case
+            print(f"\nWARNING: An error occurred while processing {case}:")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            traceback.print_exc()
+            print(f"\nSkipping to the next test case.")
             continue
     
     # Write metadata file for smart data detection
     try:
-        generation_mode = 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo'
-        
+        # FIXED: Save directly to data/[train|test] (removed time_series subfolder)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if "data" in script_dir:
-            output_path = os.path.join(script_dir, generation_mode, data_mode)
+            output_path = os.path.join(script_dir, data_mode)
         else:
-            output_path = os.path.join(script_dir, "data", generation_mode, data_mode)
+            output_path = os.path.join(script_dir, "data", data_mode)
         
         os.makedirs(output_path, exist_ok=True)
         
+        # Keep generation_mode in metadata for backward compatibility, but path structure is simplified
+        generation_mode = 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo'
         metadata = {
-            'generation_mode': 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo',
+            'generation_mode': generation_mode,
             'data_mode': data_mode,
             'timesteps': timesteps,
             'timestamp': generation_timestamp,

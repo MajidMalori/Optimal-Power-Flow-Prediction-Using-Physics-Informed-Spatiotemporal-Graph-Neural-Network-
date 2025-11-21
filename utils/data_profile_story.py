@@ -21,7 +21,7 @@ from typing import Dict, Tuple
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _project_root)
 
-from config import Config, Args
+from config import Config
 from utils.data_loader import load_power_system_data
 
 def analyze_data_profiles(config: Config, case_name: str, features=None, normalizer=None, renewable_fractions=None):
@@ -38,14 +38,49 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
     Returns:
         List of issues found (empty if no issues)
     """
-    print(f"Generating Data Profile Story for {case_name}")
+    # Generating Data Profile Story (silent)
     
     try:
         # Use provided data or load from disk
         if features is None or normalizer is None or renewable_fractions is None:
-            # Load data
+            # Load data using lazy loading system
+            from utils.data_loader import load_power_system_data, PowerSystemLazyDataset
             data_tuple = load_power_system_data(config, case_name)
-            features, adjacency, ybus_matrices, targets, bus_types, energy_coeffs, carbon_coeffs, renewable_fractions, normalizer = data_tuple
+            # Handle both new (6 values) and old (4 values) return formats
+            if len(data_tuple) == 6:
+                file_metadata, adjacency, ybus_metadata, normalizer, topology_cache, topology_ids = data_tuple
+            else:
+                file_metadata, adjacency, ybus_metadata, normalizer = data_tuple[:4]
+                topology_cache, topology_ids = None, None
+            
+            # Create lazy dataset and load all data for analysis (one-time full load)
+            dataset = PowerSystemLazyDataset(
+                file_metadata=file_metadata,
+                adjacency_matrix=adjacency,
+                normalizer=normalizer,
+                ybus_metadata=ybus_metadata,
+                is_static=True,
+                sequence_length=1,
+                hours_per_day=config.HOURS_PER_DAY,
+                topology_cache=topology_cache,
+                topology_ids=topology_ids
+            )
+            
+            # Load all data from lazy dataset (for analysis purposes)
+            # Loading all data for analysis (silent)
+            all_features = []
+            all_renewable_fractions = []
+            
+            for idx in range(len(dataset)):
+                sample = dataset[idx]
+                # Denormalize features for analysis
+                features_denorm = normalizer.denormalize(sample['features'].unsqueeze(0)).squeeze(0).numpy()
+                all_features.append(features_denorm)
+                all_renewable_fractions.append(sample['renewable_fraction'].item())
+            
+            # Stack into arrays (features are already denormalized from dataset)
+            features = np.stack(all_features, axis=0)  # [n_samples, n_buses, 10] - already denormalized
+            renewable_fractions = np.array(all_renewable_fractions)  # [n_samples]
         
         # Import feature indices constants (single source of truth)
         from config import FeatureIndices
@@ -53,12 +88,8 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
         # Features shape: [n_samples, n_buses, 10]
         n_samples, n_buses, n_features = features.shape
         
-        # Denormalize features to check actual values
-        # Normalized features can be negative, which is why we see negative loads
-        # Convert numpy to torch tensor for denormalize, then back to numpy
-        import torch
-        features_tensor = torch.from_numpy(features).float()
-        features_denorm = normalizer.denormalize(features_tensor).numpy()  # [n_samples, n_buses, 10]
+        # Features are already denormalized (done in the loop above)
+        features_denorm = features  # [n_samples, n_buses, 10]
         
         # Extract denormalized features using constants (single source of truth)
         p_load = features_denorm[:, :, FeatureIndices.P_LOAD]      # Active load (MW, should be >= 0)
@@ -312,14 +343,12 @@ def analyze_data_profiles(config: Config, case_name: str, features=None, normali
 
 def main():
     """Run data profile analysis for all bus systems."""
-    args = Args()
+    # Load config from YAML (required - no Args class)
+    # Config.__init__ will load all values from config.yaml
     config = Config(
-        data_mode=args.data_mode,
+        data_mode='test',  # Parameter default - actual value comes from YAML
         save_results=True,
-        test_timesteps=args.test_timesteps,
-        clear_results=False,
-        hours_per_day=args.hours_per_day,
-        sequence_length=args.sequence_length
+        clear_results=False
     )
     
     all_issues = []

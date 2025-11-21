@@ -85,26 +85,114 @@ def evaluate_model_robustness(model: torch.nn.Module, test_loader: torch.utils.d
             critical_lines = analyzer.identify_critical_lines_by_power_flow(net, top_k=top_k_contingencies)
     
     # Step 3: Evaluate model under each contingency
-    # Note: This is a simplified implementation
-    # In a full implementation, you would:
-    # 1. Modify Ybus matrices to reflect line outages
-    # 2. Re-run model evaluation with modified Ybus
-    # 3. Compare performance metrics
+    # Real implementation: Modify Ybus and adjacency matrices, then re-evaluate
+    from utils.contingency_ybus import create_contingency_ybus_batch, create_contingency_adjacency_batch
+    from utils.contingency_analysis import ContingencyAnalyzer
     
-    # For now, we'll create a placeholder structure
-    # The actual implementation would require modifying the data loader to use contingency Ybus
     contingency_results = []
     
-    # Placeholder: In real implementation, modify Ybus and re-evaluate
+    # Initialize analyzer for islanding checks
+    analyzer = None
+    if net is not None:
+        analyzer = ContingencyAnalyzer(net)
+    
     for i, line_idx in enumerate(critical_lines[:top_k_contingencies]):
-        # TODO: Modify Ybus matrices in test_loader to reflect line outage
-        # TODO: Re-run evaluate_model with modified data
-        # For now, use baseline metrics as placeholder
+        if net is None:
+            # Fallback: skip if network not available
+            continue
+        
+        # Check if contingency causes islanding
+        contingency_test = analyzer.test_contingency(net, line_idx, run_power_flow=False)
+        if contingency_test.get('islanding', False):
+            # Skip islanding cases (system is disconnected)
+            contingency_results.append({
+                'line_idx': line_idx,
+                'mse': float('inf'),
+                'power_violation': float('inf'),
+                'voltage_violation': float('inf'),
+                'islanding': True,
+                'error': 'Islanding detected'
+            })
+            continue
+        
+        # Create a modified test loader with contingency Ybus and adjacency
+        # We'll iterate through the test loader and modify Ybus/adjacency on-the-fly
+        model.eval()
+        contingency_predictions = []
+        contingency_targets = []
+        contingency_ybus_list = []
+        contingency_features_list = []
+        contingency_bus_types_list = []
+        
+        with torch.no_grad():
+            for batch in test_loader:
+                # Get original data
+                features = batch['features'].to(device)
+                targets = batch['targets'].to(device)
+                ybus_original = batch['ybus_matrix'].to(device)
+                adjacency_original = batch['adjacency'].to(device)
+                bus_types = batch.get('bus_types', None)
+                if bus_types is not None:
+                    bus_types = bus_types.to(device)
+                
+                # Modify Ybus and adjacency for this contingency
+                ybus_contingency = create_contingency_ybus_batch(ybus_original, net, line_idx)
+                adjacency_contingency = create_contingency_adjacency_batch(adjacency_original, net, line_idx)
+                
+                # Get model predictions with contingency Ybus/adjacency
+                # Note: Models use adjacency, not Ybus directly, but we pass modified Ybus for physics loss
+                try:
+                    if features.dim() == 4:  # Sequential model
+                        outputs = model(features, adjacency_contingency, bus_types=bus_types)
+                    else:  # Static model
+                        outputs = model(features, adjacency_contingency, bus_types=bus_types)
+                except TypeError:
+                    # Model doesn't support bus_types
+                    if features.dim() == 4:
+                        outputs = model(features, adjacency_contingency)
+                    else:
+                        outputs = model(features, adjacency_contingency)
+                
+                # Store for metric computation
+                contingency_predictions.append(outputs.cpu())
+                contingency_targets.append(targets.cpu())
+                contingency_ybus_list.append(ybus_contingency.cpu())
+                contingency_features_list.append(features.cpu())
+                if bus_types is not None:
+                    contingency_bus_types_list.append(bus_types.cpu())
+        
+        # Concatenate all batches
+        all_predictions = torch.cat(contingency_predictions, dim=0)
+        all_targets = torch.cat(contingency_targets, dim=0)
+        all_ybus = torch.cat(contingency_ybus_list, dim=0)
+        all_features = torch.cat(contingency_features_list, dim=0)
+        all_bus_types = torch.cat(contingency_bus_types_list, dim=0) if contingency_bus_types_list else None
+        
+        # Denormalize predictions and targets
+        predictions_denorm = normalizer.denormalize(all_predictions)
+        targets_denorm = normalizer.denormalize(all_targets)
+        
+        # Compute metrics using modified Ybus and measurements
+        # FIXED: Now passes measurements to compute actual physics violations
+        from utils.metrics import compute_metrics
+        
+        # Extract measurements from features (for sequential models, use last timestep)
+        if all_features.dim() == 4:  # Sequential: [batch, seq_len, buses, features]
+            measurements_for_metrics = all_features[:, -1, :, :]  # Use last timestep
+        else:  # Static: [batch, buses, features]
+            measurements_for_metrics = all_features
+        
+        contingency_metrics = compute_metrics(
+            predictions_denorm, targets_denorm, all_ybus, config, 
+            bus_types=all_bus_types, measurements=measurements_for_metrics
+        )
+        
         contingency_results.append({
             'line_idx': line_idx,
-            'mse': baseline_mse * (1.0 + 0.1 * (i + 1)),  # Placeholder: assume 10% degradation per contingency
-            'power_violation': baseline_power_violation * (1.0 + 0.15 * (i + 1)),
-            'voltage_violation': baseline_voltage_violation * (1.0 + 0.05 * (i + 1))
+            'mse': contingency_metrics.get('mse', float('inf')),
+            'power_violation': contingency_metrics.get('power_violation', float('inf')),
+            'voltage_violation': contingency_metrics.get('voltage_violation', float('inf')),
+            'islanding': False
         })
     
     # Step 4: Generate comparison bar chart
@@ -138,52 +226,71 @@ def plot_contingency_comparison(baseline_metrics: Dict[str, float],
     baseline_power_vio = baseline_metrics.get('power_violation', 0.0)
     baseline_voltage_vio = baseline_metrics.get('voltage_violation', 0.0)
     
-    contingency_mse = [r['mse'] for r in contingency_results]
-    contingency_power_vio = [r['power_violation'] for r in contingency_results]
-    contingency_voltage_vio = [r['voltage_violation'] for r in contingency_results]
-    line_indices = [r['line_idx'] for r in contingency_results]
+    # Filter out islanding cases for plotting (they have inf values)
+    plot_results = [r for r in contingency_results if not r.get('islanding', False)]
+    islanding_results = [r for r in contingency_results if r.get('islanding', False)]
+    
+    contingency_mse = [r['mse'] for r in plot_results]
+    contingency_power_vio = [r['power_violation'] for r in plot_results]
+    contingency_voltage_vio = [r['voltage_violation'] for r in plot_results]
+    line_indices = [r['line_idx'] for r in plot_results]
+    islanding_line_indices = [r['line_idx'] for r in islanding_results]
     
     # Create 1x3 subplot: MSE, Power Violation, Voltage Violation
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    fig.suptitle(f'Robustness Analysis: Baseline vs N-1 Contingencies - {case_name.upper()}' + 
-                 (f' - {model_name}' if model_name else ''), fontsize=16, fontweight='bold')
+    title = f'Robustness Analysis: Baseline vs N-1 Contingencies - {case_name.upper()}'
+    if model_name:
+        title += f' - {model_name}'
+    if islanding_results:
+        title += f' ({len(islanding_results)} islanding cases excluded)'
+    fig.suptitle(title, fontsize=16, fontweight='bold')
     
-    x_pos = np.arange(len(contingency_results) + 1)  # +1 for baseline
+    x_pos = np.arange(len(plot_results) + 1)  # +1 for baseline
     width = 0.6
     
     # Plot 1: MSE
     ax = axes[0]
     mse_values = [baseline_mse] + contingency_mse
     labels = ['Baseline'] + [f'Line {idx}' for idx in line_indices]
-    bars = ax.bar(x_pos, mse_values, width, color=['green'] + ['orange'] * len(contingency_results))
+    colors = ['green'] + ['orange'] * len(plot_results)
+    bars = ax.bar(x_pos, mse_values, width, color=colors)
     ax.set_ylabel('MSE', fontsize=12)
     ax.set_title('Prediction Error (MSE)', fontweight='bold')
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=45, ha='right')
     ax.grid(True, alpha=0.3, axis='y')
-    ax.set_yscale('log')
+    if max(mse_values) > 0:
+        ax.set_yscale('log')
+    if islanding_results:
+        ax.text(0.02, 0.98, f'Islanding: Lines {islanding_line_indices}', 
+                transform=ax.transAxes, fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
     
     # Plot 2: Power Violation
     ax = axes[1]
     power_vio_values = [baseline_power_vio] + contingency_power_vio
-    bars = ax.bar(x_pos, power_vio_values, width, color=['green'] + ['red'] * len(contingency_results))
+    colors = ['green'] + ['red'] * len(plot_results)
+    bars = ax.bar(x_pos, power_vio_values, width, color=colors)
     ax.set_ylabel('Power Violation (p.u.)', fontsize=12)
     ax.set_title('Power Balance Violation', fontweight='bold')
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=45, ha='right')
     ax.grid(True, alpha=0.3, axis='y')
-    ax.set_yscale('log')
+    if max(power_vio_values) > 0:
+        ax.set_yscale('log')
     
     # Plot 3: Voltage Violation
     ax = axes[2]
     voltage_vio_values = [baseline_voltage_vio] + contingency_voltage_vio
-    bars = ax.bar(x_pos, voltage_vio_values, width, color=['green'] + ['purple'] * len(contingency_results))
+    colors = ['green'] + ['purple'] * len(plot_results)
+    bars = ax.bar(x_pos, voltage_vio_values, width, color=colors)
     ax.set_ylabel('Voltage Violation (p.u.)', fontsize=12)
     ax.set_title('Voltage Limit Violation', fontweight='bold')
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=45, ha='right')
     ax.grid(True, alpha=0.3, axis='y')
-    ax.set_yscale('log')
+    if max(voltage_vio_values) > 0:
+        ax.set_yscale('log')
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
