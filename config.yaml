@@ -15,9 +15,22 @@
 system:
   device: "cuda"  # "cuda" or "cpu" - auto-detected if not specified
   num_buses: [33, 57, 118]
+  test_cases: ["case33", "case57", "case118"]  # Default cases to run
   seed: 42
   num_workers: 2  # Data loading workers (auto-configured if 'auto')
   case_name: null  # Set dynamically based on bus system (case33, case57, case118)
+
+# --- System Limits (Voltage) ---
+system_limits:
+  case33:
+    v_min: 0.90
+    v_max: 1.10
+  case57:
+    v_min: 0.70  # Wide limits for transmission
+    v_max: 1.20
+  case118:
+    v_min: 0.85  # Standard transmission limits
+    v_max: 1.15
 
 # --- Training Parameters ---
 training:
@@ -39,19 +52,6 @@ training:
 
 # --- Physics Loss Configuration ---
 physics:
-  warmup_epochs: 10  # Gradually introduce physics losses over first N epochs
-  # NOTE: Power violations are in (p.u.)² - per-unit system already provides normalization
-  # Learnable weights (Kendall-style) automatically handle scale differences
-  
-  # Physical Constraints
-  voltage:
-    min: 0.90  # Minimum voltage limit (per-unit)
-    max: 1.10  # Maximum voltage limit (per-unit)
-  apparent_power_max: 1.2  # Maximum apparent power (per-unit)
-  # S_BASE_MVA is determined dynamically: Case33=10 MVA, Case57/118=100 MVA
-
-# --- Data Configuration ---
-data:
   split_mode: "blocked_timeseries"  # Options: "blocked_timeseries" (recommended), "chronological"
   # blocked_timeseries: Groups by renewable_fraction, then splits chronologically
   #   Ensures all fractions appear in train/val/test while maintaining temporal order
@@ -165,11 +165,11 @@ model_testing:
 # These are typically set in the Args class in config.py, but can be overridden here
 experimental:
   test_config: "all"  # Options: "quick", "core", "comprehensive", "physics_only", "non_physics_only", "sequential_only", "all"
-  bus_systems: "all"  # Options: "all", "33", "57", "118", or comma-separated like "33,57"
+  bus_systems: "57"  # Options: "all", "33", "57", "118", or comma-separated like "33,57"
   models_to_train: "all"  # Options: "all", or comma-separated model names
   data_mode: "test"  # Options: "train" or "test"
-  train_timesteps: 12000  # Number of timesteps for train mode
-  test_timesteps: 960  # Number of timesteps for test mode
+  train_timesteps: 2400  # Reduced for faster iteration (100 days)
+  test_timesteps: 3  # Quick test with 3 timesteps
   plot_data_info: true  # Generate data validation and profile story plots
   use_mosoa: true  # Use MoSOA for hyperparameter optimization
   force_cpu: false  # Force CPU training even if GPU is available
@@ -183,4 +183,3 @@ directories:
   root: null  # Set automatically to project root
   data: null  # Set automatically: root/data/[train|test]
   experimental_results: null  # Set automatically: root/experimental_results
-

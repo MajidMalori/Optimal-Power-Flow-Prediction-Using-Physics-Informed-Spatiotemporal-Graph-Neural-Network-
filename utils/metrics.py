@@ -92,10 +92,10 @@ class PowerSystemLoss(nn.Module):
         # "Effective Bayesian Heteroscedastic Regression with Deep Neural Networks"
         # Paper: https://arxiv.org/abs/2306.17758, Citations: 27+ (as of Nov 2025)
         # 
-        # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+        # Natural parameters: η1 = μ/σ^2, η2 = -1/(2σ^2) < 0
         # Key advantages:
         # 1. Jointly concave objective (more stable optimization)
-        # 2. Simpler gradients: ∇η1 = μ - y, ∇η2 = σ² - (y² - μ²)
+        # 2. Simpler gradients: ∇η1 = μ - y, ∇η2 = σ^2 - (y^2 - μ^2)
         # 3. No negative log variance issues (η2 < 0 by construction)
         self.loss_type = 'natural'
         print(f"[Heteroscedastic Loss] Using: Natural Parametrization (Immer et al., NeurIPS 2023) with softplus")
@@ -193,7 +193,7 @@ class PowerSystemLoss(nn.Module):
         
         # Extract natural parameters and compute loss
         # Heteroscedastic: outputs_norm is [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
+        # Natural parameters: η1 = μ/σ^2, η2 = -1/(2σ^2) < 0
         # where η1 = f1 (direct), η2 = -g+(f2) with g+ being softplus (numerically stable)
         
         eta1_var1_raw = outputs_norm[..., 0]  # [batch, buses] - η1 for variable 1
@@ -242,7 +242,7 @@ class PowerSystemLoss(nn.Module):
         eta2_var2 = -g_plus_var2  # [batch, buses] - guaranteed < 0
         
         # Convert to mean and variance for predictions and MSE calculation
-        # μ = -η1/(2η2), σ² = -1/(2η2)
+        # μ = -η1/(2η2), σ^2 = -1/(2η2)
         # Small epsilon to prevent division by zero (numerical safeguard)
         eps = 1e-8
         mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)  # [batch, buses]
@@ -256,7 +256,7 @@ class PowerSystemLoss(nn.Module):
         var2_true_norm = targets_norm[..., 1]  # [batch, buses] - normalized
         
         # Compute natural parametrization negative log-likelihood (Equation 5 from paper)
-        # log p(y|x,θ) = [η1, η2]ᵀ[y, y²]ᵀ + η1²/(4η2) + ½log(-2η2) + const
+        # log p(y|x,θ) = [η1, η2]ᵀ[y, y^2]ᵀ + η1^2/(4η2) + ½log(-2η2) + const
         # NLL = -log p(y|x,θ)
         # Note: This is computed on normalized targets (y_norm) since η1, η2 are in normalized space
         
@@ -264,10 +264,10 @@ class PowerSystemLoss(nn.Module):
         y1 = var1_true_norm  # [batch, buses]
         y1_sq = y1 ** 2  # [batch, buses]
         
-        # Inner product: [η1, η2]ᵀ[y, y²]ᵀ = η1*y + η2*y²
+        # Inner product: [η1, η2]ᵀ[y, y^2]ᵀ = η1*y + η2*y^2
         inner1 = eta1_var1 * y1 + eta2_var1 * y1_sq  # [batch, buses]
         
-        # Log partition: η1²/(4η2) + ½log(-2η2)
+        # Log partition: η1^2/(4η2) + ½log(-2η2)
         # Note: η2 < 0, so -2η2 > 0, log(-2η2) is valid
         # Small epsilon to prevent division by zero and log(0) (numerical safeguard)
         log_partition1 = (eta1_var1 ** 2) / (4.0 * eta2_var1 + eps) + 0.5 * torch.log(-2.0 * eta2_var1 + eps)  # [batch, buses]
@@ -322,7 +322,7 @@ class PowerSystemLoss(nn.Module):
         
         # Compute sigma (standard deviation) for reporting and violations
         # Note: sigma2 is in normalized space, but we report it as-is (relative uncertainty)
-        # Paper (Equation 3): σ² = -1/(2η2), so σ = sqrt(σ²)
+        # Paper (Equation 3): σ^2 = -1/(2η2), so σ = sqrt(σ^2)
         sigma_var1 = torch.sqrt(sigma2_var1)  # [batch, buses]
         sigma_var2 = torch.sqrt(sigma2_var2)  # [batch, buses]
         
@@ -407,13 +407,13 @@ class PowerSystemLoss(nn.Module):
         )
 
         # Use MSE for training loss (squared, for optimization)
-        # Power balance violation: MSE of mismatch in (p.u.)²
+        # Power balance violation: MSE of mismatch in (p.u.)^2
         # Per-unit system already provides normalization via S_base (constant)
         # DO NOT divide by dynamic load - this makes loss non-stationary
-        power_penalty = torch.mean(power_violation_mse_per_sample)  # MSE (per-unit²) for training
+        power_penalty = torch.mean(power_violation_mse_per_sample)  # MSE (per-unit^2) for training
         # Use RMSE for display (sqrt, more interpretable)
         power_penalty_rmse = torch.mean(power_violation_rmse_per_sample)  # RMSE (per-unit) for display
-        voltage_penalty = torch.mean(voltage_violation_mse_per_sample)  # MSE (per-unit²) for training
+        voltage_penalty = torch.mean(voltage_violation_mse_per_sample)  # MSE (per-unit^2) for training
         voltage_penalty_rmse = torch.mean(voltage_violation_rmse_per_sample)  # RMSE (per-unit) for display
         
         # Physics loss annealing: gradually introduce physics constraints to prevent early explosion
@@ -456,7 +456,7 @@ class PowerSystemLoss(nn.Module):
         # Use RMSE for violations in display (more interpretable than MSE)
         # We keep normalized total_loss for optimization (backward pass, etc.)
         if self.is_physics_informed:
-            # For display: use RMSE for violations (sqrt, per-unit) instead of MSE (squared, per-unit²)
+            # For display: use RMSE for violations (sqrt, per-unit) instead of MSE (squared, per-unit^2)
             # This makes violations more interpretable and shows actual per-unit mismatch
             total_loss_denorm = mse_denorm + power_penalty_rmse + voltage_penalty  # Physical units (interpretable)
         else:
@@ -474,9 +474,9 @@ class PowerSystemLoss(nn.Module):
                 'mse_var1': mse_var1_norm,
                 'mse_var2': mse_var2_norm,
                 'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'power_violation_mse': power_penalty,  # MSE (per-unit²) for training - kept for reference
+                'power_violation_mse': power_penalty,  # MSE (per-unit^2) for training - kept for reference
                 'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'voltage_violation_mse': voltage_penalty,  # MSE (per-unit²) for training - kept for reference
+                'voltage_violation_mse': voltage_penalty,  # MSE (per-unit^2) for training - kept for reference
                 'physics_loss': weighted_power_loss + weighted_voltage_loss
             }
             return result
@@ -489,9 +489,7 @@ class PowerSystemLoss(nn.Module):
                 'mse_var1': mse_var1_norm,
                 'mse_var2': mse_var2_norm,
                 'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'power_violation_mse': power_penalty,  # MSE (per-unit²) for training - kept for reference
-                'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'voltage_violation_mse': voltage_penalty  # MSE (per-unit²) for training - kept for reference
+                'power_violation_mse': power_penalty,  # MSE (per-unit^2) for training - kept for reference
             }
             return result
 
@@ -500,12 +498,16 @@ class PowerSystemLoss(nn.Module):
         Extracts power injections from MEASURED data and converts to per unit.
         
         Args:
-            measurements: Measurement tensor [batch, buses, 10]
-                         Format: [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_partial, va_partial]
+            measurements: DENORMALIZED measurement tensor [batch, buses, 10]
+                         Format: [p_load_mw, q_load_mvar, p_ext_mw, q_ext_mvar, 
+                                  p_conv_mw, q_conv_mvar, p_ren_mw, q_ren_mvar, 
+                                  vm_pu, va_rad]
+                         NOTE: Power values must be in MW/MVAR (physical units)!
         
         Returns:
             p_inj_pu, q_inj_pu: Power injections in per-unit
         """
+        # Extract measurements (already denormalized to MW/MVAR)
         p_load_mw = measurements[..., 0]
         q_load_mvar = measurements[..., 1]
         p_ext_mw = measurements[..., 2]
@@ -515,55 +517,38 @@ class PowerSystemLoss(nn.Module):
         p_ren_mw = measurements[..., 6]
         q_ren_mvar = measurements[..., 7]
         
-        p_gen_mw = p_conv_mw + p_ren_mw
-        q_gen_mvar = q_conv_mvar + q_ren_mvar
+        # Calculate net power injection (Generation + External - Load)
+        # All in MW/MVAR
+        p_gen_total_mw = p_ext_mw + p_conv_mw + p_ren_mw
+        q_gen_total_mvar = q_ext_mvar + q_conv_mvar + q_ren_mvar
         
-        p_inj_mw = p_gen_mw - p_load_mw
-        q_inj_mvar = q_gen_mvar - q_load_mvar
+        p_inj_mw = p_gen_total_mw - p_load_mw
+        q_inj_mvar = q_gen_total_mvar - q_load_mvar
         
+        # Convert to per-unit by dividing by S_base
+        # This is the ONLY normalization that should happen here
         p_inj_pu = p_inj_mw / self.s_base_mva
         q_inj_pu = q_inj_mvar / self.s_base_mva
         
         return p_inj_pu, q_inj_pu
-    
-    def _get_power_injections(self, state: torch.Tensor):
-        """Extracts power injections from the state tensor in original units (MW, MVAr)."""
-        p_load_mw = state[..., 2]
-        q_load_mvar = state[..., 3]
-        p_conv_mw = state[..., 6]
-        q_conv_mvar = state[..., 7]
-        p_ren_mw = state[..., 8]
-        q_ren_mvar = state[..., 9]
-        
-        p_gen_mw = p_conv_mw + p_ren_mw
-        q_gen_mvar = q_conv_mvar + q_ren_mvar
-        
-        p_inj_mw = p_gen_mw - p_load_mw
-        q_inj_mvar = q_gen_mvar - q_load_mvar
-        
-        return p_inj_mw, q_inj_mvar, p_load_mw, q_load_mvar
-    
+
     def _reconstruct_voltage_state(self, predicted_unknowns: torch.Tensor, measured_power: torch.Tensor, bus_types: torch.Tensor) -> torch.Tensor:
         """
         Reconstructs full voltage state [V, θ] from bus-type-dependent predictions.
         
-        CRITICAL: In OPF mode, predictions are bus-type dependent:
-        - PQ bus (0): [V, θ] - both unknown, use predictions directly
-        - PV bus (1): [Q, θ] - V is known (from measurements), Q and θ are predicted
-        - Slack bus (2): [P, Q] - V and θ are both known (from measurements), P and Q are predicted
-        
         Args:
-            predicted_unknowns: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
-            measured_power: Measured power [batch, buses, 10] = [p_load, q_load, ..., vm_meas, va_meas]
+            predicted_unknowns: DENORMALIZED predicted unknowns [batch, buses, 2]
+            measured_power: DENORMALIZED measured power [batch, buses, 10]
             bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
             
         Returns:
-            Full voltage state [batch, buses, 2] = [vm_pu, va_rad] for ALL buses
+            Full voltage state [batch, buses, 2] = [vm_pu, va_rad]
         """
         if bus_types is None:
             raise ValueError("bus_types is required for OPF mode. This project uses OPF, not state estimation.")
         
         # Extract measured voltages from features (indices 8, 9)
+        # Assumes measured_power is already denormalized (per-unit/radians)
         vm_meas_pu = measured_power[..., 8]  # [batch, buses] - measured voltage magnitude
         va_meas_rad = measured_power[..., 9]  # [batch, buses] - measured voltage angle
         
@@ -590,7 +575,7 @@ class PowerSystemLoss(nn.Module):
         
         # Return full voltage state [batch, buses, 2] = [vm_pu, va_rad]
         return torch.stack([vm_pu, va_rad], dim=-1)
-    
+        
     def _compute_power_balance_violation(self, predicted_voltages, measured_power, ybus_batch, bus_types: torch.Tensor, squared=True, debug=False):
         """
         Computes power balance violation for OPF predictions.
@@ -671,7 +656,7 @@ class PowerSystemLoss(nn.Module):
         Args:
             state: Predicted unknowns [batch, buses, 2] (OPF: bus-type dependent)
             bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack]
-            squared: If True, returns MSE (per-unit²) for training, if False, returns RMSE (per-unit) for display
+            squared: If True, returns MSE (per-unit^2) for training, if False, returns RMSE (per-unit) for display
             
         Returns:
             Voltage limit violation per sample [batch]
@@ -686,14 +671,14 @@ class PowerSystemLoss(nn.Module):
         # Compute violations for all buses (will be zero for non-PQ buses)
         v_below = F.relu(self.v_min - vm_pu)  # [batch, buses]
         v_above = F.relu(vm_pu - self.v_max)  # [batch, buses]
-        violation_all = v_below**2 + v_above**2  # [batch, buses] - MSE (per-unit²)
+        violation_all = v_below**2 + v_above**2  # [batch, buses] - MSE (per-unit^2)
         
         # Mask out non-PQ buses (set their violations to zero)
         pq_mask = (bus_types == 0)  # [batch, buses] - PQ buses
         violation_all = violation_all * pq_mask.float()  # Zero out non-PQ buses
         
         if squared:
-            # Return MSE (per-unit²) for training
+            # Return MSE (per-unit^2) for training
             return torch.mean(violation_all, dim=-1)  # [batch]
         else:
             # Return RMSE (per-unit) for display
@@ -743,6 +728,15 @@ class PowerSystemLoss(nn.Module):
         # Calculate power loss from predicted state using power balance: P_loss = P_gen - P_load
         # Get load from measurements (load is known, not predicted)
         p_load_mw = measurements[..., 0]  # Load (MW) - known from measurements
+        # Denormalize p_load from z-score to MW, then convert to per-unit
+        if self.normalizer is not None:
+            device = measurements.device
+            p_load_mean = torch.from_numpy(self.normalizer.feature_mean[0:1]).float().to(device)
+            p_load_std = torch.from_numpy(self.normalizer.feature_std[0:1]).float().to(device)
+            p_load_mw = measurements[..., 0] * p_load_std + p_load_mean
+        else:
+            p_load_mw = measurements[..., 0]
+        
         p_load_total_pu = torch.sum(p_load_mw / self.s_base_mva, dim=-1)  # [batch_size]
         
         # Calculate generation from predicted state: P_gen = sum of positive power injections

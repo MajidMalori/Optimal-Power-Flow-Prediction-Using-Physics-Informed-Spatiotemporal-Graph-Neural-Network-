@@ -42,7 +42,7 @@ def generate_all_data_plots(config, bus_systems: List[int], data_plots_dir: str)
     os.makedirs(data_plots_dir, exist_ok=True)
     all_plot_paths = {}
     
-    print(f"\n[Plots] Generating consolidated data plots → {data_plots_dir}")
+    print(f"\n[Plots] Generating data plots -> {data_plots_dir}")
     
     for num_buses in bus_systems:
         case_name = f"case{num_buses}"
@@ -147,12 +147,12 @@ def generate_all_data_plots(config, bus_systems: List[int], data_plots_dir: str)
                 else:
                     new_convergence_path = convergence_path
                 case_plot_paths['convergence_story'] = new_convergence_path
-                print(f"  ✓ Convergence story: {new_convergence_path}")
+                print("convergence", end=" ", flush=True)
             else:
-                print(f"  ✗ Convergence story file not found")
+                print("convergence(skip)", end=" ", flush=True)
                 case_plot_paths['convergence_story'] = None
         except Exception as e:
-            print(f"  ✗ Convergence story failed: {e}")
+            print("convergence(error)", end=" ", flush=True)
             traceback.print_exc()
             case_plot_paths['convergence_story'] = None
         
@@ -245,9 +245,9 @@ def generate_all_data_plots(config, bus_systems: List[int], data_plots_dir: str)
             case_plot_paths['audit_contingency'] = None
         
         all_plot_paths[num_buses] = case_plot_paths
-        print("done", flush=True)
+        print("done")
     
-    print(f"[Plots] All plots saved to: {data_plots_dir}\n")
+    print(f"[Plots] Complete\n")
     
     return all_plot_paths
 

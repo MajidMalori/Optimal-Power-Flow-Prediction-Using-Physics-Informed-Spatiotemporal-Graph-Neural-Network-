@@ -160,6 +160,19 @@ class PowerSystemNormalizer:
             return denormalized_data.numpy()
         return denormalized_data
 
+    def denormalize_targets(self, data: torch.Tensor) -> torch.Tensor:
+        """
+        Explicitly denormalize targets (2 dimensions).
+        Wrapper around denormalize for compatibility with plotting scripts.
+        
+        Args:
+            data: Tensor of shape [batch_size, num_buses, 2]
+            
+        Returns:
+            Denormalized tensor of the same shape
+        """
+        return self.denormalize(data)
+
 class PowerSystemLazyDataset(Dataset):
     """
     Professional lazy-loading PyTorch Dataset for power system time-series data.
@@ -190,58 +203,34 @@ class PowerSystemLazyDataset(Dataset):
                          If None, all samples use topology_id=0 (base)
         """
         self.file_metadata = file_metadata  # List of dicts with file paths and indices
+        self.adjacency_matrix = adjacency_matrix
         self.normalizer = normalizer
         self.ybus_metadata = ybus_metadata
-        self.hours_per_day = hours_per_day
         self.is_static = is_static
         self.sequence_length = sequence_length
-        self.num_samples = len(file_metadata)
+        self.hours_per_day = hours_per_day
         
-        # PERFORMANCE FIX: Use topology cache if available, otherwise fall back to single base adjacency
-        if topology_cache is not None and topology_ids is not None:
-            self.topology_cache = topology_cache  # Dict: topology_id -> normalized_adj_tensor
-            self.topology_ids = topology_ids  # Array: sample_idx -> topology_id
-            # Base adjacency is still stored for backward compatibility (but not used if cache exists)
-            self.adjacency = torch.from_numpy(adjacency_matrix).float()
-            # Using topology cache (silent)
-        else:
-            # Fallback: single pre-normalized base adjacency (old behavior)
-            self.topology_cache = None
-            self.topology_ids = None
-            # Pre-normalize the base adjacency once (performance fix)
-            self.adjacency = torch.from_numpy(pre_normalize_adjacency(adjacency_matrix)).float()
-            # Using single pre-normalized base adjacency (silent)
-        
-        # Load Ybus base matrix once (small, can stay in memory)
-        if ybus_metadata and 'base_path' in ybus_metadata:
-            self.ybus_base = torch.from_numpy(np.load(ybus_metadata['base_path'])).cfloat()
-            # Note: Contingency info is now stored per-file in metadata entries, not in global lookup
-            # Keep these for backward compatibility but they're not used
-            self.ybus_contingency_lookup = ybus_metadata.get('contingency_lookup', {})
-            self.ybus_contingency_matrices_path = None  # Not used anymore - each entry has its own path
+        # Load base Ybus matrix (needed for fallback)
+        if ybus_metadata and 'base_path' in ybus_metadata and os.path.exists(ybus_metadata['base_path']):
+            self.ybus_base = torch.from_numpy(np.load(ybus_metadata['base_path'], mmap_mode='r')).cfloat()
         else:
             self.ybus_base = None
-            self.ybus_contingency_lookup = {}
-            self.ybus_contingency_matrices_path = None
-        
+            
+        # Store topology cache
+        self.topology_cache = topology_cache
+        self.topology_ids = topology_ids
+
     def __len__(self):
-        # For static models: all samples are available
-        # For sequential models: leave room for sequence + target
-        if self.is_static:
-            return self.num_samples
-        else:
-            return self.num_samples - self.sequence_length
+        return len(self.file_metadata)
 
     def __getitem__(self, idx):
-        """
-        Load data on-demand from disk for a single sample or sequence.
-        This is the core of lazy loading - only the needed timestep(s) are loaded.
-        """
-        if self.is_static:
-            # Static model: load a single time step
-            target_meta = self.file_metadata[idx]
-            target_idx_in_file = target_meta['index_in_file']
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
             
+        target_meta = self.file_metadata[idx]
+        target_idx_in_file = target_meta['index_in_file']
+        
+        if self.is_static:
             # Load features for this timestep (copy to make writable for PyTorch)
             features = np.load(target_meta['features_path'], mmap_mode='r')[target_idx_in_file].copy()
             features_tensor = torch.from_numpy(features).float()
@@ -387,8 +376,6 @@ class PowerSystemLazyDataset(Dataset):
             'renewable_gen': renewable_gen,
             'timestep': target_meta.get('global_timestep', idx)
         }
-
-# ... all other functions below this line remain the same ...
 
 def _convert_edge_index_to_adj(edge_index, num_nodes):
     num_nodes = int(num_nodes)
@@ -556,7 +543,7 @@ def load_power_system_data(config, case_name):
                 f"REQUIRED: base_adjacency file not found at {base_adj_path}\n"
                 f"The new topology caching system requires base_adjacency files.\n"
                 f"Please regenerate your data using the updated data generation script:\n"
-                f"  python data/gen_meas_best.py test <timesteps>\n"
+                f"  python data/main.py test <timesteps>\n"
                 f"Old format (adjacency_array) is no longer supported."
             )
         
@@ -628,7 +615,7 @@ def load_power_system_data(config, case_name):
                 f"REQUIRED: topology_ids file not found at {file_topology_ids_path}\n"
                 f"The new topology caching system requires topology_ids files.\n"
                 f"Please regenerate your data using the updated data generation script:\n"
-                f"  python data/gen_meas_best.py test <timesteps>"
+                f"  python data/main.py test <timesteps>"
             )
         
         file_topology_ids = np.load(file_topology_ids_path)

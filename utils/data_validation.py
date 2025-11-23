@@ -36,18 +36,22 @@ def find_latest_timestamp(data_dir: str) -> str:
     
     return max(timestamps) if timestamps else None
 
-def check_data_files_exist(config) -> Tuple[bool, List[str]]:
+def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
     """
     Check if all required data files exist for the specified bus systems.
     Now supports both legacy (no timestamp) and new timestamped file formats.
     
     Args:
         config: Configuration object containing NUM_BUSES and renewable fractions
+        bus_systems: Optional list of bus systems to check (if None, uses config.NUM_BUSES)
         
     Returns:
         Tuple of (all_files_exist: bool, missing_files: List[str])
     """
-    bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    if bus_systems is None:
+        bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    elif not isinstance(bus_systems, list):
+        bus_systems = [bus_systems]
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]  # Standard fractions from gen_meas_best.py
     
     missing_files = []
@@ -527,7 +531,7 @@ def clean_existing_data(config, aggressive=True):
         for filepath in files_to_remove:
             # Skip the generation script and check script (should not be in data dir anyway)
             filename = os.path.basename(filepath)
-            if filename in ["gen_meas_best.py", "check_data.py"]:
+            if filename in ["main.py", "check_data.py"]:
                 continue
                 
             try:
@@ -541,7 +545,7 @@ def clean_existing_data(config, aggressive=True):
     else:
         print("No existing data files found to clean.\n")
 
-def generate_data_if_missing(config) -> bool:
+def generate_data_if_missing(config, bus_systems=None) -> bool:
     """
     ROBUST data validation and generation system.
     
@@ -553,14 +557,18 @@ def generate_data_if_missing(config) -> bool:
     
     Args:
         config: Configuration object
+        bus_systems: Optional list of bus systems to validate/generate (if None, uses config.NUM_BUSES)
         
     Returns:
         bool: True if data generation was successful, False otherwise
     """
     print(f"\n{'='*80}\nROBUST DATA VALIDATION - {config.DATA_MODE.upper()} MODE | Timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]} | Dir: {config.DATA_DIR}\n{'='*80}")
+    if bus_systems is not None:
+        bus_list_str = ", ".join([f"case{b}" for b in (bus_systems if isinstance(bus_systems, list) else [bus_systems])])
+        print(f"Validating specific bus systems: {bus_list_str}")
     
-    # STEP 1: Check if files exist
-    data_exist, missing_files = check_data_files_exist(config)
+    # STEP 1: Check if files exist (for specified bus systems only)
+    data_exist, missing_files = check_data_files_exist(config, bus_systems)
     
     # STEP 2: Check data consistency (even if files exist)
     needs_regeneration = False
@@ -626,7 +634,7 @@ def generate_data_if_missing(config) -> bool:
     print(f"{'='*80}")
     
     try:
-        data_gen_script = os.path.join("data", "gen_meas_best.py")
+        data_gen_script = os.path.join("data", "main.py")
         
         if not os.path.exists(data_gen_script):
             print(f"Error: Data generation script not found: {data_gen_script}")
@@ -679,12 +687,12 @@ def generate_data_if_missing(config) -> bool:
             print(f"\nError: Data generation failed (exit code {result.returncode})")
             return False
         
-        # STEP 6: Verify generation was successful
+        # STEP 6: Verify generation was successful (check only specified bus systems)
         print(f"\n{'='*80}")
         print("VERIFYING GENERATED DATA")
         print(f"{'='*80}")
         
-        data_exist_after, remaining_missing = check_data_files_exist(config)
+        data_exist_after, remaining_missing = check_data_files_exist(config, bus_systems)
         
         if data_exist_after:
             print("All required files successfully generated")
@@ -712,10 +720,10 @@ def generate_data_if_missing(config) -> bool:
         traceback.print_exc()
         return False
 
-def display_convergence_analysis(config, bus_systems_to_show=None):
+def display_data_generation_summary(config, bus_systems_to_show=None):
     """
-    Display detailed convergence analysis from generated convergence reports.
-    Shows power flow success rates and any failures (especially with contingencies).
+    Display concise data generation summary from audit files.
+    Shows success rates, curtailment, and trip/fail rates for each case and renewable fraction.
     
     Args:
         config: Configuration object
@@ -724,171 +732,62 @@ def display_convergence_analysis(config, bus_systems_to_show=None):
     import json
     import glob
     
-    data_dir = config.DATA_DIR  # Use mode-specific directory
-    # Use provided bus systems or default to config
+    data_dir = config.DATA_DIR
     if bus_systems_to_show is not None:
         bus_systems = bus_systems_to_show
     else:
         bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
     
-    renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    # Find latest timestamp from existing files
+    latest_timestamp = find_latest_timestamp(data_dir)
+    if not latest_timestamp:
+        print("\nNo timestamped data files found. Cannot display summary.")
+        return
     
     print("\n" + "="*80)
-    print("CONVERGENCE ANALYSIS")
+    print("DATA GENERATION SUMMARY")
     print("="*80)
+    print(f"{'Case':<10} {'Frac':<6} {'Success%':<10} {'Curtail%':<10} {'Trip/Fail%':<12} {'Status'}")
+    print("-" * 80)
     
-    total_scenarios = 0
-    total_successful = 0
-    total_failed = 0
-    scenarios_with_failures = []
-    
-    # Collect all data first
-    all_data = {}  # {num_buses: {frac: stats}}
     for num_buses in bus_systems:
         case_name = f"case{num_buses}"
-        all_data[num_buses] = {}
+        renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
         
         for frac in renewable_fractions:
-            # NO FALLBACKS - Fail fast if audit files are missing
-            pattern_audit = f"{case_name}_data_quality_audit_frac{frac:.1f}_*.json"
-            report_files = glob.glob(os.path.join(data_dir, pattern_audit))
+            # Find audit file for this case and fraction
+            pattern = f"{case_name}_data_quality_audit_frac{frac:.1f}_{latest_timestamp}.json"
+            audit_file = os.path.join(data_dir, pattern)
             
-            if not report_files:
-                raise FileNotFoundError(
-                    f"Missing audit file for {case_name} at {frac*100:.1f}% renewable fraction. "
-                    f"Expected pattern: {pattern_audit} in {data_dir}. "
-                    f"Data generation may have failed or files were deleted."
-                )
-            
-            report_file = sorted(report_files)[-1]
-            with open(report_file, 'r') as f:
-                audit_data = json.load(f)
-            
-            # Extract convergence stats (new format has it in raw_convergence_stats)
-            if 'raw_convergence_stats' not in audit_data:
-                raise ValueError(
-                    f"Invalid audit file format: {report_file}. "
-                    f"Missing 'raw_convergence_stats' key. File may be corrupted or in legacy format."
-                )
-            
-            stats = audit_data['raw_convergence_stats']
-            
-            # Validate required keys exist
-            required_keys = ['successful', 'failed', 'total_timesteps', 'failed_with_contingency']
-            missing_keys = [key for key in required_keys if key not in stats]
-            if missing_keys:
-                raise KeyError(
-                    f"Missing required keys in audit file {report_file}: {missing_keys}. "
-                    f"File may be corrupted or incomplete."
-                )
-            
-            all_data[num_buses][frac] = stats
-            
-            total_scenarios += 1
-            total_successful += stats['successful']
-            total_failed += stats['failed']
-            
-            if len(stats['failed_with_contingency']) > 0:
-                scenarios_with_failures.append({'case': case_name, 'fraction': frac, 'stats': stats})
-    
-    # Print horizontal table header with fixed column width
-    col_width = 17  # Fixed width for each case column
-    header = "Renewable%  "
-    for num_buses in bus_systems:
-        header += f"| CASE{num_buses:<{col_width-6}} "
-    print(f"\n{header}")
-    print("-" * len(header))
-    
-    # Print each renewable fraction row
-    for frac in renewable_fractions:
-        row = f"  {frac*100:>5.1f}%    "
-        for num_buses in bus_systems:
-            if frac in all_data[num_buses]:
-                stats = all_data[num_buses][frac]
-                has_cont_fail = len(stats.get('failed_with_contingency', [])) > 0
-                status = "W" if has_cont_fail else "OK"
+            if not os.path.exists(audit_file):
+                # Try without timestamp
+                pattern_no_ts = f"{case_name}_data_quality_audit_frac{frac:.1f}.json"
+                audit_file = os.path.join(data_dir, pattern_no_ts)
                 
-                # Calculate success_rate if not present (fallback for old data)
-                if 'success_rate' in stats:
-                    rate = stats['success_rate']
-                else:
-                    # Fallback calculation
-                    total = stats.get('total_timesteps', 0)
-                    successful = stats.get('successful', 0)
-                    rate = (successful / total * 100) if total > 0 else 0.0
+                if not os.path.exists(audit_file):
+                    continue
+            
+            try:
+                with open(audit_file, 'r') as f:
+                    audit = json.load(f)
                 
-                cell = f"{status} {rate:5.1f}%"
+                meta = audit.get('meta', {})
+                intervention = audit.get('intervention_stats', {})
                 
-                # Pad to fixed width
-                row += f"| {cell:<{col_width-3}} "
-            else:
-                row += f"| {'---':<{col_width-3}} "
-        print(row)
-    
-    # Calculate summary statistics
-    total_timesteps = total_successful + total_failed
-    
-    # Check if ANY data was found
-    if total_timesteps == 0:
-        print("\nWarning: No convergence data found!")
-        print("  Data may not have been generated yet.")
-        print("  Data will be generated automatically if missing.")
-        print("="*80)
-        return  # Exit early
-    
-    overall_rate = (total_successful / total_timesteps * 100) if total_timesteps > 0 else 0
-    
-    print(f"\nOverall convergence: {overall_rate:.1f}% ({total_successful}/{total_timesteps} timesteps)")
-    if scenarios_with_failures:
-        print(f"Note: {len(scenarios_with_failures)} scenario(s) with contingency failures")
-    
-    # Display detailed contingency analysis for each scenario
-    print("\n" + "-"*80)
-    print("CONTINGENCY ANALYSIS")
-    print("-"*80)
-    
-    for scenario in scenarios_with_failures:
-        case_name = scenario['case']
-        frac = scenario['fraction']
-        stats = scenario['stats']
-        
-        # Try to load full audit data
-        pattern_audit = f"{case_name}_data_quality_audit_frac{frac:.1f}_*.json"
-        audit_files = glob.glob(os.path.join(data_dir, pattern_audit))
-        
-        if audit_files:
-            audit_file = sorted(audit_files)[-1]
-            with open(audit_file, 'r') as f:
-                audit_data = json.load(f)
-            
-            contingency_stats = audit_data.get('contingency_stats', {})
-            critical_lines = audit_data.get('critical_lines', {})
-            
-            print(f"\n{case_name.upper()} - {frac*100:.0f}% Renewable:")
-            print(f"  N-1 Scenarios: {contingency_stats.get('n1_scenarios_run', 0):,}")
-            print(f"  N-1 Robustness: {contingency_stats.get('n1_robustness_score', 0):.1f}%")
-            print(f"    - Safe (Strict): {contingency_stats.get('n1_safe', 0):,}")
-            print(f"    - Curtailed (Relaxed): {contingency_stats.get('n1_curtailed', 0):,}")
-            print(f"    - Collapsed (Failed): {contingency_stats.get('n1_collapsed', 0):,}")
-            
-            if critical_lines:
-                print(f"\n  Most Critical Lines (Top 3):")
-                sorted_lines = sorted(critical_lines.items(), 
-                                    key=lambda x: x[1].get('failure_count', 0), 
-                                    reverse=True)[:3]
-                for rank, (line_key, line_data) in enumerate(sorted_lines, 1):
-                    line_id = line_data.get('line_id', 'unknown')
-                    curtailment_rate = line_data.get('curtailment_rate', 0)
-                    failure_rate = line_data.get('failure_rate', 0)
-                    
-                    if curtailment_rate > 50:
-                        status = "Bottleneck"
-                    elif failure_rate > 5:
-                        status = "Islanding Risk"
-                    else:
-                        status = "Redundant"
-                    
-                    print(f"    {rank}. Line {line_id}: {curtailment_rate:.1f}% Curtailment Rate ({status})")
+                case_short = case_name.replace('case', '')
+                success = intervention.get('raw_success_rate', 0)
+                curtail = intervention.get('curtailed_rate', 0)
+                fail = intervention.get('failed_tripped_rate', 0)
+                
+                # Status without emojis
+                status = "OK"
+                if fail > 0: status = "Issues"
+                if fail > 5: status = "Critical"
+                
+                print(f"{case_short:<10} {frac:<6.1f} {success:<10.1f} {curtail:<10.1f} {fail:<12.1f} {status}")
+                
+            except Exception as e:
+                print(f"{case_name.replace('case', ''):<10} {frac:<6.1f} {'ERROR':<10} {'ERROR':<10} {'ERROR':<12} Error")
     
     print("="*80)
 
@@ -913,8 +812,8 @@ def force_clean_all_data(config) -> bool:
     print("\nRunning data generation script...")
     
     try:
-        # Run gen_meas_best.py from the data directory
-        data_gen_script = os.path.join("data", "gen_meas_best.py")
+        # Run data/main.py from the data directory
+        data_gen_script = os.path.join("data", "main.py")
         
         if not os.path.exists(data_gen_script):
             print(f"ERROR: Data generation script not found: {data_gen_script}")
@@ -956,13 +855,13 @@ def force_clean_all_data(config) -> bool:
         print(f"ERROR: Error running data generation: {e}")
         return False
 
-def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
+def validate_data_before_training(config, bus_systems_to_test=None) -> bool:
     """
     Main function to validate data exists and generate if needed.
     
     Args:
         config: Configuration object
-        bus_systems_to_show: List of bus systems to show in convergence analysis
+        bus_systems_to_test: List of bus systems to validate (if None, validates all in config.NUM_BUSES)
         
     Returns:
         bool: True if data is ready for training, False otherwise
@@ -971,14 +870,15 @@ def validate_data_before_training(config, bus_systems_to_show=None) -> bool:
     print("DATA VALIDATION")
     print("="*80)
     
-    success = generate_data_if_missing(config)
+    # Pass bus_systems to generation function
+    success = generate_data_if_missing(config, bus_systems_to_test)
     
     if success:
-        # Display convergence analysis table (shows power flow success rates)
+        # Display data generation summary table (shows success/curtail/fail rates)
         try:
-            display_convergence_analysis(config, bus_systems_to_show)
+            display_data_generation_summary(config, bus_systems_to_test)
         except Exception as e:
-            print(f"Warning: Could not display convergence analysis: {e}")
+            print(f"Warning: Could not display data generation summary: {e}")
         
         print("\nReady for training!")
     else:
