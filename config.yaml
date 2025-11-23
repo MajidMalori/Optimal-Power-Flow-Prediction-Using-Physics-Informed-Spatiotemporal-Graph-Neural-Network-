@@ -169,7 +169,7 @@ experimental:
   models_to_train: "all"  # Options: "all", or comma-separated model names
   data_mode: "test"  # Options: "train" or "test"
   train_timesteps: 2400  # Reduced for faster iteration (100 days)
-  test_timesteps: 3  # Quick test with 3 timesteps
+  test_timesteps: 24  # Quick test with 24 timesteps (User requested)
   plot_data_info: true  # Generate data validation and profile story plots
   use_mosoa: true  # Use MoSOA for hyperparameter optimization
   force_cpu: false  # Force CPU training even if GPU is available

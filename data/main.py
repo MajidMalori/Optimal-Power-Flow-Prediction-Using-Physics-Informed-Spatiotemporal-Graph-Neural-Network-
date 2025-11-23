@@ -50,13 +50,62 @@ warnings.filterwarnings('ignore', message='.*Probably the execution is slow.*')
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 # CONFIGURATION
+# Refactored to use Config class and CLI arguments
+import argparse
+from config import Config
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Physics-Informed Data Generation')
+    parser.add_argument('--time_steps', type=int, default=None, help='Number of time steps to generate')
+    parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated data')
+    parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
+    parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data generation mode (train/test)')
+    return parser.parse_known_args()[0]
+
+# Parse arguments
+args = parse_arguments()
+
+# Initialize Config
+# CLI arguments override YAML configuration
+try:
+    # Determine data mode: CLI > Config > Default
+    # We need to peek at Config default if CLI is None, but Config isn't loaded yet.
+    # So we load Config with CLI override if present, otherwise let Config use its internal default logic (which reads YAML)
+    # However, Config init requires data_mode.
+    # Let's pass CLI mode if present, otherwise 'test' (or whatever default we want if YAML doesn't specify, but YAML is required).
+    # Actually Config loads YAML.
+    
+    config_instance = Config(
+        yaml_config_path=args.config,
+        load_yaml=True,
+        # If CLI args are provided, they override the config defaults
+        data_mode=args.mode if args.mode is not None else getattr(Config, 'data_mode', 'test'),
+        train_timesteps=args.time_steps, 
+        test_timesteps=args.time_steps,
+        save_results=True
+    )
+except Exception as e:
+    print(f"Error loading configuration: {e}")
+    sys.exit(1)
+
+# Create CONFIG dictionary for compatibility with existing code
+# Prioritize CLI args > Config object > Defaults
+data_mode = config_instance.DATA_MODE # Config has already resolved mode
+default_timesteps = config_instance.DATA_MODE_TIMESTEPS[data_mode]
+timesteps_to_use = args.time_steps if args.time_steps is not None else default_timesteps
+output_dir_to_use = args.output_dir if args.output_dir is not None else config_instance.DATA_DIR
+
+# Debug: Print mode and output directory
+print(f"[Data Generation] Mode: {data_mode}, Output Directory: {output_dir_to_use}")
+
 CONFIG = {
     "random_seed": 42,
-    "test_cases": ["case33", "case57", "case118"],
-    "time_steps": 24,
-    "output_dir": "./data",
+    "test_cases": getattr(Config, 'test_cases', ["case33", "case57", "case118"]),
+    "time_steps": timesteps_to_use,
+    "output_dir": output_dir_to_use,
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    "contingency_rate": 0.05,
+    "contingency_rate": getattr(Config, 'contingency_rate', 0.05),
     "voltage_error_std": 0.005,
     "power_error_std": 0.01,
     "angle_error_std": 0.02,
@@ -65,12 +114,13 @@ CONFIG = {
     "base_carbon_intensity_grid": 0.55,
     "max_carbon_reduction_from_renewables": 0.30,
     "use_time_series": True,
-    "hours_per_day": 24,
+    "hours_per_day": getattr(Config, 'hours_per_day', 24),
     "num_days": None,
     "use_weather_driven_renewables": True,
     "seed": 42,
     "chunk_size": 1000,
     "use_chunked_writing": True,
+    "pmu_coverage": getattr(Config, 'pmu_coverage', 0.3)
 }
 
 def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = None, 
@@ -944,11 +994,8 @@ if __name__ == "__main__":
                 
                 net_with_renewables = configure_renewables(net_for_run, frac, CONFIG)
                 
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                if "data" in script_dir:
-                    output_path = os.path.join(script_dir, data_mode)
-                else:
-                    output_path = os.path.join(script_dir, "data", data_mode)
+                # Use the configured output directory (respects CLI args and mode)
+                output_path = CONFIG['output_dir']
                 
                 os.makedirs(output_path, exist_ok=True)
                 
@@ -997,11 +1044,8 @@ if __name__ == "__main__":
             continue
     
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        if "data" in script_dir:
-            output_path = os.path.join(script_dir, data_mode)
-        else:
-            output_path = os.path.join(script_dir, "data", data_mode)
+        # Use the configured output directory (respects CLI args and mode)
+        output_path = CONFIG['output_dir']
         
         os.makedirs(output_path, exist_ok=True)
         

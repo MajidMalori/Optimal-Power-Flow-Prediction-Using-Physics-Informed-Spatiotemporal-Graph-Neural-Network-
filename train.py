@@ -225,15 +225,25 @@ def main():
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         print("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
+    # Parse command line arguments for overrides
+    import argparse
+    parser = argparse.ArgumentParser(description='Physics-Informed Model Training')
+    parser.add_argument('--time_steps', type=int, default=None, help='Override number of time steps')
+    parser.add_argument('--output_dir', type=str, default=None, help='Override output directory')
+    parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
+    parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data mode (train/test)')
+    args, unknown = parser.parse_known_args()
+    
     # FIXED: Load configuration from YAML (single source of truth)
     # Args class has been removed - all settings come from YAML
+    # Pass CLI overrides to Config
     base_config = Config(
-        yaml_config_path='config.yaml',
+        yaml_config_path=args.config,
         load_yaml=True,
-        data_mode=getattr(Config, 'data_mode', 'test'),
+        data_mode=args.mode if args.mode is not None else getattr(Config, 'data_mode', 'test'),
         save_results=getattr(Config, 'save_results', True),
-        train_timesteps=getattr(Config, 'train_timesteps', 12000),
-        test_timesteps=getattr(Config, 'test_timesteps', 960),
+        train_timesteps=args.time_steps if args.time_steps is not None else getattr(Config, 'train_timesteps', 12000),
+        test_timesteps=args.time_steps if args.time_steps is not None else getattr(Config, 'test_timesteps', 960),
         clear_results=getattr(Config, 'clear_results', True),
         hours_per_day=24,  # Standard value
         sequence_length=5   # Standard value
