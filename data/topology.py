@@ -120,8 +120,11 @@ def calculate_adjacency_matrix(net: pp.pandapowerNet) -> np.ndarray:
     num_buses = len(net.bus)
     adj_matrix = np.zeros((num_buses, num_buses), dtype=np.float32)
     
-    # Add edges from lines
-    for _, line in net.line.iterrows():
+    # Add edges from lines (ONLY IN-SERVICE)
+    # CRITICAL FIX: Filter out lines that are out of service (contingencies)
+    active_lines = net.line[net.line.in_service]
+    
+    for _, line in active_lines.iterrows():
         from_bus = int(line['from_bus'])
         to_bus = int(line['to_bus'])
         adj_matrix[from_bus, to_bus] = 1.0
