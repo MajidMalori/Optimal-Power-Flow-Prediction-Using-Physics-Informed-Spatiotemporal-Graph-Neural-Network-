@@ -1,11 +1,11 @@
 import torch
 import numpy as np
+import gc
+import warnings
 from tqdm import tqdm
 from collections import OrderedDict
 from .base_trainer import BaseTrainer
-# Removed to_dense_adj import - adjacency is always dense for time-series data
-import gc
-import warnings
+from utils.forensic_logger import get_logger
 from utils.empirical_bayes import EmpiricalBayesOptimizer
 
 class PowerSystemTrainer(BaseTrainer):
@@ -25,6 +25,9 @@ class PowerSystemTrainer(BaseTrainer):
         # The __init__ from BaseTrainer is called, which sets up self.current_epoch
         super().__init__(model, criterion, optimizer, config, device)
         self.is_physics_informed = is_physics_informed
+
+        # Forensic logger (will be None if not enabled)
+        self.forensic_logger = get_logger()
         
         # PERFORMANCE: Cache GPU availability check (checked once at init, not in every loop)
         self.use_cuda = device.type == 'cuda'
@@ -71,6 +74,9 @@ class PowerSystemTrainer(BaseTrainer):
 
         for batch_idx, batch in enumerate(pbar):
             # Move data to device
+            # FORENSIC: Log batch data (first batch only)
+            if self.forensic_logger and batch_idx == 0:
+                self.forensic_logger.log_data_batch(batch, batch_idx)
             features = batch['features'].to(self.device, non_blocking=True)
             targets = batch['targets'].to(self.device, non_blocking=True)
             ybus = batch['ybus_matrix'].to(self.device, non_blocking=True)
@@ -94,6 +100,9 @@ class PowerSystemTrainer(BaseTrainer):
                     outputs = self.model(features, adjacency_input)
                 
                 loss_dict = self.criterion(outputs, targets, features, ybus, bus_types=bus_types, epoch=self.current_epoch)
+                # FORENSIC: Log loss components
+                if self.forensic_logger and batch_idx % 10 == 0:
+                    self.forensic_logger.log_loss_components(loss_dict, batch_idx, phase="train")
                 total_loss = loss_dict['total_loss']
                 
                 # Add Empirical Bayes regularization (layer-wise prior precision)
@@ -184,14 +193,14 @@ class PowerSystemTrainer(BaseTrainer):
             current_batch_count = batch_idx + 1
             if self.is_physics_informed:
                 # Use true MSE for display (denormalized physical units)
-                display_mse = epoch_losses['mse']
+                display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
                 pbar.set_postfix(OrderedDict([
                     ('mse', f"{display_mse / current_batch_count:.6f}"),
                     ('p_vio', f"{epoch_losses['power_violation'] / current_batch_count:.6f}"),
                     ('v_vio', f"{epoch_losses['voltage_violation'] / current_batch_count:.6f}")
                 ]))
             else:
-                display_mse = epoch_losses['mse']
+                display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
                 pbar.set_postfix(mse=f"{display_mse / current_batch_count:.6f}")
             
             # Explicitly delete tensors to free memory
@@ -232,14 +241,14 @@ class PowerSystemTrainer(BaseTrainer):
 
                 if self.is_physics_informed:
                     # Use true MSE for display
-                    display_mse = epoch_losses['mse']
+                    display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
                     pbar.set_postfix(OrderedDict([
                         ('mse', f"{display_mse/(batch_idx+1):.6f}"),
                         ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.6f}"),
                         ('v_vio', f"{epoch_losses['voltage_violation']/(batch_idx+1):.6f}")
                     ]))
                 else:
-                    display_mse = epoch_losses['mse']
+                    display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
                     pbar.set_postfix(mse=f"{display_mse/(batch_idx+1):.6f}")
 
         num_batches = len(val_loader)

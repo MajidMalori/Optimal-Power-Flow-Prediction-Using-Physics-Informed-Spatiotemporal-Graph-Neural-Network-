@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
+from utils.forensic_logger import get_logger
+
 
 def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, config: object, bus_types: torch.Tensor) -> Dict[str, float]:
     """
@@ -14,7 +16,6 @@ def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: to
         config: Configuration object
         bus_types: Required [batch, buses] with codes [0=PQ, 1=PV, 2=Slack] for OPF-specific metrics
     """
-    import torch.nn.functional as F
     
     with torch.no_grad():
         # Ensure outputs and targets have the same shape
@@ -299,6 +300,13 @@ class PowerSystemLoss(nn.Module):
         
         # Total NLL: mean across batch and buses
         data_loss = torch.mean(nll_var1) + torch.mean(nll_var2)
+
+        # FORENSIC: Log heteroscedastic parameters
+        logger = get_logger()
+        if logger and torch.rand(1).item() < 0.01:  # Log 1% of batches
+            logger.log_tensor_stats("eta1_var1", eta1_var1, indent=3)
+            logger.log_tensor_stats("eta2_var1 (should be < 0)", eta2_var1, indent=3)
+            logger.log_tensor_stats("sigma_var1", sigma_var1, indent=3)
         
         # DEBUG: Check for NaN in natural parametrization
         if torch.isnan(data_loss) or torch.isinf(data_loss):

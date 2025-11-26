@@ -158,6 +158,7 @@ from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
 from utils.evaluate_robustness import evaluate_model_robustness
 from trainers.model_trainer import PowerSystemTrainer
+from utils.forensic_logger import init_forensic_logger, close_logger
 from config import Config
 
 
@@ -484,6 +485,19 @@ def main():
                     # Combine model and criterion parameters for optimization
                     all_params = list(model.parameters()) + list(criterion.parameters())
                     optimizer = torch.optim.AdamW(all_params, lr=learning_rate, weight_decay=weight_decay)
+
+                    # Initialize forensic logger if debug mode is enabled
+                    debug_config = getattr(run_config, 'DEBUG_ENABLE', True)  # From config.yaml debug.enable
+                    if debug_config:
+                        forensic_logger = init_forensic_logger(
+                            log_dir="debug_logs",
+                            model_name=model_name,
+                            bus_system=str(num_buses),
+                            enabled=True
+                        )
+                        # Attach logger to model if it's a ForensicGCN
+                        if hasattr(model, 'set_logger'):
+                            model.set_logger(forensic_logger)
 
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     
@@ -923,4 +937,5 @@ if __name__ == '__main__':
 
             torch.cuda.empty_cache()  # OK at final exit
         print("\nTraining script completed")
+        close_logger() # Close forensic logger
         sys.exit(0)

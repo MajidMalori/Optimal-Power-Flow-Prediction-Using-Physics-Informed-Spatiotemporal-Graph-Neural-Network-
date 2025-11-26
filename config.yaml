@@ -98,7 +98,7 @@ heteroscedastic:
 # --- Empirical Bayes Configuration ---
 empirical_bayes:
   enable: True  # Enable Empirical Bayes regularization
-  burn_in_epochs: 10  # Let model stabilize before starting EB optimization
+  burn_in_epochs: 5  # Let model stabilize before starting EB optimization
   update_frequency: 20  # Update hyperparameters every N epochs (reduces noise)
   hyperparameter_steps: 20  # Number of gradient steps for δ optimization
   hyperparameter_lr: 0.001  # Learning rate for δ optimization (conservative, stable)
@@ -183,3 +183,11 @@ directories:
   root: null  # Set automatically to project root
   data: null  # Set automatically: root/data/[train|test]
   experimental_results: null  # Set automatically: root/experimental_results
+
+# --- Forensic Debug Logging ---
+debug:
+  enable: true  # Enable comprehensive forensic debugging
+  log_dir: "debug_logs"  # Directory for debug logs
+  log_interval: 1  # Log every N batches (1 = every batch, 10 = every 10 batches)
+  log_gradients: true  # Log gradient flow
+  log_weights_every_n_epochs: 1  # Log model weights every N epochs
