@@ -1,11 +1,13 @@
 import os
 import torch
 import logging
+import argparse
 import numpy as np
 import pandas as pd
 import copy
 import gc
 import signal
+import yaml
 import sys
 
 def check_gpu_memory():
@@ -89,13 +91,6 @@ def cleanup_bus_system_data():
         del _ybus_metadata
     if '_normalizer' in globals():
         del _normalizer
-    
-    # REMOVED: Force garbage collection - slows down execution
-    # gc.collect()
-    
-    # REMOVED: Clear GPU cache - only needed if actually hitting OOM
-    # if torch.cuda.is_available():
-    #     torch.cuda.empty_cache()
 
 def cleanup_model_resources(model, trainer, optimizer, criterion):
     """
@@ -113,13 +108,6 @@ def cleanup_model_resources(model, trainer, optimizer, criterion):
         del optimizer
     if criterion is not None:
         del criterion
-    
-    # REMOVED: Force garbage collection - slows down execution significantly
-    # gc.collect()
-    
-    # REMOVED: Clear GPU cache - only needed if actually hitting OOM
-    # if torch.cuda.is_available():
-    #     torch.cuda.empty_cache()
 
 def enable_gradient_checkpointing(model):
     """Enable gradient checkpointing for memory efficiency"""
@@ -167,7 +155,6 @@ from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluat
                              evaluate_moopf_objectives, evaluate_moopf_objectives_normalized, 
                              save_best_model_results, print_comprehensive_summary, print_model_summary)
 from utils.uncertainty_analysis import generate_uncertainty_visualizations
-from utils.data_profile_story import analyze_data_profiles
 from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
 from utils.evaluate_robustness import evaluate_model_robustness
 from trainers.model_trainer import PowerSystemTrainer
@@ -197,11 +184,10 @@ def signal_handler(signum, _):
     """Handle interrupt signals gracefully - set flag instead of printing directly."""
     from utils.shutdown_flag import set_shutdown
     set_shutdown()
-    # Don't print here - let the main loop handle it to avoid reentrant call issues
 
 def setup_professional_logging():
     """Setup professional logging with memory tracking"""
-    # Use console logging only - detailed logs are already saved in experimental_results/
+    
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -226,7 +212,6 @@ def main():
         print("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
     # Parse command line arguments for overrides
-    import argparse
     parser = argparse.ArgumentParser(description='Physics-Informed Model Training')
     parser.add_argument('--time_steps', type=int, default=None, help='Override number of time steps')
     parser.add_argument('--output_dir', type=str, default=None, help='Override output directory')
@@ -234,8 +219,6 @@ def main():
     parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data mode (train/test)')
     args, unknown = parser.parse_known_args()
     
-    # FIXED: Load configuration from YAML (single source of truth)
-    # Args class has been removed - all settings come from YAML
     # Pass CLI overrides to Config
     base_config = Config(
         yaml_config_path=args.config,
@@ -285,22 +268,6 @@ def main():
         print("Data validation failed. Exiting training.")
         return
     
-    # STEP 2.5: Generate all data plots BEFORE training (consolidated in one folder)
-    if base_config.PLOT_DATA_INFO:
-        try:
-            from utils.plot_consolidator import generate_all_data_plots
-            data_plots_dir = os.path.join(base_config.CURRENT_RUN_DIR, 'data_plots')
-            all_plot_paths = generate_all_data_plots(
-                config=base_config,
-                bus_systems=bus_systems_to_test,
-                data_plots_dir=data_plots_dir
-            )
-            print(f"All data plots saved to: {data_plots_dir}\n")
-        except Exception as e:
-            print(f"Warning: Could not generate consolidated data plots: {e}")
-            import traceback
-            traceback.print_exc()
-    
     seed = getattr(Config, 'SEED', 42)
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -311,14 +278,13 @@ def main():
     
     # Store Config attributes for later use (replaces args object)
     _config_attrs = {
-        'use_mosoa': getattr(Config, 'use_mosoa', True),
+
         'save_results': getattr(Config, 'save_results', True),
         'clear_results': getattr(Config, 'clear_results', True),
     }
     is_gpu = device.type == 'cuda'
     clear_gpu_memory()
     
-    # --- Device & Worker Auto-Configuration (Professional GPU Optimization) ---
     # Auto-configure NUM_WORKERS based on CPU cores (heuristic: half cores, capped at 8)
     data_workers_config = getattr(Config, 'data_workers', 'auto')
     if data_workers_config == 'auto':
@@ -364,8 +330,6 @@ def main():
             return
 
     # === MAIN TRAINING EXECUTION ===
-    # Removed verbose training header - info already in startup line
-    
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
@@ -378,20 +342,31 @@ def main():
         
         case_name = f"case{num_buses}"
         # Set case name in config to enable system-specific base power determination
-        # This ensures correct per-unit calculations: Case33=10MVA, Case57/118=100MVA
         base_config.CASE_NAME = case_name
+        
+        # Load system-specific voltage limits from YAML config
+        # This must be done AFTER setting CASE_NAME
+        config_yaml_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+        try:
+            with open(config_yaml_path, 'r') as f:
+                yaml_config = yaml.safe_load(f)
+            if 'system_limits' in yaml_config:
+                case_name_lower = case_name.lower()
+                system_limits = yaml_config['system_limits']
+                if case_name_lower in system_limits:
+                    limits = system_limits[case_name_lower]
+                    if 'v_min' in limits:
+                        base_config.V_MIN = limits['v_min']
+                    if 'v_max' in limits:
+                        base_config.V_MAX = limits['v_max']
+        except (FileNotFoundError, yaml.YAMLError) as e:
+            raise RuntimeError(f"Failed to load voltage limits from config.yaml: {e}. Ensure config.yaml exists and is properly formatted.")
+        
         try:
             data_tuple = load_power_system_data(base_config, case_name)
             # Unpack: (file_metadata, base_adjacency, ybus_metadata, normalizer, topology_cache, topology_ids)
-            if len(data_tuple) == 6:
-                _file_metadata, _adjacency, _ybus_metadata, _normalizer, _topology_cache, _topology_ids = data_tuple
-            else:
-                # Backward compatibility: old format returns 4 items
-                _file_metadata, _adjacency, _ybus_metadata, _normalizer = data_tuple[:4]
-                _topology_cache, _topology_ids = None, None
-            
-            # NOTE: Data plots are now generated BEFORE training starts (consolidated in data_plots folder)
-            # No need to generate plots here during training loop
+            # Unpack data tuple (6 items expected)
+            _file_metadata, _adjacency, _ybus_metadata, _normalizer, _topology_cache, _topology_ids = data_tuple
             
             bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:
@@ -431,14 +406,8 @@ def main():
                 run_name = generate_run_name(model_name, params, num_buses, is_sequential)
 
                 try:
-                    # REMOVED: Duplicate logging setup - now handled by base_trainer with consolidated log files
-                    # All logs go to: {num_buses}bus/log/{model_name}_{mode}.log
-                    # Multiple configurations append to the same file with nice separators
-                    
                     # Clear GPU memory before starting
                     clear_gpu_memory()
-                    
-                    # Check memory before model creation (monitoring disabled)
                     
                     # Use adaptive batch size based on system size
                     run_config.BATCH_SIZE = get_adaptive_batch_size(
@@ -463,12 +432,10 @@ def main():
                     )
                     train_loader, val_loader, test_loader = loaders
 
-                    # Create model with optimized parameters
-                    # OPF mode: bus_types are required (check if any metadata has bus_types_path)
-                    is_opf_mode = any(meta.get('bus_types_path') for meta in _file_metadata[:10]) if _file_metadata else False
+                    # Create model with optimized parameters (always OPF mode)
                     model_kwargs = create_model_kwargs(
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph, 
-                        model_name=model_name, is_opf_mode=is_opf_mode, config=run_config, normalizer=_normalizer
+                        model_name=model_name, config=run_config, normalizer=_normalizer
                     )
                     
                     # Check memory before model creation
@@ -532,21 +499,20 @@ def main():
                     for key, value in params.items():
                         config_params[key] = value
                     
-                    # Print configuration at TOP (before training starts) - one-liner
                     config_str = ", ".join([f"{k}={v:.6f}" if isinstance(v, float) else f"{k}={v}" 
                                            for k, v in sorted(config_params.items())])
                     print(f"  Config: {config_str}")
                     
-                    # Train the model (pass model_name, num_buses, and config_params for consolidated logging)
+                    # Train the model 
                     trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses, config_params=config_params)
 
-                    # Get validation metrics for hyperparameter optimization (use normalized data like training)
+                    # Get validation metrics for hyperparameter optimization 
                     val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
                     
                     # Get test metrics for final evaluation
                     test_metrics = evaluate_model(model, test_loader, device, run_config, _normalizer, is_sequential)
 
-                    # Calculate objective score for MoSOA optimization (uses Validation MSE, not total_loss)
+                    # Calculate objective score for MoSOA optimization
                     total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
 
                     # Store the training history with the results
@@ -594,8 +560,8 @@ def main():
                     )
                     log_memory_usage(f"After {model_name} training")
 
-            use_mosoa = getattr(Config, 'use_mosoa', True)
-            if use_mosoa:
+            # Always use MoSOA for hyperparameter optimization
+            if True:  # MoSOA always enabled
                 print(f"Optimizing with MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
                 best_score, best_position, history, iteration_details = mosoa_optimizer(
                     mosoa_params['num_seagulls'], 
@@ -635,12 +601,10 @@ def main():
                 setattr(best_config, key.upper(), value)
             best_config.NUM_BUSES = num_buses
 
-            # Create model kwargs for best model
-            # Detect OPF mode: check if bus_types exist (OPF) vs None (state estimation)
-            is_opf_mode = any(meta.get('bus_types_path') for meta in _file_metadata[:10]) if _file_metadata else False
+            # Create model kwargs for best model (always OPF mode)
             model_kwargs_best = create_model_kwargs(
                 model_config, best_params, num_buses, is_sequential, uses_adaptive_graph, 
-                model_name=model_name, is_opf_mode=is_opf_mode, config=best_config, normalizer=_normalizer
+                model_name=model_name, config=best_config, normalizer=_normalizer
             )
 
             # Create data loaders for best model
@@ -675,7 +639,7 @@ def main():
                 else:
                     raise e
 
-            # Evaluate MOOPF objectives for the best model (using normalized data for consistent scoring)
+            # Evaluate MOOPF objectives for the best model 
             moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
                 model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
             )
@@ -954,9 +918,6 @@ if __name__ == '__main__':
         import traceback
         traceback.print_exc()
     finally:
-        # Clean exit - only do minimal cleanup (final exit is fine to do GC)
-        # Note: This is OK at final exit, but not during training loops
-        import gc
         gc.collect()  # OK at final exit
         if torch.cuda.is_available():
 

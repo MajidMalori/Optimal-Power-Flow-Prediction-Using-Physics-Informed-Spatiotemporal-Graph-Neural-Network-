@@ -4,9 +4,22 @@ import traceback
 import json
 import warnings
 import copy
+import gc
+import time
+import shutil
+import tempfile
+import random
+import argparse
+import yaml
+import shutil
+import time
 from datetime import datetime
 import numpy as np
+import pandas as pd
 import pandapower as pp
+from tqdm import tqdm
+from scipy import sparse
+
 
 # Add parent directory to Python path so we can import utils
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -42,16 +55,13 @@ from data.validation import (
 )
 from utils.contingency_ybus import DataGenerationError
 
+from data.data_auditor import transform_convergence_to_audit
+
 # Suppress warnings
-warnings.filterwarnings('ignore', message='.*numba.*')
-warnings.filterwarnings('ignore', message='.*Please install numba.*')
-warnings.filterwarnings('ignore', message='.*numba cannot be imported.*')
-warnings.filterwarnings('ignore', message='.*Probably the execution is slow.*')
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 # CONFIGURATION
 # Refactored to use Config class and CLI arguments
-import argparse
 from config import Config
 
 def parse_arguments():
@@ -61,6 +71,7 @@ def parse_arguments():
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated data')
     parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
     parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data generation mode (train/test)')
+    parser.add_argument('--no_progress_bar', action='store_true', help='Disable progress bar (useful when running from train.py)')
     return parser.parse_known_args()[0]
 
 # Parse arguments
@@ -97,7 +108,7 @@ timesteps_to_use = args.time_steps if args.time_steps is not None else default_t
 output_dir_to_use = args.output_dir if args.output_dir is not None else config_instance.DATA_DIR
 
 # Debug: Print mode and output directory
-print(f"[Data Generation] Mode: {data_mode}, Output Directory: {output_dir_to_use}")
+# print(f"[Data Generation] Mode: {data_mode}, Output Directory: {output_dir_to_use}")
 
 CONFIG = {
     "random_seed": 42,
@@ -113,10 +124,7 @@ CONFIG = {
     "loss_sensitivity": 0.01,
     "base_carbon_intensity_grid": 0.55,
     "max_carbon_reduction_from_renewables": 0.30,
-    "use_time_series": True,
     "hours_per_day": getattr(Config, 'hours_per_day', 24),
-    "num_days": None,
-    "use_weather_driven_renewables": True,
     "seed": 42,
     "chunk_size": 1000,
     "use_chunked_writing": True,
@@ -141,8 +149,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
                     timestamp is not None)
     
     if chunked_mode:
-        print(f"[Memory Optimization] Using chunked writing (chunk_size={chunk_size})")
-        import tempfile
+        # print(f"[Memory Optimization] Using chunked writing (chunk_size={chunk_size})") # UI Cleanup
         temp_dir = tempfile.mkdtemp(prefix='gen_data_chunks_')
         
         feature_file = os.path.join(temp_dir, 'features_temp.npy')
@@ -220,7 +227,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
     total_system_load_mw = base_load_p.sum()
-    print(f"Total system load: {total_system_load_mw:.2f} MW")
+    # print(f"Total system load: {total_system_load_mw:.2f} MW") # UI Cleanup
     
     solar_gens = net.sgen[net.sgen.type == 'solar'] if 'type' in net.sgen.columns else pd.DataFrame()
     wind_gens = net.sgen[net.sgen.type == 'wind'] if 'type' in net.sgen.columns else pd.DataFrame()
@@ -244,13 +251,13 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         max_individual_solar_mw = (max_total_renewable_mw * solar_fraction) / num_solar if num_solar > 0 else 0
         max_individual_wind_mw = (max_total_renewable_mw * wind_fraction) / num_wind if num_wind > 0 else 0
         
-        print(f"  Renewable generators: {num_solar} solar + {num_wind} wind")
-        print(f"  Max individual capacity: Solar={max_individual_solar_mw:.3f} MW, Wind={max_individual_wind_mw:.3f} MW")
+        # print(f"  Renewable generators: {num_solar} solar + {num_wind} wind") # UI Cleanup
+        # print(f"  Max individual capacity: Solar={max_individual_solar_mw:.3f} MW, Wind={max_individual_wind_mw:.3f} MW") # UI Cleanup
     else:
         max_individual_solar_mw = 0
         max_individual_wind_mw = 0
         max_total_renewable_mw = 1.0
-        print("  No renewable generators configured")
+        # print("  No renewable generators configured") # UI Cleanup
     
     if num_total_renewable > 0 and 'type' in net.sgen.columns:
         for i, sgen in net.sgen.iterrows():
@@ -259,19 +266,12 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             elif sgen.type == 'wind' and max_individual_wind_mw > 0:
                 net.sgen.at[i, 'sn_mva'] = max_individual_wind_mw * 1.1
     
-    use_weather_driven = config.get('use_weather_driven_renewables', True)
-    weather_sequence = None
-    
-    if use_weather_driven and config.get('use_time_series', False):
-        print("Simulating weather-driven renewable variability...")
-        weather_sequence = simulate_weather_sequence(
-            timesteps=time_steps,
-            hours_per_day=config.get('hours_per_day', 24),
-            seed=config.get('seed', None)
-        )
-        print(f"   Weather simulation complete: {len(weather_sequence)} timesteps")
-    else:
-        print("Using legacy deterministic renewable patterns (weather_driven=False)")
+    # Always generate weather-driven renewable variability
+    weather_sequence = simulate_weather_sequence(
+        timesteps=time_steps,
+        hours_per_day=config.get('hours_per_day', 24),
+        seed=config.get('seed', None)
+    )
         
     dropped_line_idx = None
     has_contingency = False
@@ -279,7 +279,23 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
     max_consecutive_failures = 0
     detailed_metrics = []
     
-    for t in range(time_steps):
+    # Progress Bar Logic
+    disable_pbar = False
+    try:
+        if 'args' in globals():
+            disable_pbar = getattr(args, 'no_progress_bar', False)
+    except Exception:
+        pass
+    
+    # Also check config dict (for in-memory tests)
+    if not disable_pbar and config.get('no_progress_bar', False):
+        disable_pbar = True
+        
+    iterator = range(time_steps)
+    if not disable_pbar:
+        iterator = tqdm(range(time_steps), desc=f"Generating {case_name} ({renewable_fraction*100:.0f}%)", unit="step")
+    
+    for t in iterator:
         restore_contingency(net, dropped_line_idx)
         dropped_line_idx = None
         has_contingency = False
@@ -295,59 +311,43 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         else:
             topology_ids[t] = 0
 
-        if config.get('use_time_series', False):
-            current_hour = t % config['hours_per_day']
-            current_day = t // config['hours_per_day']
-            
-            load_multiplier = get_daily_load_profile(current_hour)
-            net.load.p_mw = base_load_p * load_multiplier
-            net.load.q_mvar = base_load_q * load_multiplier
-            
-            solar_weather = None
-            wind_weather = None
-            if weather_sequence is not None:
-                solar_weather, wind_weather = weather_sequence[t]
-            
-            current_total_renewable_p_mw = 0
-            if 'type' in net.sgen.columns and not net.sgen.empty:
-                for i, sgen in net.sgen.iterrows():
-                    p_gen = 0
-                    if sgen.type == 'solar':
-                        solar_profile = get_solar_generation_profile(
-                            current_hour, 
-                            day_of_year=180 + current_day % 180,
-                            weather_state=solar_weather
-                        )
-                        p_gen = solar_profile * max_individual_solar_mw
-                    elif sgen.type == 'wind':
-                        wind_profile = get_wind_generation_profile(
-                            current_hour, 
-                            day=current_day,
-                            weather_state=wind_weather
-                        )
-                        p_gen = wind_profile * max_individual_wind_mw
-                    
-                    net.sgen.at[i, 'p_mw'] = p_gen
-                    q_gen = calculate_renewable_reactive_power(p_gen, sgen.bus, net, t > 0)
-                    net.sgen.at[i, 'q_mvar'] = q_gen
-                    current_total_renewable_p_mw += p_gen
-        else:
-            net.load.p_mw = base_load_p * np.random.uniform(0.8, 1.2, len(base_load_p))
-            net.load.q_mvar = base_load_q * np.random.uniform(0.8, 1.2, len(base_load_q))
-            
-            current_total_renewable_p_mw = 0
-            if 'type' in net.sgen.columns and not net.sgen.empty:
-                for i, sgen in net.sgen.iterrows():
-                    p_gen = 0
-                    if sgen.type == 'solar':
-                        p_gen = np.random.uniform(0, max_individual_solar_mw) if 7 <= (t % 24) < 19 else 0
-                    elif sgen.type == 'wind':
-                        p_gen = np.random.uniform(0, max_individual_wind_mw)
-                    
-                    net.sgen.at[i, 'p_mw'] = p_gen
-                    q_gen = calculate_renewable_reactive_power(p_gen, sgen.bus, net, t > 0)
-                    net.sgen.at[i, 'q_mvar'] = q_gen
-                    current_total_renewable_p_mw += p_gen
+
+        # Time-series simulation (always enabled)
+        current_hour = t % config['hours_per_day']
+        current_day = t // config['hours_per_day']
+        
+        load_multiplier = get_daily_load_profile(current_hour)
+        net.load.p_mw = base_load_p * load_multiplier
+        net.load.q_mvar = base_load_q * load_multiplier
+        
+        solar_weather = None
+        wind_weather = None
+        if weather_sequence is not None:
+            solar_weather, wind_weather = weather_sequence[t]
+        
+        current_total_renewable_p_mw = 0
+        if 'type' in net.sgen.columns and not net.sgen.empty:
+            for i, sgen in net.sgen.iterrows():
+                p_gen = 0
+                if sgen.type == 'solar':
+                    solar_profile = get_solar_generation_profile(
+                        current_hour, 
+                        day_of_year=180 + current_day % 180,
+                        weather_state=solar_weather
+                    )
+                    p_gen = solar_profile * max_individual_solar_mw
+                elif sgen.type == 'wind':
+                    wind_profile = get_wind_generation_profile(
+                        current_hour, 
+                        day=current_day,
+                        weather_state=wind_weather
+                    )
+                    p_gen = wind_profile * max_individual_wind_mw
+                
+                net.sgen.at[i, 'p_mw'] = p_gen
+                q_gen = calculate_renewable_reactive_power(p_gen, sgen.bus, net, t > 0)
+                net.sgen.at[i, 'q_mvar'] = q_gen
+                current_total_renewable_p_mw += p_gen
         
         convergence_successful = False
         resolution_method = None
@@ -358,25 +358,23 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             base_renewable_p_mw_for_reset = {}
             if not net.sgen.empty:
                 for i, sgen in net.sgen.iterrows():
-                    if config.get('use_time_series', False):
-                        current_hour = t % config['hours_per_day']
-                        current_day = t // config['hours_per_day']
-                        if sgen.type == 'solar':
-                            solar_profile = get_solar_generation_profile(
-                                current_hour, 
-                                day_of_year=180 + current_day % 180,
-                                weather_state=weather_sequence[t][0] if weather_sequence else None
-                            )
-                            base_renewable_p_mw_for_reset[i] = solar_profile * max_individual_solar_mw
-                        elif sgen.type == 'wind':
-                            wind_profile = get_wind_generation_profile(
-                                current_hour, 
-                                day=current_day,
-                                weather_state=weather_sequence[t][1] if weather_sequence else None
-                            )
-                            base_renewable_p_mw_for_reset[i] = wind_profile * max_individual_wind_mw
-                        else:
-                            base_renewable_p_mw_for_reset[i] = net.sgen.at[i, 'p_mw']
+                    # Time-series simulation (always enabled)
+                    current_hour = t % config['hours_per_day']
+                    current_day = t // config['hours_per_day']
+                    if sgen.type == 'solar':
+                        solar_profile = get_solar_generation_profile(
+                            current_hour, 
+                            day_of_year=180 + current_day % 180,
+                            weather_state=weather_sequence[t][0] if weather_sequence else None
+                        )
+                        base_renewable_p_mw_for_reset[i] = solar_profile * max_individual_solar_mw
+                    elif sgen.type == 'wind':
+                        wind_profile = get_wind_generation_profile(
+                            current_hour, 
+                            day=current_day,
+                            weather_state=weather_sequence[t][1] if weather_sequence else None
+                        )
+                        base_renewable_p_mw_for_reset[i] = wind_profile * max_individual_wind_mw
                     else:
                         base_renewable_p_mw_for_reset[i] = net.sgen.at[i, 'p_mw']
             
@@ -405,8 +403,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
                     convergence_stats['failed_with_contingency'].append(t)
                 else:
                     convergence_stats['failed_no_contingency'].append(t)
-                print(f"  ERROR: Hard reset failed - timestep {t} cannot be recovered, skipping")
-                continue
+                raise RuntimeError(f"Hard reset failed - timestep {t} cannot be recovered")
         
         if not convergence_successful:
             resolution_method = None
@@ -428,8 +425,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
                     convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
                     convergence_stats['failed'] += 1
                     convergence_stats['failed_no_contingency'].append(t)
-                    print(f"  ERROR: Timestep {t} failed even after generator trip - skipping")
-                    continue
+                    raise RuntimeError(f"Timestep {t} failed even after generator trip - no valid power flow solution")
         
         base_renewable_p_mw = {}
         if not net.sgen.empty and not convergence_successful:
@@ -479,7 +475,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
                     if relaxed_success:
                         try:
                             with SuppressPrints():
-                                pp.runpp(net, numba=False, enforce_q_lims=False, algorithm='nr', 
+                                pp.runpp(net, numba=True, enforce_q_lims=False, algorithm='nr', 
                                         tolerance_mva=1e-6, max_iteration=20)
                             relaxed_valid, _, relaxed_violations = validate_power_flow_outputs(net, convergence_stats)
                             if relaxed_valid:
@@ -700,7 +696,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             time_energy_coeffs.flush()
             time_carbon_coeffs.flush()
             chunks_written += 1
-            print(f"  [Chunked Writing] Flushed chunk {chunks_written} ({(t + 1)}/{time_steps} timesteps written)")
+            # print(f"  [Chunked Writing] Flushed chunk {chunks_written} ({(t + 1)}/{time_steps} timesteps written)") # UI Cleanup
     
     if chunked_mode:
         feature_matrix.flush()
@@ -709,7 +705,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         topology_ids.flush()
         time_energy_coeffs.flush()
         time_carbon_coeffs.flush()
-        print(f"  [Chunked Writing] All data flushed to disk ({time_steps}/{time_steps} timesteps)")
+        # print(f"  [Chunked Writing] All data flushed to disk ({time_steps}/{time_steps} timesteps)") # UI Cleanup
     
     convergence_stats['success_rate'] = (convergence_stats['successful'] / time_steps * 100) if time_steps > 0 else 0
     
@@ -718,7 +714,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             f"CRITICAL ERROR: ybus_base is None after {convergence_stats['successful']} successful power flows! "
         )
     else:
-        print(f"  [DEBUG] *** YBUS_BASE VERIFIED *** shape={ybus_base.shape}, diagonal[0]={ybus_base[0,0]:.6f}")
+        # print(f"  [DEBUG] *** YBUS_BASE VERIFIED *** shape={ybus_base.shape}, diagonal[0]={ybus_base[0,0]:.6f}")
         convergence_stats['ybus_fallback_used'] = False
     
     ybus_data = {
@@ -728,7 +724,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
     }
     
     if chunked_mode:
-        print(f"  [Chunked Writing] Copying memmap arrays to regular arrays for cleanup...")
+        # print(f"  [Chunked Writing] Copying memmap arrays to regular arrays for cleanup...")
         features_return = np.array(feature_matrix)
         targets_return = np.array(target_matrix)
         bus_types_return = np.array(bus_types_array)
@@ -738,7 +734,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         
         del feature_matrix, target_matrix, bus_types_array, topology_ids
         del time_energy_coeffs, time_carbon_coeffs
-        import gc
         gc.collect()
         
         convergence_stats['_temp_dir'] = temp_dir
@@ -758,15 +753,16 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         energy_coeffs_return = time_energy_coeffs
         carbon_coeffs_return = time_carbon_coeffs
     
-    try:
-        import pandas as pd
-        df_metrics = pd.DataFrame(detailed_metrics)
-        csv_filename = f"{case_name}_detailed_metrics_frac{renewable_fraction:.1f}_{timestamp}.csv"
-        csv_path = os.path.join(output_dir, csv_filename)
-        df_metrics.to_csv(csv_path, index=False)
-        print(f"  [CSV] Saved detailed metrics to {csv_filename}")
-    except Exception as e:
-        print(f"  [Warning] Could not save detailed metrics CSV: {e}")
+    # Save detailed metrics CSV (skip if output_dir is None for in-memory tests)
+    if output_dir is not None:
+        try:
+            df_metrics = pd.DataFrame(detailed_metrics)
+            csv_filename = f"{case_name}_detailed_metrics_frac{renewable_fraction:.1f}_{timestamp}.csv"
+            csv_path = os.path.join(output_dir, csv_filename)
+            df_metrics.to_csv(csv_path, index=False)
+            # print(f"  [CSV] Saved detailed metrics to {csv_filename}")
+        except Exception as e:
+            raise RuntimeError(f"Could not save detailed metrics CSV: {e}")
 
     return {
         "features": features_return,
@@ -784,8 +780,6 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
     """
     Saves generated data arrays.
     """
-    import shutil
-    
     os.makedirs(output_dir, exist_ok=True)
     
     if timestamp is None:
@@ -796,7 +790,7 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
     use_temp_files = (temp_files is not None and os.path.exists(temp_files.get('features', '')))
     
     if use_temp_files:
-        print(f"[Memory Optimization] Copying chunked data files to final location...")
+        # print(f"[Memory Optimization] Copying chunked data files to final location...")
         
         file_mappings = {
             'features': f"{case_name}_features_frac{renewable_fraction:.1f}_{timestamp}.npy",
@@ -817,7 +811,7 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
                         if isinstance(data, np.memmap):
                             data = np.array(data)
                         np.savetxt(final_path, data)
-                        print(f"  Copied {temp_key} -> {final_filename} (converted to .txt)")
+                        # print(f"  Copied {temp_key} -> {final_filename} (converted to .txt)")
                 else:
                     data_key_map = {
                         'features': 'features',
@@ -842,9 +836,9 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
                             np.save(final_path, np.array(data, dtype=np.int32), allow_pickle=False)
                         else:
                             np.save(final_path, np.array(data), allow_pickle=False)
-                        print(f"  Copied {temp_key} -> {final_filename}")
+                        # print(f"  Copied {temp_key} -> {final_filename}")
         
-        print(f"[Memory Optimization] All chunked data files copied successfully")
+        # print(f"[Memory Optimization] All chunked data files copied successfully")
     
     for key, data in data_dict.items():
         if use_temp_files and key in ['features', 'targets', 'bus_types', 'topology_ids', 
@@ -854,19 +848,18 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
             for sub_key, sub_data in data.items():
                 sub_filename = f"{case_name}_ybus_{sub_key}_frac{renewable_fraction:.1f}_{timestamp}.npy"
                 filepath = os.path.join(output_dir, sub_filename)
-                print(f"Saving Ybus component '{sub_key}' to '{filepath}'...")
+                # print(f"Saving Ybus component '{sub_key}' to '{filepath}'...")
                 np.save(filepath, sub_data, allow_pickle=False)
             continue
         
         if key == "convergence_stats":
             stats_to_save = {k: v for k, v in data.items() if not k.startswith('_temp')}
-            from utils.data_auditor import transform_convergence_to_audit
             audit_data = transform_convergence_to_audit(
                 stats_to_save, case_name, renewable_fraction, timestamp
             )
             stats_filename = f"{case_name}_data_quality_audit_frac{renewable_fraction:.1f}_{timestamp}.json"
             filepath = os.path.join(output_dir, stats_filename)
-            print(f"Saving data quality audit to '{filepath}'...")
+            # print(f"Saving data quality audit to '{filepath}'...")
             with open(filepath, 'w') as f:
                 json.dump(audit_data, f, indent=2)
             continue
@@ -875,20 +868,19 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
         
         if "coeffs" in key:
             filename = os.path.join(output_dir, base_filename + ".txt")
-            print(f"Saving coefficient data to '{filename}'...")
+            # print(f"Saving coefficient data to '{filename}'...")
             if isinstance(data, np.memmap):
                 np.savetxt(filename, np.array(data))
             else:
                 np.savetxt(filename, data)
         elif key == "topology_ids":
             filename = os.path.join(output_dir, base_filename + ".npy")
-            print(f"Saving topology IDs to '{filename}'...")
+            # print(f"Saving topology IDs to '{filename}'...")
             if isinstance(data, np.memmap):
                 np.save(filename, np.array(data), allow_pickle=False)
             else:
                 np.save(filename, data, allow_pickle=False)
         elif key == "base_adjacency":
-            from scipy import sparse
             if isinstance(data, np.memmap):
                 adj_data = np.array(data)
             else:
@@ -896,25 +888,24 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
             adj_sparse = sparse.coo_matrix(adj_data)
             edge_index = np.array([adj_sparse.row, adj_sparse.col])
             filename = os.path.join(output_dir, base_filename + ".npy")
-            print(f"Saving base adjacency matrix to '{filename}'...")
+            # print(f"Saving base adjacency matrix to '{filename}'...")
             np.save(filename, np.array([edge_index], dtype=object), allow_pickle=True)
         else:
             filename = os.path.join(output_dir, base_filename + ".npy")
-            print(f"Saving array data to '{filename}'...")
+            # print(f"Saving array data to '{filename}'...")
             if isinstance(data, np.memmap):
                 np.save(filename, np.array(data), allow_pickle=True)
             else:
                 np.save(filename, data, allow_pickle=True)
 
 if __name__ == "__main__":
-    import random
     
     if CONFIG["random_seed"] is not None:
-        print(f"\nSetting random seed: {CONFIG['random_seed']} (for reproducibility)")
+        # print(f"\nSetting random seed: {CONFIG['random_seed']} (for reproducibility)")
         np.random.seed(CONFIG["random_seed"])
         random.seed(CONFIG["random_seed"])
     else:
-        print("\nWARNING: No random seed set - results will not be reproducible!")
+        raise ValueError("No random seed set - results will not be reproducible! Set CONFIG['seed'] or use --seed argument")
     
     data_mode = 'train'
     timesteps = None
@@ -924,8 +915,7 @@ if __name__ == "__main__":
     if len(args) > 0 and not args[0].startswith('--'):
         data_mode = args[0].lower()
         if data_mode not in ['train', 'test']:
-            print(f"ERROR: Invalid data_mode '{data_mode}'. Use 'train' or 'test'.")
-            sys.exit(1)
+            raise ValueError(f"Invalid data_mode '{data_mode}'. Use 'train' or 'test'")
         args = args[1:]
     
     if len(args) > 0 and not args[0].startswith('--'):
@@ -946,12 +936,10 @@ if __name__ == "__main__":
                     cases_to_run = [c.strip() for c in cases_str.split(',')]
                 i += 1
             else:
-                print("ERROR: --cases requires a value (e.g. case33,case57 or all)")
-                sys.exit(1)
+                raise ValueError("--cases requires a value (e.g. case33,case57 or all)")
         i += 1
 
     try:
-        import yaml
         parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         config_path = os.path.join(parent_dir, "config.yaml")
         if os.path.exists(config_path):
@@ -959,14 +947,14 @@ if __name__ == "__main__":
                 yaml_config = yaml.safe_load(f)
                 if 'system' in yaml_config and 'test_cases' in yaml_config['system']:
                     CONFIG['test_cases'] = yaml_config['system']['test_cases']
-                    print(f"Loaded test_cases from config.yaml: {CONFIG['test_cases']}")
+                    # print(f"Loaded test_cases from config.yaml: {CONFIG['test_cases']}")
     except Exception as e:
-        print(f"Warning: Could not load config.yaml: {e}. Using internal defaults.")
+        raise RuntimeError(f"Could not load config.yaml: {e}. Configuration file is required.")
 
     if cases_to_run is None:
         cases_to_run = CONFIG["test_cases"]
         
-    print(f"Cases to run: {cases_to_run}")
+    # print(f"Cases to run: {cases_to_run}")
     
     if timesteps is None:
         if data_mode == 'train':
@@ -974,19 +962,46 @@ if __name__ == "__main__":
         else:
             timesteps = 120
             
-    print(f"Generating {data_mode} data for {timesteps} timesteps...")
+    # print(f"Generating {data_mode} data for {timesteps} timesteps...")
     
     CONFIG['time_steps'] = timesteps
     
     generation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"\nStarting data generation [{data_mode.upper()} MODE - {timesteps} timesteps]")
-    print(f"Timestamp: {generation_timestamp}")
+    # print(f"\nStarting data generation [{data_mode.upper()} MODE - {timesteps} timesteps]")
+    # print(f"Timestamp: {generation_timestamp}")
+    
+    # Auto-cleanup: Delete old data in the target directory before generating new data
+    output_path = CONFIG['output_dir']
+    if os.path.exists(output_path):
+        try:
+            print(f"\n[Auto-Cleanup] Deleting old data in {output_path}...")
+            shutil.rmtree(output_path)
+            
+            # Wait for directory to be fully deleted (Windows async deletion issue)
+            max_wait = 10  # seconds
+            wait_time = 0
+            while os.path.exists(output_path) and wait_time < max_wait:
+                time.sleep(0.1)
+                wait_time += 0.1
+            
+            if os.path.exists(output_path):
+                raise RuntimeError(f"Failed to delete directory after {max_wait}s: {output_path}")
+            
+            print(f"[Auto-Cleanup] Successfully cleaned {data_mode} data directory")
+        except Exception as e:
+            if "Failed to delete directory" in str(e):
+                raise  # Re-raise deletion timeout errors
+            # If deletion failed for any other reason, this is critical
+            raise RuntimeError(f"Auto-cleanup failed: Could not delete old data: {e}")
+    
+    # Recreate the directory (now guaranteed to be deleted)
+    os.makedirs(output_path, exist_ok=True)
     
     for case in cases_to_run:
         try:
             base_net = load_network(case)
             for frac in CONFIG["renewable_fractions_to_run"]:
-                print(f"\n{'='*60}\nProcessing {case} with {frac*100:.0f}% renewable fraction\n{'='*60}")
+                # print(f"\n{'='*60}\nProcessing {case} with {frac*100:.0f}% renewable fraction\n{'='*60}")
                 
                 net_for_run = copy.deepcopy(base_net)
                 save_case_name = case.replace('bw', '')
@@ -1010,23 +1025,20 @@ if __name__ == "__main__":
                 save_data(generated_data, save_case_name, frac, output_path, generation_timestamp)
                 
                 if '_temp_dir' in generated_data.get('convergence_stats', {}):
-                    import shutil
-                    import time
                     temp_dir = generated_data['convergence_stats']['_temp_dir']
                     if os.path.exists(temp_dir):
                         max_retries = 3
                         for retry in range(max_retries):
                             try:
                                 shutil.rmtree(temp_dir)
-                                print(f"  [Chunked Writing] Cleaned up temporary files")
+                                # print(f"  [Chunked Writing] Cleaned up temporary files")
                                 break
                             except PermissionError as e:
                                 if retry < max_retries - 1:
                                     time.sleep(0.1)
-                                    import gc
                                     gc.collect()
                                 else:
-                                    print(f"  [Warning] Could not delete temp directory {temp_dir}: {e}")
+                                    raise RuntimeError(f"Could not delete temp directory {temp_dir}: {e}")
 
         except DataGenerationError as e:
             print(f"\n{'='*80}")
@@ -1049,14 +1061,13 @@ if __name__ == "__main__":
         
         os.makedirs(output_path, exist_ok=True)
         
-        generation_mode = 'time_series' if CONFIG.get('use_time_series', False) else 'monte_carlo'
+        # Always time-series mode
         metadata = {
-            'generation_mode': generation_mode,
+            'generation_mode': 'time_series',
             'data_mode': data_mode,
             'timesteps': timesteps,
             'timestamp': generation_timestamp,
             'hours_per_day': CONFIG.get('hours_per_day', 24),
-            'use_time_series': CONFIG.get('use_time_series', False),
             'test_cases': cases_to_run,
             'renewable_fractions': CONFIG["renewable_fractions_to_run"],
             'generation_date': datetime.now().isoformat()
@@ -1066,8 +1077,8 @@ if __name__ == "__main__":
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        print(f"\n[Metadata] Saved generation metadata to: {metadata_file}")
+       # print(f"\n[Metadata] Saved generation metadata to: {metadata_file}")
     except Exception as e:
-        print(f"\n[Warning] Could not save metadata file: {e}")
+        raise RuntimeError(f"Could not save metadata file: {e}")
             
-    print("\n\nAll data generation processes are complete.")
+    print("\nAll data generation processes are complete.")

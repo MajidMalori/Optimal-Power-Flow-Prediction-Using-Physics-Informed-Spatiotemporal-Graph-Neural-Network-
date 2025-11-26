@@ -657,8 +657,9 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
         time.sleep(0.5)
         
         # Run data generation script (capture output to avoid interfering with tqdm)
+        # Pass --no_progress_bar to prevent nested progress bars
         result = subprocess.run(
-            [sys.executable, data_gen_script, config.DATA_MODE, str(timesteps)],
+            [sys.executable, data_gen_script, "--mode", config.DATA_MODE, "--time_steps", str(timesteps), "--no_progress_bar"],
             cwd=".",
             capture_output=True,  # Capture to avoid interfering with tqdm progress bar
             text=True

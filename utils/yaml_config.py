@@ -210,9 +210,9 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'physics_apparent_power_max': 'S_MAX',
         
         # Data configuration
-        'data_split_mode': 'DATA_SPLIT_MODE',
-        'data_splits_train': 'TRAIN_SPLIT',
-        'data_splits_val': 'VAL_SPLIT',
+        'physics_split_mode': 'DATA_SPLIT_MODE',
+        'physics_splits_train': 'TRAIN_SPLIT',
+        'physics_splits_val': 'VAL_SPLIT',
         'data_hours_per_day': 'HOURS_PER_DAY',
         'data_sequence_length': 'SEQUENCE_LENGTH',
         
@@ -309,7 +309,7 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'experimental_train_timesteps': 'train_timesteps',
         'experimental_test_timesteps': 'test_timesteps',
         'experimental_plot_data_info': 'plot_data_info',
-        'experimental_use_mosoa': 'use_mosoa',
+
         'experimental_force_cpu': 'force_cpu',
         'experimental_parallel_data_loading': 'parallel_data_loading',
         'experimental_data_workers': 'data_workers',
@@ -323,6 +323,37 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
             setattr(Config, config_attr, flat_yaml[yaml_key])
             if verbose:
                 print(f"[YAML Config] Set Config.{config_attr} = {flat_yaml[yaml_key]}")
+    
+    # Handle system-specific limits (voltage) based on CASE_NAME
+    # CRITICAL: This must run AFTER CASE_NAME is set (if set via YAML)
+    # system_limits in YAML: { case33: {v_min: 0.90, v_max: 1.10}, case57: {...}, case118: {...} }
+    if 'system_limits' in yaml_config:
+        case_name = getattr(config_obj, 'CASE_NAME', None)
+        if case_name:
+            case_name_lower = case_name.lower()
+            system_limits = yaml_config['system_limits']
+            
+            if case_name_lower in system_limits:
+                limits = system_limits[case_name_lower]
+                if 'v_min' in limits:
+                    setattr(config_obj, 'V_MIN', limits['v_min'])
+                    if verbose:
+                        print(f"[YAML Config] Set V_MIN = {limits['v_min']} for {case_name}")
+                if 'v_max' in limits:
+                    setattr(config_obj, 'V_MAX', limits['v_max'])
+                    if verbose:
+                        print(f"[YAML Config] Set V_MAX = {limits['v_max']} for {case_name}")
+            else:
+                # Case name not found in system_limits - warn but don't fail
+                available_cases = list(system_limits.keys())
+                if verbose:
+                    print(f"[YAML Config] WARNING: {case_name_lower} not found in system_limits. Available: {available_cases}")
+        else:
+            # CASE_NAME not set yet - this is expected on initial Config() creation
+            # The limits will be set later when CASE_NAME is set during training
+            if verbose:
+                print(f"[YAML Config] NOTE: CASE_NAME not set yet, skipping system-specific voltage limits")
+
 
 
 def load_config_from_yaml(yaml_path: str = 'config.yaml', **kwargs) -> Any:

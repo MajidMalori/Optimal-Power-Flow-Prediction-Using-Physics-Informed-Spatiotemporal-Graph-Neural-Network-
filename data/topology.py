@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import warnings
 import pandapower as pp
 import pandapower.networks as pn
 import pandapower.topology as top
@@ -8,10 +9,13 @@ from scipy import sparse
 
 def load_network(case_name: str) -> pp.pandapowerNet:
     """Loads a pandapower network based on its name."""
-    print(f"\n----- Loading Base Test Case: {case_name} -----")
-    if case_name == "case33": return pn.case33bw()
-    if case_name == "case57": return pn.case57()
-    if case_name == "case118": return pn.case118()
+    # Suppress pandapower dtype correction warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='.*dtypes could not be corrected.*')
+        # print(f"\n----- Loading Base Test Case: {case_name} -----") # UI Cleanup
+        if case_name == "case33": return pn.case33bw()
+        if case_name == "case57": return pn.case57()
+        if case_name == "case118": return pn.case118()
     raise ValueError(f"Unknown test case: {case_name}")
 
 def configure_renewables(net: pp.pandapowerNet, renewable_fraction_for_run: float, config: dict) -> pp.pandapowerNet:
@@ -24,11 +28,11 @@ def configure_renewables(net: pp.pandapowerNet, renewable_fraction_for_run: floa
     net.sgen.drop(net.sgen.index, inplace=True)
     
     if len(possible_buses) < num_renewables:
-        print(f"Warning: Not enough non-slack buses. Using {len(possible_buses)} of {num_renewables} requested.")
+        # print(f"Warning: Not enough non-slack buses. Using {len(possible_buses)} of {num_renewables} requested.")
         num_renewables = len(possible_buses)
         
     if num_renewables == 0:
-        print("Configuring network with 0 renewable generators.")
+        # print("Configuring network with 0 renewable generators.")
         return net
 
     renewable_buses = np.random.choice(possible_buses, size=num_renewables, replace=False)
@@ -39,7 +43,7 @@ def configure_renewables(net: pp.pandapowerNet, renewable_fraction_for_run: floa
         gen_type = np.random.choice(['solar', 'wind'])
         pp.create_sgen(net, bus=bus_idx, p_mw=0, q_mvar=0, name=f"{gen_type.capitalize()}@{bus_idx}", type=gen_type)
         
-    print(f"Configured {len(net.sgen)} renewable generators for a {renewable_fraction_for_run*100:.0f}% fraction.")
+    # print(f"Configured {len(net.sgen)} renewable generators for a {renewable_fraction_for_run*100:.0f}% fraction.")
     return net
 
 def apply_n1_contingency(net: pp.pandapowerNet) -> int:

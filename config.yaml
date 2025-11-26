@@ -37,7 +37,7 @@ training:
   batch_size: 64  # Default, will be overridden by adaptive function
   learning_rate: 0.0005  # Best from LR testing: 0.0005 works well
   max_grad_norm: 1.0  # Gradient clipping to prevent explosion
-  num_epochs: 100  # Set to 200 for full training
+  num_epochs: 10  # Set to 200 for full training
   early_stopping_patience: 20  # Reasonable patience to prevent overfitting
   gradient_accumulation_steps: 1  # Gradient accumulation: 1=disabled, >1=simulate larger batch size
   
@@ -165,13 +165,13 @@ model_testing:
 # These are typically set in the Args class in config.py, but can be overridden here
 experimental:
   test_config: "all"  # Options: "quick", "core", "comprehensive", "physics_only", "non_physics_only", "sequential_only", "all"
-  bus_systems: "57"  # Options: "all", "33", "57", "118", or comma-separated like "33,57"
+  bus_systems: "all"  # Options: "all", "33", "57", "118", or comma-separated like "33,57"
   models_to_train: "all"  # Options: "all", or comma-separated model names
   data_mode: "test"  # Options: "train" or "test"
   train_timesteps: 2400  # Reduced for faster iteration (100 days)
-  test_timesteps: 24  # Quick test with 24 timesteps (User requested)
+  test_timesteps: 120  # Quick test with 24 timesteps (User requested)
   plot_data_info: true  # Generate data validation and profile story plots
-  use_mosoa: true  # Use MoSOA for hyperparameter optimization
+
   force_cpu: false  # Force CPU training even if GPU is available
   parallel_data_loading: true  # Enable parallel data loading
   data_workers: "auto"  # Number of data loading workers ("auto" for auto-config)

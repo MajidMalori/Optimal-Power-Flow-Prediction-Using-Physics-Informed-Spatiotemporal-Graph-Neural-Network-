@@ -179,7 +179,6 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
                                     num_buses: int, model_name: str):
     """
     Plot all renewable impact metrics for a physics-informed model in a single 2x2 grid.
-    Uses professional box plots matching data_profile_story quality.
     """
     if renewable_impact_data.empty:
         print(f"No renewable impact data to plot for {model_name}")
@@ -197,7 +196,7 @@ def _plot_all_renewable_impacts_impl(renewable_impact_data: pd.DataFrame, config
     x_col = 'renewable_fraction'
     unique_fracs = sorted(renewable_impact_data[x_col].unique())
     
-    # Professional color scheme (matching data_profile_story style)
+    # Professional color scheme
     primary_color = 'steelblue'
     trend_color = '#d62728'  # Professional red for trends
     
@@ -406,7 +405,7 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
             all_fracs.update(data_df['renewable_fraction'].unique())
     unique_fracs = sorted(list(all_fracs))
     
-    # Professional color palette for models (matching data_profile_story quality)
+    # Professional color palette for models
     colors = plt.cm.Set2(np.linspace(0, 1, len(physics_models)))
     trend_color = '#d62728'  # Professional red for trends
     
@@ -484,7 +483,7 @@ def _create_comparative_renewable_plots_impl(all_renewable_data: Dict[str, pd.Da
                     except:
                         pass
         
-        # Professional formatting (matching data_profile_story style)
+        # Professional formatting 
         ax.set_xlabel('Renewable Energy Fraction', fontsize=13, fontweight='bold')
         ax.set_ylabel(metric_label, fontsize=13, fontweight='bold')
         ax.set_title(f'{metric_label} vs Renewable Fraction - {num_buses}-bus System', 

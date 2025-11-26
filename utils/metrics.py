@@ -99,6 +99,20 @@ class PowerSystemLoss(nn.Module):
         # 3. No negative log variance issues (η2 < 0 by construction)
         self.loss_type = 'natural'
         print(f"[Heteroscedastic Loss] Using: Natural Parametrization (Immer et al., NeurIPS 2023) with softplus")
+              
+        # Validate system-specific voltage limits are loaded
+        case_name = getattr(config, 'CASE_NAME', None)
+        if not hasattr(config, 'V_MIN') or config.V_MIN is None:
+            raise ValueError(
+                f"V_MIN not set for {case_name}. Check config.yaml system_limits section.\n"
+                f"Expected structure:\n"
+                f"  system_limits:\n"
+                f"    case33: {{v_min: 0.90, v_max: 1.10}}\n"
+                f"    case57: {{v_min: 0.70, v_max: 1.20}}\n"
+                f"    case118: {{v_min: 0.85, v_max: 1.15}}"
+            )
+        if not hasattr(config, 'V_MAX') or config.V_MAX is None:
+            raise ValueError(f"V_MAX not set for {case_name}. Check config.yaml system_limits section.")
         
         self.register_buffer('v_min', torch.tensor(config.V_MIN, dtype=torch.float32))
         self.register_buffer('v_max', torch.tensor(config.V_MAX, dtype=torch.float32))
@@ -357,16 +371,6 @@ class PowerSystemLoss(nn.Module):
             vm_pq = vm_pu[pq_mask]  # Only check PQ buses
             negative_vm_count = (vm_pq < 0).sum().item()
             negative_vm_fraction = negative_vm_count / vm_pq.numel() if vm_pq.numel() > 0 else 0.0
-            
-            # Removed negative voltage warnings - model is still learning, these are expected during training
-            # if not hasattr(self, '_batch_count'):
-            #     self._batch_count = 0
-            # self._batch_count += 1
-            # if negative_vm_count > 0 and self._batch_count % 100 == 0:
-            #     min_vm = vm_pq.min().item()
-            #     max_vm = vm_pq.max().item()
-            #     print(f"Batch {self._batch_count}: {negative_vm_count} negative voltage predictions on PQ buses "
-            #           f"({negative_vm_fraction*100:.1f}%), VM range: [{min_vm:.4f}, {max_vm:.4f}]")
         
         if measurements_norm.dim() == 4:
             # Sequential model: use last timestep [batch, seq_len, buses, 10] -> [batch, buses, 10]
@@ -461,6 +465,7 @@ class PowerSystemLoss(nn.Module):
             total_loss_denorm = mse_denorm + power_penalty_rmse + voltage_penalty  # Physical units (interpretable)
         else:
             total_loss_denorm = mse_denorm  # For non-physics models, just MSE
+        
         
         # ML Engineering Best Practice: Report denormalized MSE and total_loss (physical units) for interpretability
         # Total loss remains normalized (for optimization stability)

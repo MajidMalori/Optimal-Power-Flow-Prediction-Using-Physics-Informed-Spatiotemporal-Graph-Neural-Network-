@@ -273,16 +273,16 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 4,     
-                    'max_iterations': 5,   
+                    'num_seagulls': 2,     
+                    'max_iterations': 2,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 3,      
-                    'max_iterations': 5,   
+                    'num_seagulls': 2,      
+                    'max_iterations': 2,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
@@ -290,7 +290,7 @@ class Config:
                 # QUICK: Large systems prioritize efficiency
                 return {
                     'num_seagulls': 2,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 5,    # Temporarily set to 5 for quick testing
+                    'max_iterations': 2,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -428,7 +428,7 @@ class Config:
             
             try:
                 merge_yaml_with_config(yaml_path, self, verbose=False)
-                print(f"[Config] Loaded configuration from {yaml_path}")
+                # print(f"[Config] Loaded configuration from {yaml_path}")
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to load YAML configuration from {yaml_path}: {e}\n"
@@ -454,9 +454,9 @@ class Config:
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
             import shutil
             try:
-                print(f"\n[Clear Results] Deleting experimental_results folder...")
+                # print(f"\n[Clear Results] Deleting experimental_results folder...")
                 shutil.rmtree(self.EXPERIMENTAL_RESULTS_DIR)
-                print(f"[Clear Results] Successfully deleted: {self.EXPERIMENTAL_RESULTS_DIR}")
+                # print(f"[Clear Results] Successfully deleted: {self.EXPERIMENTAL_RESULTS_DIR}")
             except Exception as e:
                 print(f"[Clear Results] Warning: Could not delete experimental_results folder: {e}")
         
@@ -479,13 +479,13 @@ class Config:
         self.HOURS_PER_DAY = hours_per_day
         self.SEQUENCE_LENGTH = sequence_length
         
-        print(f"Data mode: {self.DATA_MODE}, Timesteps: {self.DATA_MODE_TIMESTEPS[self.DATA_MODE]}")
+        # print(f"Data mode: {self.DATA_MODE}, Timesteps: {self.DATA_MODE_TIMESTEPS[self.DATA_MODE]}")
         
         # Data directory structure: data/[train|test] (removed time_series subfolder)
         self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', data_mode)
         
-        print(f"\n[Data Mode] Using time-series data in {data_mode} mode")
-        print(f"[Data Directory] {self.DATA_DIR}")
+        # print(f"\n[Data Mode] Using time-series data in {data_mode} mode")
+        # print(f"[Data Directory] {self.DATA_DIR}")
         
         # Initialize timestamp only when actually starting a run
         self._initialize_run_timestamp()
@@ -612,7 +612,7 @@ class Config:
         """Initialize the run timestamp - always create new timestamp for each run."""
         # Always create new timestamp for new run
         self._CURRENT_RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
-        print(f"Starting new run: run_{self._CURRENT_RUN_TIMESTAMP}")
+        # print(f"Starting new run: run_{self._CURRENT_RUN_TIMESTAMP}")
 
     def _update_latest_run_link(self):
         """Update the latest_run_info.txt pointer file to track current run."""

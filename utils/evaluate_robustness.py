@@ -17,7 +17,6 @@ import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='matplotlib')
 
-from utils.contingency_analysis import ContingencyAnalyzer
 from utils.evaluation import evaluate_model
 from utils.metrics import compute_metrics
 

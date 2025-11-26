@@ -282,7 +282,7 @@ def apply_curtailment_with_retry(net: pp.pandapowerNet, base_renewable_p_mw: dic
         # Try power flow
         try:
             with SuppressPrints():
-                pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+                pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
             
             # POST-POWER-FLOW VALIDATION: Check outputs after power flow
             output_valid, output_reason, violation_flags = validate_power_flow_outputs(net, convergence_stats or {}, case_name)
@@ -377,7 +377,7 @@ def hard_reset_system(net: pp.pandapowerNet, base_load_p: np.ndarray, base_load_
     # 4. Force power flow with reset state
     try:
         with SuppressPrints():
-            pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+            pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
         
         # Validate the reset state
         output_valid, output_reason, violation_flags = validate_power_flow_outputs(net, convergence_stats or {}, case_name)
@@ -419,7 +419,7 @@ def trip_renewable_generators(net: pp.pandapowerNet, convergence_stats: dict = N
     
     try:
         with SuppressPrints():
-            pp.runpp(net, numba=False, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
+            pp.runpp(net, numba=True, enforce_q_lims=True, algorithm='nr', tolerance_mva=1e-8)
         
         # Validate the tripped state
         output_valid, output_reason, violation_flags = validate_power_flow_outputs(net, convergence_stats or {}, case_name)

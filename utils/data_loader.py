@@ -210,11 +210,15 @@ class PowerSystemLazyDataset(Dataset):
         self.sequence_length = sequence_length
         self.hours_per_day = hours_per_day
         
-        # Load base Ybus matrix (needed for fallback)
+        # Load base Ybus matrix (REQUIRED - No fallback allowed)
         if ybus_metadata and 'base_path' in ybus_metadata and os.path.exists(ybus_metadata['base_path']):
-            self.ybus_base = torch.from_numpy(np.load(ybus_metadata['base_path'], mmap_mode='r')).cfloat()
+            self.ybus_base = torch.from_numpy(np.load(ybus_metadata['base_path'], mmap_mode='r').copy()).cfloat()
         else:
-            self.ybus_base = None
+            # Raise error immediately if base Ybus is missing
+            raise RuntimeError(
+                f"Ybus base matrix not found at {ybus_metadata.get('base_path') if ybus_metadata else 'None'}. "
+                f"This is required for physics-informed training."
+            )
             
         # Store topology cache
         self.topology_cache = topology_cache

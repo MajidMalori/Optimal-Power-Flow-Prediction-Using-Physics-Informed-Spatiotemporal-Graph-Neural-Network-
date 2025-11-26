@@ -127,21 +127,9 @@ def evaluate_model(model: torch.nn.Module, test_loader: torch.utils.data.DataLoa
     
     outputs_denorm = normalizer.denormalize(all_outputs_tensor)
     targets_denorm = normalizer.denormalize(all_targets_tensor)
-
-    # Collect measurements (features) for physics violation computation
-    all_measurements = []
-    with torch.no_grad():
-        for batch in test_loader:
-            features = batch['features'].to(device)
-            if is_sequential and features.dim() == 3:
-                features_input = features[:, -1, :]  # Use last timestep
-            else:
-                features_input = features
-            all_measurements.append(features_input)
-    all_measurements_tensor = torch.cat(all_measurements, dim=0)
     
     return compute_metrics(outputs_denorm, targets_denorm, all_ybus_tensor, config, 
-                          bus_types=all_bus_types_tensor, measurements=all_measurements_tensor)
+                          bus_types=all_bus_types_tensor)
 
 
 def evaluate_model_with_uncertainty(model: torch.nn.Module, test_loader: torch.utils.data.DataLoader, 

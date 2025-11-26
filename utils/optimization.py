@@ -115,7 +115,10 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         fc_ada = fc_min + M * (fc_max - fc_min) + (sigma * np.random.randn())
         A = fc_ada * (1 - np.sin((np.pi / 2) * (l / max_iterations)))
         
-        v = v_max * (1 - l / max_iterations)
+        # Tanh-based decay for v (Eq. 22 in MOSOA paper)
+        # v decays non-linearly from v_max to v_min
+        # Using the formula: v = v_max * tanh(|1 - l/max_iterations|)
+        v = v_max * np.tanh(np.abs(1 - l / max_iterations))
         w = (w_max - w_min) * (1 - np.cos(np.pi / 2 * (l / max_iterations))) + w_min
         beta = beta_max * np.exp(-lambda_val * (l / max_iterations))
         
@@ -162,6 +165,179 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
             print(f"MoSOA iter {l+1}/{max_iterations} | Score: {best_score:.6g}")
 
     return best_score, best_position, convergence_curve, iteration_details
+
+
+def pso_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarray, upper_bound: np.ndarray,
+                 dim: int, objective_func: Callable, param_keys: List[str] = None) -> Tuple[float, np.ndarray, List[float], List[Dict]]:
+    """
+    Particle Swarm Optimization (PSO) for benchmarking.
+    """
+    # --- 1. Initialization ---
+    lower_bound = np.asarray(lower_bound, dtype=np.float64)
+    upper_bound = np.asarray(upper_bound, dtype=np.float64)
+    
+    positions = _init_positions(num_agents, dim, upper_bound, lower_bound)
+    velocities = np.zeros((num_agents, dim))
+    
+    # Personal bests
+    pbest_positions = positions.copy()
+    pbest_scores = np.full(num_agents, np.inf)
+    
+    # Global best
+    gbest_position = np.zeros(dim)
+    gbest_score = float('inf')
+    
+    convergence_curve = []
+    iteration_details = []
+    
+    # PSO parameters
+    w = 0.7   # Inertia weight
+    c1 = 1.5  # Cognitive weight
+    c2 = 1.5  # Social weight
+    
+    # --- 2. Main Loop ---
+    for l in range(max_iterations):
+        # Evaluate fitness
+        for i in range(num_agents):
+            # Clip positions to bounds
+            positions[i, :] = np.clip(positions[i, :], lower_bound, upper_bound)
+            
+            try:
+                fitness = objective_func(positions[i, :])
+                if np.isfinite(fitness):
+                    # Update Personal Best
+                    if fitness < pbest_scores[i]:
+                        pbest_scores[i] = fitness
+                        pbest_positions[i, :] = positions[i, :].copy()
+                        
+                    # Update Global Best
+                    if fitness < gbest_score:
+                        gbest_score = fitness
+                        gbest_position = positions[i, :].copy()
+            except Exception:
+                continue
+        
+        # Update Velocities and Positions
+        r1 = np.random.rand(num_agents, dim)
+        r2 = np.random.rand(num_agents, dim)
+        
+        velocities = (w * velocities + 
+                     c1 * r1 * (pbest_positions - positions) + 
+                     c2 * r2 * (gbest_position - positions))
+        
+        positions = positions + velocities
+        
+        convergence_curve.append(gbest_score)
+        
+        if param_keys:
+             print(f"PSO iter {l+1}/{max_iterations} | Score: {gbest_score:.6g}")
+        else:
+             print(f"PSO iter {l+1}/{max_iterations} | Score: {gbest_score:.6g}")
+
+    return gbest_score, gbest_position, convergence_curve, iteration_details
+
+
+def gwo_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarray, upper_bound: np.ndarray,
+                 dim: int, objective_func: Callable, param_keys: List[str] = None) -> Tuple[float, np.ndarray, List[float], List[Dict]]:
+    """
+    Grey Wolf Optimizer (GWO) for benchmarking.
+    """
+    # --- 1. Initialization ---
+    lower_bound = np.asarray(lower_bound, dtype=np.float64)
+    upper_bound = np.asarray(upper_bound, dtype=np.float64)
+    
+    positions = _init_positions(num_agents, dim, upper_bound, lower_bound)
+    
+    # Hierarchy of wolves
+    alpha_pos = np.zeros(dim)
+    alpha_score = float('inf')
+    
+    beta_pos = np.zeros(dim)
+    beta_score = float('inf')
+    
+    delta_pos = np.zeros(dim)
+    delta_score = float('inf')
+    
+    convergence_curve = []
+    iteration_details = []
+    
+    # --- 2. Main Loop ---
+    for l in range(max_iterations):
+        # Evaluate fitness
+        for i in range(num_agents):
+            positions[i, :] = np.clip(positions[i, :], lower_bound, upper_bound)
+            
+            try:
+                fitness = objective_func(positions[i, :])
+                if np.isfinite(fitness):
+                    # Update Alpha, Beta, Delta
+                    if fitness < alpha_score:
+                        # Shift down
+                        delta_score, delta_pos = beta_score, beta_pos.copy()
+                        beta_score, beta_pos = alpha_score, alpha_pos.copy()
+                        alpha_score, alpha_pos = fitness, positions[i, :].copy()
+                    elif fitness < beta_score:
+                        delta_score, delta_pos = beta_score, beta_pos.copy()
+                        beta_score, beta_pos = fitness, positions[i, :].copy()
+                    elif fitness < delta_score:
+                        delta_score, delta_pos = fitness, positions[i, :].copy()
+            except Exception:
+                continue
+                
+        # Update positions
+        a = 2 - l * (2 / max_iterations)  # Linearly decreases from 2 to 0
+        
+        for i in range(num_agents):
+            for j in range(dim):
+                r1, r2 = np.random.rand(), np.random.rand()
+                A1 = 2 * a * r1 - a
+                C1 = 2 * r2
+                D_alpha = abs(C1 * alpha_pos[j] - positions[i, j])
+                X1 = alpha_pos[j] - A1 * D_alpha
+                
+                r1, r2 = np.random.rand(), np.random.rand()
+                A2 = 2 * a * r1 - a
+                C2 = 2 * r2
+                D_beta = abs(C2 * beta_pos[j] - positions[i, j])
+                X2 = beta_pos[j] - A2 * D_beta
+                
+                r1, r2 = np.random.rand(), np.random.rand()
+                A3 = 2 * a * r1 - a
+                C3 = 2 * r2
+                D_delta = abs(C3 * delta_pos[j] - positions[i, j])
+                X3 = delta_pos[j] - A3 * D_delta
+                
+                positions[i, j] = (X1 + X2 + X3) / 3
+        
+        convergence_curve.append(alpha_score)
+        
+        if param_keys:
+             print(f"GWO iter {l+1}/{max_iterations} | Score: {alpha_score:.6g}")
+        else:
+             print(f"GWO iter {l+1}/{max_iterations} | Score: {alpha_score:.6g}")
+
+    return alpha_score, alpha_pos, convergence_curve, iteration_details
+
+
+# --- Benchmark Functions ---
+
+def rastrigin_function(x: np.ndarray) -> float:
+    """
+    Rastrigin benchmark function.
+    Global minimum at x=0 with f(x)=0.
+    Range: [-5.12, 5.12]
+    """
+    A = 10
+    n = len(x)
+    return A * n + np.sum(x**2 - A * np.cos(2 * np.pi * x))
+
+def rosenbrock_function(x: np.ndarray) -> float:
+    """
+    Rosenbrock benchmark function.
+    Global minimum at x=1 with f(x)=0.
+    Range: [-5, 10] or wider.
+    """
+    return np.sum(100.0 * (x[1:] - x[:-1]**2)**2 + (1 - x[:-1])**2)
 
 
 def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: int, 
@@ -232,9 +408,10 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
 
 def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: int, 
                        is_sequential: bool, uses_adaptive_graph: bool, model_name: str = None,
-                       is_opf_mode: bool = True, config: Any = None, normalizer: Any = None) -> Dict[str, Any]:
+                       config: Any = None, normalizer: Any = None) -> Dict[str, Any]:
     """
     Create model keyword arguments from optimized parameters.
+    Always assumes OPF mode.
     
     Args:
         model_config: Model configuration object
@@ -242,6 +419,7 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
         num_buses: Number of buses in the system
         is_sequential: Whether model is sequential
         uses_adaptive_graph: Whether model uses adaptive graph features
+        model_name: Name of the model (for logging)
         config: Main config object (for generator constraints)
         normalizer: PowerSystemNormalizer (for generator constraints)
         

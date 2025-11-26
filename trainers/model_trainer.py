@@ -6,6 +6,7 @@ from .base_trainer import BaseTrainer
 # Removed to_dense_adj import - adjacency is always dense for time-series data
 import gc
 import warnings
+from utils.empirical_bayes import EmpiricalBayesOptimizer
 
 class PowerSystemTrainer(BaseTrainer):
     """
@@ -38,11 +39,30 @@ class PowerSystemTrainer(BaseTrainer):
         else:
             self.scaler = None  # No scaler needed for CPU
         
+        # Initialize Empirical Bayes Optimizer (Immer et al., NeurIPS 2023)
+        eb_burn_in = getattr(config, 'EB_BURN_IN_EPOCHS', 100)
+        eb_update_freq = getattr(config, 'EB_UPDATE_FREQUENCY', 50)
+        eb_hyperparam_steps = getattr(config, 'EB_HYPERPARAMETER_STEPS', 50)
+        eb_hyperparam_lr = getattr(config, 'EB_HYPERPARAMETER_LR', 0.01)
+        
+        self.eb_optimizer = EmpiricalBayesOptimizer(
+            model=model,
+            config=config,
+            device=device,
+            burn_in_epochs=eb_burn_in,
+            update_frequency=eb_update_freq,
+            hyperparameter_steps=eb_hyperparam_steps,
+            hyperparameter_lr=eb_hyperparam_lr
+        )
+        
         # Note: log_file is set in BaseTrainer.train() method, accessible via self.log_file
 
     def _train_epoch(self, train_loader):
         self.model.train()
-        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_true': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
+        
+        # Start EB epoch tracking - NOT NEEDED for EmpiricalBayesOptimizer
+        # self.eb_optimizer.start_epoch(self.current_epoch)
         
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Train]")
 
@@ -76,8 +96,9 @@ class PowerSystemTrainer(BaseTrainer):
                 loss_dict = self.criterion(outputs, targets, features, ybus, bus_types=bus_types, epoch=self.current_epoch)
                 total_loss = loss_dict['total_loss']
                 
-                if hasattr(self, 'eb_optimizer') and self.eb_optimizer is not None:
-                    total_loss += self.eb_optimizer.get_regularization_loss()
+                # Add Empirical Bayes regularization (layer-wise prior precision)
+                eb_loss = self.eb_optimizer.get_regularization_loss()
+                total_loss = total_loss + eb_loss
                 
                 # Normalize the loss for accumulation
                 loss = total_loss / self.accumulation_steps
@@ -109,7 +130,7 @@ class PowerSystemTrainer(BaseTrainer):
                         # Log to file instead of terminal
                         if hasattr(self, 'log_file') and self.log_file:
                             try:
-                                self.log_file.write(f"WARNING: {warning_msg}\n")
+                                self.log_file.write(f"WARNING: {warning_msg}\\n")
                                 self.log_file.flush()
                             except AttributeError:
                                 pass
@@ -130,7 +151,7 @@ class PowerSystemTrainer(BaseTrainer):
                             )
                             if hasattr(self, 'log_file') and self.log_file:
                                 try:
-                                    self.log_file.write(f"INFO: {recovery_msg}\n")
+                                    self.log_file.write(f"INFO: {recovery_msg}\\n")
                                     self.log_file.flush()
                                 except AttributeError:
                                     pass
@@ -162,23 +183,29 @@ class PowerSystemTrainer(BaseTrainer):
             # epoch_losses is already divided by accumulation_steps, so just divide by batch count
             current_batch_count = batch_idx + 1
             if self.is_physics_informed:
+                # Use true MSE for display (denormalized physical units)
+                display_mse = epoch_losses['mse']
                 pbar.set_postfix(OrderedDict([
-                    ('mse_phys', f"{epoch_losses['mse'] / current_batch_count:.6f}"),
-                    ('p_vio_rmse', f"{epoch_losses['power_violation'] / current_batch_count:.6f}"),
-                    ('v_vio_rmse', f"{epoch_losses['voltage_violation'] / current_batch_count:.6f}")
+                    ('mse', f"{display_mse / current_batch_count:.6f}"),
+                    ('p_vio', f"{epoch_losses['power_violation'] / current_batch_count:.6f}"),
+                    ('v_vio', f"{epoch_losses['voltage_violation'] / current_batch_count:.6f}")
                 ]))
             else:
-                pbar.set_postfix(mse_phys=f"{epoch_losses['mse'] / current_batch_count:.6f}")
+                display_mse = epoch_losses['mse']
+                pbar.set_postfix(mse=f"{display_mse / current_batch_count:.6f}")
             
             # Explicitly delete tensors to free memory
             del features, targets, ybus, adjacency_input, bus_types, outputs, loss_dict, total_loss, loss
+        
+        # Update EB hyperparameters at the end of the epoch
+        self.eb_optimizer.update_hyperparameters(train_loader, self.criterion, self.current_epoch)
 
         num_batches = len(train_loader)
         return {key: val / num_batches * self.accumulation_steps for key, val in epoch_losses.items()}
 
     def _val_epoch(self, val_loader):
         self.model.eval()
-        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_true': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
         
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
@@ -204,13 +231,16 @@ class PowerSystemTrainer(BaseTrainer):
                         epoch_losses[key] += value.item() if isinstance(value, torch.Tensor) else value
 
                 if self.is_physics_informed:
+                    # Use true MSE for display
+                    display_mse = epoch_losses['mse']
                     pbar.set_postfix(OrderedDict([
-                        ('mse_phys', f"{epoch_losses['mse']/(batch_idx+1):.6f}"),
-                        ('p_vio_rmse', f"{epoch_losses['power_violation']/(batch_idx+1):.6f}"),
-                        ('v_vio_rmse', f"{epoch_losses['voltage_violation']/(batch_idx+1):.6f}")
+                        ('mse', f"{display_mse/(batch_idx+1):.6f}"),
+                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.6f}"),
+                        ('v_vio', f"{epoch_losses['voltage_violation']/(batch_idx+1):.6f}")
                     ]))
                 else:
-                    pbar.set_postfix(mse_phys=f"{epoch_losses['mse']/(batch_idx+1):.6f}")
+                    display_mse = epoch_losses['mse']
+                    pbar.set_postfix(mse=f"{display_mse/(batch_idx+1):.6f}")
 
         num_batches = len(val_loader)
         return {key: val / num_batches for key, val in epoch_losses.items()}
