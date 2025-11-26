@@ -30,17 +30,27 @@ class ForensicLogger:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create timestamped log file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = self.log_dir / f"forensic_{model_name}_{bus_system}bus_{timestamp}.log"
+        # Create timestamped log file - FIXED: Use a single file for the session if it exists
+        # We use a fixed filename pattern that doesn't include seconds to allow appending within the same minute/session
+        # or we check if a global log file path has been set
+        
+        if hasattr(ForensicLogger, 'current_log_file') and ForensicLogger.current_log_file:
+            log_file = ForensicLogger.current_log_file
+            mode = 'a' # Append to existing
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = self.log_dir / f"forensic_{model_name}_{bus_system}bus_{timestamp}.log"
+            ForensicLogger.current_log_file = log_file
+            mode = 'w'
         
         # Setup logging
-        self.logger = logging.getLogger(f"Forensic_{model_name}")
+        self.logger = logging.getLogger(f"Forensic_{model_name}_{bus_system}")
         self.logger.setLevel(logging.DEBUG)
         self.logger.handlers = []  # Clear existing handlers
+        self.logger.propagate = False # CRITICAL: Prevent propagation to root logger (console)
         
         # File handler
-        fh = logging.FileHandler(log_file)
+        fh = logging.FileHandler(log_file, mode=mode)
         fh.setLevel(logging.DEBUG)
         
         # Format

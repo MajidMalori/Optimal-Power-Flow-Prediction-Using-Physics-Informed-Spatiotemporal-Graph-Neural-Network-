@@ -62,10 +62,11 @@ class PowerSystemTrainer(BaseTrainer):
 
     def _train_epoch(self, train_loader):
         self.model.train()
-        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_true': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
-        
-        # Start EB epoch tracking - NOT NEEDED for EmpiricalBayesOptimizer
-        # self.eb_optimizer.start_epoch(self.current_epoch)
+        # FIX: Initialize with keys that actually match your criterion output
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_normalized': 0, 'mse_var1': 0, 'mse_var2': 0}
+        if self.is_physics_informed:
+            epoch_losses['power_violation'] = 0
+            epoch_losses['voltage_violation'] = 0
         
         pbar = tqdm(train_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Train]")
 
@@ -74,9 +75,6 @@ class PowerSystemTrainer(BaseTrainer):
 
         for batch_idx, batch in enumerate(pbar):
             # Move data to device
-            # FORENSIC: Log batch data (first batch only)
-            if self.forensic_logger and batch_idx == 0:
-                self.forensic_logger.log_data_batch(batch, batch_idx)
             features = batch['features'].to(self.device, non_blocking=True)
             targets = batch['targets'].to(self.device, non_blocking=True)
             ybus = batch['ybus_matrix'].to(self.device, non_blocking=True)
@@ -85,136 +83,85 @@ class PowerSystemTrainer(BaseTrainer):
             if bus_types is not None:
                 bus_types = bus_types.to(self.device, non_blocking=True)
 
-            # Automatic Mixed Precision (AMP) context manager
-            # PyTorch 2.0+ API: use torch.amp instead of torch.cuda.amp
+            # Automatic Mixed Precision (AMP)
             device_type = 'cuda' if self.use_cuda else 'cpu'
             with torch.amp.autocast(device_type=device_type):
-                # Forward pass - pass bus_types if model supports it
                 if bus_types is not None:
                     try:
                         outputs = self.model(features, adjacency_input, bus_types=bus_types)
                     except TypeError:
-                        # Model doesn't support bus_types parameter, use default forward
                         outputs = self.model(features, adjacency_input)
                 else:
                     outputs = self.model(features, adjacency_input)
                 
                 loss_dict = self.criterion(outputs, targets, features, ybus, bus_types=bus_types, epoch=self.current_epoch)
-                # FORENSIC: Log loss components
-                if self.forensic_logger and batch_idx % 10 == 0:
-                    self.forensic_logger.log_loss_components(loss_dict, batch_idx, phase="train")
+                
                 total_loss = loss_dict['total_loss']
                 
-                # Add Empirical Bayes regularization (layer-wise prior precision)
-                eb_loss = self.eb_optimizer.get_regularization_loss()
-                total_loss = total_loss + eb_loss
+                # Add Empirical Bayes regularization
+                if hasattr(self, 'eb_optimizer'):
+                    eb_loss = self.eb_optimizer.get_regularization_loss()
+                    total_loss = total_loss + eb_loss
                 
                 # Normalize the loss for accumulation
                 loss = total_loss / self.accumulation_steps
 
-            # Scale loss and backpropagate (if using AMP, otherwise direct backward)
+            # Scale loss and backpropagate
             if self.scaler is not None:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            # COLLAPSE DIAGNOSTICS: Check for model collapse (predicting constant values)
-            if batch_idx == 0 and self.current_epoch % 5 == 0:  # Check every 5 epochs, first batch only
-                with torch.no_grad():
-                    # Check variance of predictions (η1 values)
-                    eta1_var1 = outputs[..., 0]  # [batch, buses]
-                    eta1_var2 = outputs[..., 1]  # [batch, buses]
-                    
-                    var1_variance = eta1_var1.var().item()
-                    var2_variance = eta1_var2.var().item()
-                    
-                    # Warning threshold: variance < 1e-6 suggests collapse
-                    if var1_variance < 1e-6 or var2_variance < 1e-6:
-                        model_name = self.model.__class__.__name__
-                        warning_msg = (
-                            f"[COLLAPSE WARNING] {model_name} may be collapsing at epoch {self.current_epoch}. "
-                            f"Prediction variance: var1={var1_variance:.2e}, var2={var2_variance:.2e}. "
-                            f"Model may be predicting constant values (mean collapse)."
-                        )
-                        # Log to file instead of terminal
-                        if hasattr(self, 'log_file') and self.log_file:
-                            try:
-                                self.log_file.write(f"WARNING: {warning_msg}\\n")
-                                self.log_file.flush()
-                            except AttributeError:
-                                pass
-                        
-                        # Adaptive learning rate reduction: reduce LR by 50% if collapse detected
-                        if not hasattr(self, '_collapse_lr_reduced'):
-                            self._collapse_lr_reduced = False
-                        
-                        if not self._collapse_lr_reduced and self.current_epoch > 5:
-                            current_lr = self.optimizer.param_groups[0]['lr']
-                            new_lr = current_lr * 0.5
-                            for param_group in self.optimizer.param_groups:
-                                param_group['lr'] = new_lr
-                            self._collapse_lr_reduced = True
-                            recovery_msg = (
-                                f"[COLLAPSE RECOVERY] Reduced learning rate from {current_lr:.6f} to {new_lr:.6f} "
-                                f"to help model recover from collapse."
-                            )
-                            if hasattr(self, 'log_file') and self.log_file:
-                                try:
-                                    self.log_file.write(f"INFO: {recovery_msg}\\n")
-                                    self.log_file.flush()
-                                except AttributeError:
-                                    pass
-
             # Gradient accumulation step
             if (batch_idx + 1) % self.accumulation_steps == 0:
                 if self.scaler is not None:
-                    # AMP mode: unscale gradients before clipping
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.MAX_GRAD_NORM)
                     torch.nn.utils.clip_grad_norm_(self.criterion.parameters(), self.config.MAX_GRAD_NORM)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    # CPU mode: clip gradients directly
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.MAX_GRAD_NORM)
                     torch.nn.utils.clip_grad_norm_(self.criterion.parameters(), self.config.MAX_GRAD_NORM)
                     self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            # --- Good Hygiene: Update losses and delete tensors ---
-            # Extract scalar values for logging
+            # Update losses
             for key in epoch_losses.keys():
                 if key in loss_dict:
                     value = loss_dict[key]
                     epoch_losses[key] += (value.item() if isinstance(value, torch.Tensor) else value) / self.accumulation_steps
 
-            # Update progress bar with running average
-            # epoch_losses is already divided by accumulation_steps, so just divide by batch count
+            # Update progress bar with nMSE (Normalized MSE)
             current_batch_count = batch_idx + 1
-            if self.is_physics_informed:
-                # Use true MSE for display (denormalized physical units)
-                display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
-                pbar.set_postfix(OrderedDict([
-                    ('mse', f"{display_mse / current_batch_count:.6f}"),
-                    ('p_vio', f"{epoch_losses['power_violation'] / current_batch_count:.6f}"),
-                    ('v_vio', f"{epoch_losses['voltage_violation'] / current_batch_count:.6f}")
-                ]))
-            else:
-                display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
-                pbar.set_postfix(mse=f"{display_mse / current_batch_count:.6f}")
+            display_mse = epoch_losses['mse_normalized'] # Use normalized MSE for display
             
-            # Explicitly delete tensors to free memory
+            postfix_dict = OrderedDict([
+                ('nMSE', f"{display_mse / current_batch_count:.4f}")
+            ])
+            
+            if self.is_physics_informed:
+                postfix_dict['p_vio'] = f"{epoch_losses['power_violation'] / current_batch_count:.4f}"
+                postfix_dict['v_vio'] = f"{epoch_losses['voltage_violation'] / current_batch_count:.4f}"
+                
+            pbar.set_postfix(postfix_dict)
+            
+            # Clean up
             del features, targets, ybus, adjacency_input, bus_types, outputs, loss_dict, total_loss, loss
         
-        # Update EB hyperparameters at the end of the epoch
-        self.eb_optimizer.update_hyperparameters(train_loader, self.criterion, self.current_epoch)
+        # Update EB hyperparameters
+        if hasattr(self, 'eb_optimizer'):
+            self.eb_optimizer.update_hyperparameters(train_loader, self.criterion, self.current_epoch)
 
         num_batches = len(train_loader)
         return {key: val / num_batches * self.accumulation_steps for key, val in epoch_losses.items()}
 
     def _val_epoch(self, val_loader):
         self.model.eval()
-        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_true': 0, 'mse_var1': 0, 'mse_var2': 0, 'power_violation': 0, 'voltage_violation': 0}
+        epoch_losses = {'total_loss': 0, 'mse': 0, 'mse_normalized': 0, 'mse_var1': 0, 'mse_var2': 0}
+        if self.is_physics_informed:
+            epoch_losses['power_violation'] = 0
+            epoch_losses['voltage_violation'] = 0
         
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
@@ -228,7 +175,6 @@ class PowerSystemTrainer(BaseTrainer):
                 if bus_types is not None:
                     bus_types = bus_types.to(self.device, non_blocking=True)
 
-                # PyTorch 2.0+ API: use torch.amp instead of torch.cuda.amp
                 device_type = 'cuda' if self.use_cuda else 'cpu'
                 with torch.amp.autocast(device_type=device_type):
                     outputs = self.model(features, adjacency_input)
@@ -239,17 +185,18 @@ class PowerSystemTrainer(BaseTrainer):
                         value = loss_dict[key]
                         epoch_losses[key] += value.item() if isinstance(value, torch.Tensor) else value
 
+                # Display nMSE
+                mse_norm = epoch_losses['mse_normalized'] / (batch_idx + 1)
+                
+                postfix_dict = OrderedDict([
+                    ('nMSE', f"{mse_norm:.4f}")
+                ])
+                
                 if self.is_physics_informed:
-                    # Use true MSE for display
-                    display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
-                    pbar.set_postfix(OrderedDict([
-                        ('mse', f"{display_mse/(batch_idx+1):.6f}"),
-                        ('p_vio', f"{epoch_losses['power_violation']/(batch_idx+1):.6f}"),
-                        ('v_vio', f"{epoch_losses['voltage_violation']/(batch_idx+1):.6f}")
-                    ]))
-                else:
-                    display_mse = epoch_losses.get('mse_true', epoch_losses['mse'])
-                    pbar.set_postfix(mse=f"{display_mse/(batch_idx+1):.6f}")
+                    postfix_dict['p_vio'] = f"{epoch_losses['power_violation']/(batch_idx+1):.4f}"
+                    postfix_dict['v_vio'] = f"{epoch_losses['voltage_violation']/(batch_idx+1):.4f}"
+                    
+                pbar.set_postfix(postfix_dict)
 
         num_batches = len(val_loader)
         return {key: val / num_batches for key, val in epoch_losses.items()}

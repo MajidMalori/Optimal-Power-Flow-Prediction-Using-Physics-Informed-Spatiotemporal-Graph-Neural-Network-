@@ -219,16 +219,18 @@ class PowerSystemLoss(nn.Module):
         # Get softplus beta parameter
         softplus_beta = getattr(self.config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0)
         
-        # DEBUG: Check raw model outputs - ONLY PRINT WHEN NaN DETECTED
+        # DEBUG: Check raw model outputs - ONLY LOG WHEN NaN DETECTED
         if torch.isnan(eta1_var1_raw).any() or torch.isnan(f2_var1_raw).any():
-            print(f"\n{'='*80}")
-            print(f"[DEBUG] NaN in raw model outputs!")
-            print(f"{'='*80}")
-            print(f"  eta1_var1_raw: nan={torch.isnan(eta1_var1_raw).any().item()}, inf={torch.isinf(eta1_var1_raw).any().item()}, min={eta1_var1_raw.min().item():.6f}, max={eta1_var1_raw.max().item():.6f}")
-            print(f"  f2_var1_raw: nan={torch.isnan(f2_var1_raw).any().item()}, inf={torch.isinf(f2_var1_raw).any().item()}, min={f2_var1_raw.min().item():.6f}, max={f2_var1_raw.max().item():.6f}")
-            print(f"  eta1_var2_raw: nan={torch.isnan(eta1_var2_raw).any().item()}, inf={torch.isinf(eta1_var2_raw).any().item()}, min={eta1_var2_raw.min().item():.6f}, max={eta1_var2_raw.max().item():.6f}")
-            print(f"  f2_var2_raw: nan={torch.isnan(f2_var2_raw).any().item()}, inf={torch.isinf(f2_var2_raw).any().item()}, min={f2_var2_raw.min().item():.6f}, max={f2_var2_raw.max().item():.6f}")
-            print(f"{'='*80}")
+            logger = get_logger()
+            if logger:
+                logger.error(f"\n{'='*80}")
+                logger.error(f"[DEBUG] NaN in raw model outputs!")
+                logger.error(f"{'='*80}")
+                logger.error(f"  eta1_var1_raw: nan={torch.isnan(eta1_var1_raw).any().item()}, inf={torch.isinf(eta1_var1_raw).any().item()}, min={eta1_var1_raw.min().item():.6f}, max={eta1_var1_raw.max().item():.6f}")
+                logger.error(f"  f2_var1_raw: nan={torch.isnan(f2_var1_raw).any().item()}, inf={torch.isinf(f2_var1_raw).any().item()}, min={f2_var1_raw.min().item():.6f}, max={f2_var1_raw.max().item():.6f}")
+                logger.error(f"  eta1_var2_raw: nan={torch.isnan(eta1_var2_raw).any().item()}, inf={torch.isinf(eta1_var2_raw).any().item()}, min={eta1_var2_raw.min().item():.6f}, max={eta1_var2_raw.max().item():.6f}")
+                logger.error(f"  f2_var2_raw: nan={torch.isnan(f2_var2_raw).any().item()}, inf={torch.isinf(f2_var2_raw).any().item()}, min={f2_var2_raw.min().item():.6f}, max={f2_var2_raw.max().item():.6f}")
+                logger.error(f"{'='*80}")
             import sys
             sys.exit(1)
         
@@ -237,16 +239,18 @@ class PowerSystemLoss(nn.Module):
         g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1_raw)
         g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2_raw)
         
-        # DEBUG: Check g+ values - ONLY PRINT WHEN NaN DETECTED
+        # DEBUG: Check g+ values - ONLY LOG WHEN NaN DETECTED
         if torch.isnan(g_plus_var1).any() or torch.isinf(g_plus_var1).any():
-            print(f"\n{'='*80}")
-            print(f"[DEBUG] NaN/Inf in g_plus_var1!")
-            print(f"{'='*80}")
-            print(f"  f2_var1_raw range: [{f2_var1_raw.min().item():.6f}, {f2_var1_raw.max().item():.6f}]")
-            print(f"  f2_var2_raw range: [{f2_var2_raw.min().item():.6f}, {f2_var2_raw.max().item():.6f}]")
-            print(f"  g_plus_var1 range: [{g_plus_var1.min().item():.6f}, {g_plus_var1.max().item():.6f}], nan={torch.isnan(g_plus_var1).any().item()}, inf={torch.isinf(g_plus_var1).any().item()}")
-            print(f"  g_plus_var2 range: [{g_plus_var2.min().item():.6f}, {g_plus_var2.max().item():.6f}], nan={torch.isnan(g_plus_var2).any().item()}, inf={torch.isinf(g_plus_var2).any().item()}")
-            print(f"{'='*80}")
+            logger = get_logger()
+            if logger:
+                logger.error(f"\n{'='*80}")
+                logger.error(f"[DEBUG] NaN/Inf in g_plus_var1!")
+                logger.error(f"{'='*80}")
+                logger.error(f"  f2_var1_raw range: [{f2_var1_raw.min().item():.6f}, {f2_var1_raw.max().item():.6f}]")
+                logger.error(f"  f2_var2_raw range: [{f2_var2_raw.min().item():.6f}, {f2_var2_raw.max().item():.6f}]")
+                logger.error(f"  g_plus_var1 range: [{g_plus_var1.min().item():.6f}, {g_plus_var1.max().item():.6f}], nan={torch.isnan(g_plus_var1).any().item()}, inf={torch.isinf(g_plus_var1).any().item()}")
+                logger.error(f"  g_plus_var2 range: [{g_plus_var2.min().item():.6f}, {g_plus_var2.max().item():.6f}], nan={torch.isnan(g_plus_var2).any().item()}, inf={torch.isinf(g_plus_var2).any().item()}")
+                logger.error(f"{'='*80}")
             import sys
             sys.exit(1)
         
@@ -306,23 +310,27 @@ class PowerSystemLoss(nn.Module):
         if logger and torch.rand(1).item() < 0.01:  # Log 1% of batches
             logger.log_tensor_stats("eta1_var1", eta1_var1, indent=3)
             logger.log_tensor_stats("eta2_var1 (should be < 0)", eta2_var1, indent=3)
-            logger.log_tensor_stats("sigma_var1", sigma_var1, indent=3)
+            # FIX: Calculate sigma_var1 here for logging, as it wasn't defined yet
+            sigma_var1_log = torch.sqrt(sigma2_var1)
+            logger.log_tensor_stats("sigma_var1", sigma_var1_log, indent=3)
         
         # DEBUG: Check for NaN in natural parametrization
         if torch.isnan(data_loss) or torch.isinf(data_loss):
-            print(f"\n[DEBUG] NaN/Inf detected in data_loss!")
-            print(f"  eta1_var1: min={eta1_var1.min().item():.6f}, max={eta1_var1.max().item():.6f}, nan={torch.isnan(eta1_var1).any().item()}")
-            print(f"  eta2_var1: min={eta2_var1.min().item():.6f}, max={eta2_var1.max().item():.6f}, nan={torch.isnan(eta2_var1).any().item()}")
-            print(f"  eta1_var2: min={eta1_var2.min().item():.6f}, max={eta1_var2.max().item():.6f}, nan={torch.isnan(eta1_var2).any().item()}")
-            print(f"  eta2_var2: min={eta2_var2.min().item():.6f}, max={eta2_var2.max().item():.6f}, nan={torch.isnan(eta2_var2).any().item()}")
-            print(f"  log_partition1: min={log_partition1.min().item():.6f}, max={log_partition1.max().item():.6f}, nan={torch.isnan(log_partition1).any().item()}")
-            print(f"  log_partition2: min={log_partition2.min().item():.6f}, max={log_partition2.max().item():.6f}, nan={torch.isnan(log_partition2).any().item()}")
-            print(f"  nll_var1: min={nll_var1.min().item():.6f}, max={nll_var1.max().item():.6f}, nan={torch.isnan(nll_var1).any().item()}")
-            print(f"  nll_var2: min={nll_var2.min().item():.6f}, max={nll_var2.max().item():.6f}, nan={torch.isnan(nll_var2).any().item()}")
-            print(f"  data_loss: {data_loss.item()}")
-            # Check division by zero
-            print(f"  eta2_var1 near zero: {(torch.abs(eta2_var1) < 1e-6).sum().item()} values")
-            print(f"  eta2_var2 near zero: {(torch.abs(eta2_var2) < 1e-6).sum().item()} values")
+            logger = get_logger()
+            if logger:
+                logger.error(f"\n[DEBUG] NaN/Inf detected in data_loss!")
+                logger.error(f"  eta1_var1: min={eta1_var1.min().item():.6f}, max={eta1_var1.max().item():.6f}, nan={torch.isnan(eta1_var1).any().item()}")
+                logger.error(f"  eta2_var1: min={eta2_var1.min().item():.6f}, max={eta2_var1.max().item():.6f}, nan={torch.isnan(eta2_var1).any().item()}")
+                logger.error(f"  eta1_var2: min={eta1_var2.min().item():.6f}, max={eta1_var2.max().item():.6f}, nan={torch.isnan(eta1_var2).any().item()}")
+                logger.error(f"  eta2_var2: min={eta2_var2.min().item():.6f}, max={eta2_var2.max().item():.6f}, nan={torch.isnan(eta2_var2).any().item()}")
+                logger.error(f"  log_partition1: min={log_partition1.min().item():.6f}, max={log_partition1.max().item():.6f}, nan={torch.isnan(log_partition1).any().item()}")
+                logger.error(f"  log_partition2: min={log_partition2.min().item():.6f}, max={log_partition2.max().item():.6f}, nan={torch.isnan(log_partition2).any().item()}")
+                logger.error(f"  nll_var1: min={nll_var1.min().item():.6f}, max={nll_var1.max().item():.6f}, nan={torch.isnan(nll_var1).any().item()}")
+                logger.error(f"  nll_var2: min={nll_var2.min().item():.6f}, max={nll_var2.max().item():.6f}, nan={torch.isnan(nll_var2).any().item()}")
+                logger.error(f"  data_loss: {data_loss.item()}")
+                # Check division by zero
+                logger.error(f"  eta2_var1 near zero: {(torch.abs(eta2_var1) < 1e-6).sum().item()} values")
+                logger.error(f"  eta2_var2 near zero: {(torch.abs(eta2_var2) < 1e-6).sum().item()} values")
             raise RuntimeError("NaN detected in natural parametrization loss - stopping training")
         
         # Compute MSE on NORMALIZED data for consistency with total loss (NLL is on normalized data)
@@ -480,29 +488,28 @@ class PowerSystemLoss(nn.Module):
         # Violations are already in physical units (per-unit)
         if return_components and self.is_physics_informed:
             result = {
-                'total_loss': total_loss,  # Normalized (for optimization - backward pass, etc.)
-                'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units - for display)
-                'mse': mse_denorm,  # Denormalized MSE (physical units - what ML engineers show)
-                'mse_normalized': mse_normalized,  # Normalized MSE (for reference)
+                'total_loss': total_loss,  # Normalized (for optimization)
+                'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units)
+                'mse': mse_denorm,  # Denormalized MSE (physical units)
+                'mse_normalized': unweighted_mse,  # Normalized MSE (CRITICAL for monitoring)
                 'mse_var1': mse_var1_norm,
                 'mse_var2': mse_var2_norm,
-                'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'power_violation_mse': power_penalty,  # MSE (per-unit^2) for training - kept for reference
-                'voltage_violation': voltage_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'voltage_violation_mse': voltage_penalty,  # MSE (per-unit^2) for training - kept for reference
+                'power_violation': power_penalty_rmse,
+                'power_violation_mse': power_penalty,
+                'voltage_violation': voltage_penalty_rmse,
+                'voltage_violation_mse': voltage_penalty,
                 'physics_loss': weighted_power_loss + weighted_voltage_loss
             }
             return result
         else:
+            # OPTIMIZED: Return minimal dictionary for non-physics models (no unused zero keys)
             result = {
-                'total_loss': total_loss,  # Normalized (for optimization - backward pass, etc.)
-                'total_loss_denorm': total_loss_denorm,  # Denormalized (physical units - for display)
-                'mse': mse_denorm,  # Denormalized MSE (physical units - what ML engineers show)
-                'mse_normalized': mse_normalized,  # Normalized MSE (for reference)
+                'total_loss': total_loss,
+                'total_loss_denorm': total_loss_denorm,
+                'mse': mse_denorm,
+                'mse_normalized': unweighted_mse,
                 'mse_var1': mse_var1_norm,
                 'mse_var2': mse_var2_norm,
-                'power_violation': power_penalty_rmse,  # RMSE (per-unit) for display - more interpretable
-                'power_violation_mse': power_penalty,  # MSE (per-unit^2) for training - kept for reference
             }
             return result
 

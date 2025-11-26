@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from .base_model import BaseModel
 from .professional_gcn_layer import ProfessionalGCNLayer
 from typing import Optional
+from utils.forensic_logger import get_logger
 
 class GCN(BaseModel):
     """
@@ -58,6 +59,14 @@ class GCN(BaseModel):
         # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is softplus
         self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)
         
+        # Forensic logging state
+        self.forensic_logger = None
+        self.forward_count = 0
+
+    def set_logger(self, logger):
+        """Attach a forensic logger."""
+        self.forensic_logger = logger
+        
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None):
         """
@@ -78,6 +87,17 @@ class GCN(BaseModel):
             num_nodes = adj.shape[0]
             adj = adj.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, num_nodes, num_nodes]
         
+        # FORENSIC: Log input
+        self.forward_count += 1
+        if self.forensic_logger and self.forward_count % 10 == 1:
+            self.forensic_logger.log_model_forward(
+                "GCN_INPUT",
+                {'features': x, 'adjacency': adj, 'bus_types': bus_types},
+                None
+            )
+            self.forensic_logger.logger.debug(f"\n  GCN FORWARD PASS #{self.forward_count}:")
+            self.forensic_logger.log_tensor_stats("Input features", x, indent=2)
+
         # Apply professional GCN layers (adjacency is pre-normalized in data loader)
         for i, gc_layer in enumerate(self.gc_layers):
             x = gc_layer(x, adj, is_pre_normalized=True)  # Adjacency is pre-normalized for performance
@@ -88,4 +108,12 @@ class GCN(BaseModel):
         # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is softplus
         out = self.output_layer(x)  # [batch_size, num_buses, 4]
         
+        # FORENSIC: Log output
+        if self.forensic_logger and self.forward_count % 10 == 1:
+            self.forensic_logger.log_tensor_stats("Final output", out, indent=2)
+            if out.std().item() < 1e-6:
+                self.forensic_logger.log_diagnosis(
+                    f"MODEL COLLAPSE in forward pass #{self.forward_count}: Output std = {out.std().item():.2e}"
+                )
+
         return out

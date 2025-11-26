@@ -195,24 +195,23 @@ class Config:
             """
             capacity_settings = {
                 33: {
-                    'normal': (1, 4),     # Reverted: Allow original range
-                    'medium': (2, 5),     # Reverted: Allow original range
-                    'large': (3, 7)       # Reverted: Allow original range
+                    'normal': (1, 3),     # Reduced
+                    'medium': (2, 4),     # Reduced
+                    'large': (3, 5)       # Reduced
                 },
                 57: {
-                    'normal': (1, 4),     # Reduced: 1-4 (was 1-6)
-                    'medium': (2, 5),     # Reduced: 2-5 (was 3-7)
-                    'large': (3, 7)       # Reduced: 3-7 (was 5-9)
+                    'normal': (1, 3),     # Reduced
+                    'medium': (2, 4),     # Reduced
+                    'large': (3, 5)       # Reduced
                 },
                 118: {
-                    'normal': (2, 6),     # Reduced: 2-6 (was 2-8)
-                    'medium': (4, 9),     # Kept: 4-9
-                    'large': (6, 12)      # Kept: 6-12
+                    'normal': (2, 4),     # Reduced significantly (was 2-6)
+                    'medium': (3, 5),     # Reduced significantly (was 4-9)
+                    'large': (4, 6)       # Reduced significantly (was 6-12)
                 }
             }
             
-            # Get capacity setting from Config (moved from Args class)
-            # Note: This will be set from YAML or use default values
+            # Get capacity setting from Config
             if num_buses <= 33:
                 capacity = Config.CAPACITY_33_BUS
             elif num_buses <= 57:
