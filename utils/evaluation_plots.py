@@ -2,9 +2,11 @@
 Critical Evaluation Plots for Model Diagnostics
 
 Provides essential visualizations for diagnosing regression models:
-1. Predicted vs. Actual Scatter Plots (by bus type)
-2. Error Distribution Histograms (by bus type)
-3. Calibration Plot (Reliability Diagram) for heteroscedastic models
+1. Predicted vs. Actual Scatter Plots (for 10-dimensional full state)
+2. Error Distribution Histograms (for 10-dimensional full state)
+3. Calibration Plot (Reliability Diagram) for MC Dropout uncertainty
+
+NOTE: Updated for Full State Reconstruction (10 outputs), not OPF (2 outputs).
 """
 
 import os
@@ -25,124 +27,71 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
                              bus_types: np.ndarray, case_name: str, 
                              output_dir: str, model_name: str = ""):
     """
-    Generate predicted vs. actual scatter plots, separated by bus type.
+    Generate predicted vs. actual scatter plots for Full State Reconstruction.
     
-    For OPF mode:
-    - PQ buses: [V, θ] (voltage magnitude, angle)
-    - PV buses: [Q, θ] (reactive power, angle)
-    - Slack buses: [P, Q] (active power, reactive power)
+    Plots voltage magnitude (VM) and voltage angle (VA) across all buses.
     
     Args:
-        predictions: [n_samples, n_buses, 2] - predicted unknowns
-        targets: [n_samples, n_buses, 2] - true unknowns
-        bus_types: [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack]
+        predictions: [n_samples, n_buses, 10] - predicted full state
+        targets: [n_samples, n_buses, 10] - true full state
+        bus_types: [n_samples, n_buses] - bus type codes (unused, kept for compatibility)
         case_name: Name of the test case
         output_dir: Directory to save plots
         model_name: Optional model name for title
     """
-    if bus_types is None:
-        raise ValueError("bus_types is required for OPF mode predicted vs actual plots")
+    # Full State Reconstruction: We plot VM (col 8) and VA (col 9) for all buses
+    # No bus-type separation needed since we reconstruct the full state
     
-    # FIXED: Only iterate over available bus types (cleaner than checking each one)
-    from utils.bus_type_eda import get_available_bus_types
-    has_pq, has_pv, has_slack = get_available_bus_types(bus_types)
+    # Extract VM and VA from 10-dimensional predictions
+    pred_vm = predictions[:, :, 8].flatten()  # Voltage Magnitude
+    pred_va = predictions[:, :, 9].flatten()  # Voltage Angle
+    targ_vm = targets[:, :, 8].flatten()
+    targ_va = targets[:, :, 9].flatten()
     
-    # Build list of available bus types
-    available_bus_types = []
-    if has_pq:
-        available_bus_types.append((0, 'PQ'))
-    if has_pv:
-        available_bus_types.append((1, 'PV'))
-    if has_slack:
-        available_bus_types.append((2, 'Slack'))
-    
-    # Create grid based on available types: 2 rows x N columns
-    num_cols = len(available_bus_types) if available_bus_types else 1
-    fig, axes = plt.subplots(2, num_cols, figsize=(6 * num_cols, 12))
-    if num_cols == 1:
-        axes = axes.reshape(-1, 1)  # Ensure 2D array
+    # Create 1x2 subplot: VM and VA
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle(f'Predicted vs. Actual - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
                  fontsize=16, fontweight='bold')
     
-    # Variable names by bus type
-    var_names = {
-        0: {'var1': 'Voltage (p.u.)', 'var2': 'Angle (rad)'},      # PQ
-        1: {'var1': 'Reactive Power (p.u.)', 'var2': 'Angle (rad)'},  # PV
-        2: {'var1': 'Active Power (p.u.)', 'var2': 'Reactive Power (p.u.)'}  # Slack
-    }
+    # Plot 1: Voltage Magnitude
+    ax = axes[0]
+    ax.scatter(targ_vm, pred_vm, alpha=0.5, s=10)
+    min_val = min(targ_vm.min(), pred_vm.min())
+    max_val = max(targ_vm.max(), pred_vm.max())
+    ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    ax.set_xlabel('Actual Voltage Magnitude (p.u.)', fontsize=11)
+    ax.set_ylabel('Predicted Voltage Magnitude (p.u.)', fontsize=11)
+    ax.set_title('Voltage Magnitude', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     
-    # Only iterate over available bus types
-    for col_idx, (bus_type_code, bus_type_name) in enumerate(available_bus_types):
-        # Create mask for this bus type
-        bus_type_mask = (bus_types == bus_type_code)  # [n_samples, n_buses]
-        
-        # Extract predictions and targets for this bus type
-        pred_var1_list = []
-        pred_var2_list = []
-        targ_var1_list = []
-        targ_var2_list = []
-        
-        for sample_idx in range(predictions.shape[0]):
-            sample_bus_mask = bus_type_mask[sample_idx]
-            if np.any(sample_bus_mask):
-                pred_var1_list.append(predictions[sample_idx, sample_bus_mask, 0])
-                pred_var2_list.append(predictions[sample_idx, sample_bus_mask, 1])
-                targ_var1_list.append(targets[sample_idx, sample_bus_mask, 0])
-                targ_var2_list.append(targets[sample_idx, sample_bus_mask, 1])
-        
-        if len(pred_var1_list) == 0:
-            # This shouldn't happen since we only iterate over available types, but safety check
-            continue
-        
-        # Concatenate all values
-        pred_var1 = np.concatenate(pred_var1_list)
-        pred_var2 = np.concatenate(pred_var2_list)
-        targ_var1 = np.concatenate(targ_var1_list)
-        targ_var2 = np.concatenate(targ_var2_list)
-        
-        # Row 0: Variable 1
-        ax = axes[0, col_idx]
-        ax.scatter(targ_var1, pred_var1, alpha=0.5, s=10)
-        # Perfect prediction line (y=x)
-        min_val = min(targ_var1.min(), pred_var1.min())
-        max_val = max(targ_var1.max(), pred_var1.max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
-        ax.set_xlabel(f'Actual {var_names[bus_type_code]["var1"]}', fontsize=11)
-        ax.set_ylabel(f'Predicted {var_names[bus_type_code]["var1"]}', fontsize=11)
-        ax.set_title(f'{bus_type_name} Buses: {var_names[bus_type_code]["var1"]}', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Calculate and display R²
-        try:
-            slope, intercept, r_value, p_value, std_err = linregress(targ_var1, pred_var1)
-            r_squared = r_value**2
-            ax.text(0.05, 0.95, f'R² = {r_squared:.4f}', transform=ax.transAxes,
-                   fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        except:
-            pass
-        
-        # Row 1: Variable 2
-        ax = axes[1, col_idx]
-        ax.scatter(targ_var2, pred_var2, alpha=0.5, s=10)
-        # Perfect prediction line (y=x)
-        min_val = min(targ_var2.min(), pred_var2.min())
-        max_val = max(targ_var2.max(), pred_var2.max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
-        ax.set_xlabel(f'Actual {var_names[bus_type_code]["var2"]}', fontsize=11)
-        ax.set_ylabel(f'Predicted {var_names[bus_type_code]["var2"]}', fontsize=11)
-        ax.set_title(f'{bus_type_name} Buses: {var_names[bus_type_code]["var2"]}', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Calculate and display R²
-        try:
-            slope, intercept, r_value, p_value, std_err = linregress(targ_var2, pred_var2)
-            r_squared = r_value**2
-            ax.text(0.05, 0.95, f'R² = {r_squared:.4f}', transform=ax.transAxes,
-                   fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        except:
-            pass
+    try:
+        slope, intercept, r_value, p_value, std_err = linregress(targ_vm, pred_vm)
+        r_squared = r_value**2
+        ax.text(0.05, 0.95, f'R² = {r_squared:.4f}', transform=ax.transAxes,
+               fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    except:
+        pass
+    
+    # Plot 2: Voltage Angle
+    ax = axes[1]
+    ax.scatter(targ_va, pred_va, alpha=0.5, s=10)
+    min_val = min(targ_va.min(), pred_va.min())
+    max_val = max(targ_va.max(), pred_va.max())
+    ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    ax.set_xlabel('Actual Voltage Angle (rad)', fontsize=11)
+    ax.set_ylabel('Predicted Voltage Angle (rad)', fontsize=11)
+    ax.set_title('Voltage Angle', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    try:
+        slope, intercept, r_value, p_value, std_err = linregress(targ_va, pred_va)
+        r_squared = r_value**2
+        ax.text(0.05, 0.95, f'R² = {r_squared:.4f}', transform=ax.transAxes,
+               fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    except:
+        pass
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
@@ -158,105 +107,57 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
                             bus_types: np.ndarray, case_name: str,
                             output_dir: str, model_name: str = ""):
     """
-    Generate error distribution histograms, separated by bus type.
+    Generate error distribution histograms for Full State Reconstruction.
     
     Args:
-        predictions: [n_samples, n_buses, 2] - predicted unknowns
-        targets: [n_samples, n_buses, 2] - true unknowns
-        bus_types: [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack]
+        predictions: [n_samples, n_buses, 10] - predicted full state
+        targets: [n_samples, n_buses, 10] - true full state
+        bus_types: [n_samples, n_buses] - bus type codes (unused, kept for compatibility)
         case_name: Name of the test case
         output_dir: Directory to save plots
         model_name: Optional model name for title
     """
-    if bus_types is None:
-        raise ValueError("bus_types is required for OPF mode error distribution plots")
     
-    # FIXED: Only iterate over available bus types
-    from utils.bus_type_eda import get_available_bus_types
-    has_pq, has_pv, has_slack = get_available_bus_types(bus_types)
+    # Extract VM and VA errors from 10-dimensional predictions
+    errors_vm = predictions[:, :, 8].flatten() - targets[:, :, 8].flatten()
+    errors_va = predictions[:, :, 9].flatten() - targets[:, :, 9].flatten()
     
-    # Build list of available bus types
-    available_bus_types = []
-    if has_pq:
-        available_bus_types.append((0, 'PQ'))
-    if has_pv:
-        available_bus_types.append((1, 'PV'))
-    if has_slack:
-        available_bus_types.append((2, 'Slack'))
-    
-    # Create grid based on available types: 2 rows x N columns
-    num_cols = len(available_bus_types) if available_bus_types else 1
-    fig, axes = plt.subplots(2, num_cols, figsize=(6 * num_cols, 12))
-    if num_cols == 1:
-        axes = axes.reshape(-1, 1)  # Ensure 2D array
+    # Create 1x2 subplot: VM and VA error distributions
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     fig.suptitle(f'Error Distributions - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
                  fontsize=16, fontweight='bold')
     
-    # Variable names by bus type
-    var_names = {
-        0: {'var1': 'Voltage Error (p.u.)', 'var2': 'Angle Error (rad)'},      # PQ
-        1: {'var1': 'Reactive Power Error (p.u.)', 'var2': 'Angle Error (rad)'},  # PV
-        2: {'var1': 'Active Power Error (p.u.)', 'var2': 'Reactive Power Error (p.u.)'}  # Slack
-    }
+    # Plot 1: Voltage Magnitude errors
+    ax = axes[0]
+    ax.hist(errors_vm, bins=50, alpha=0.7, edgecolor='black')
+    ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero Error')
+    ax.axvline(x=np.mean(errors_vm), color='g', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors_vm):.6f}')
+    ax.set_xlabel('Voltage Magnitude Error (p.u.)', fontsize=11)
+    ax.set_ylabel('Frequency', fontsize=11)
+    ax.set_title('Voltage Magnitude Error Distribution', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
     
-    # Only iterate over available bus types
-    for col_idx, (bus_type_code, bus_type_name) in enumerate(available_bus_types):
-        # Create mask for this bus type
-        bus_type_mask = (bus_types == bus_type_code)
-        
-        # Extract errors for this bus type
-        errors_var1_list = []
-        errors_var2_list = []
-        
-        for sample_idx in range(predictions.shape[0]):
-            sample_bus_mask = bus_type_mask[sample_idx]
-            if np.any(sample_bus_mask):
-                errors_var1 = predictions[sample_idx, sample_bus_mask, 0] - targets[sample_idx, sample_bus_mask, 0]
-                errors_var2 = predictions[sample_idx, sample_bus_mask, 1] - targets[sample_idx, sample_bus_mask, 1]
-                errors_var1_list.append(errors_var1)
-                errors_var2_list.append(errors_var2)
-        
-        if len(errors_var1_list) == 0:
-            # This shouldn't happen since we only iterate over available types, but safety check
-            continue
-        
-        # Concatenate all errors
-        errors_var1 = np.concatenate(errors_var1_list)
-        errors_var2 = np.concatenate(errors_var2_list)
-        
-        # Row 0: Variable 1 errors
-        ax = axes[0, col_idx]
-        ax.hist(errors_var1, bins=50, alpha=0.7, edgecolor='black')
-        ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero Error')
-        ax.axvline(x=np.mean(errors_var1), color='g', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors_var1):.6f}')
-        ax.set_xlabel(var_names[bus_type_code]['var1'], fontsize=11)
-        ax.set_ylabel('Frequency', fontsize=11)
-        ax.set_title(f'{bus_type_name} Buses: {var_names[bus_type_code]["var1"]}', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Add statistics text
-        std_err = np.std(errors_var1)
-        ax.text(0.05, 0.95, f'Mean: {np.mean(errors_var1):.6f}\nStd: {std_err:.6f}', 
-               transform=ax.transAxes, fontsize=10, verticalalignment='top',
-               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        # Row 1: Variable 2 errors
-        ax = axes[1, col_idx]
-        ax.hist(errors_var2, bins=50, alpha=0.7, edgecolor='black')
-        ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero Error')
-        ax.axvline(x=np.mean(errors_var2), color='g', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors_var2):.6f}')
-        ax.set_xlabel(var_names[bus_type_code]['var2'], fontsize=11)
-        ax.set_ylabel('Frequency', fontsize=11)
-        ax.set_title(f'{bus_type_name} Buses: {var_names[bus_type_code]["var2"]}', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Add statistics text
-        std_err = np.std(errors_var2)
-        ax.text(0.05, 0.95, f'Mean: {np.mean(errors_var2):.6f}\nStd: {std_err:.6f}', 
-               transform=ax.transAxes, fontsize=10, verticalalignment='top',
-               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    std_err_vm = np.std(errors_vm)
+    ax.text(0.05, 0.95, f'Mean: {np.mean(errors_vm):.6f}\nStd: {std_err_vm:.6f}', 
+           transform=ax.transAxes, fontsize=10, verticalalignment='top',
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    # Plot 2: Voltage Angle errors
+    ax = axes[1]
+    ax.hist(errors_va, bins=50, alpha=0.7, edgecolor='black')
+    ax.axvline(x=0, color='r', linestyle='--', linewidth=2, label='Zero Error')
+    ax.axvline(x=np.mean(errors_va), color='g', linestyle='--', linewidth=2, label=f'Mean: {np.mean(errors_va):.6f}')
+    ax.set_xlabel('Voltage Angle Error (rad)', fontsize=11)
+    ax.set_ylabel('Frequency', fontsize=11)
+    ax.set_title('Voltage Angle Error Distribution', fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    std_err_va = np.std(errors_va)
+    ax.text(0.05, 0.95, f'Mean: {np.mean(errors_va):.6f}\nStd: {std_err_va:.6f}', 
+           transform=ax.transAxes, fontsize=10, verticalalignment='top',
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
@@ -272,175 +173,35 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
                             bus_types: np.ndarray, case_name: str,
                             output_dir: str, model_name: str = "", config: Any = None):
     """
-    Generate calibration plot (reliability diagram) for heteroscedastic uncertainty.
+    Generate calibration plot (reliability diagram) for MC Dropout uncertainty.
     
     Validates that predicted confidence intervals match actual coverage.
     A well-calibrated model will have points close to the y=x line.
     
     Args:
-        model_outputs: [n_samples, n_buses, 4] - natural parameters [η1_var1, η1_var2, f2_var1, f2_var2]
-        targets: [n_samples, n_buses, 2] - true unknowns
-        bus_types: [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack]
+        model_outputs: [n_samples, n_buses, 10] - MC Dropout predictions (mean)
+        targets: [n_samples, n_buses, 10] - true full state
+        bus_types: [n_samples, n_buses] - bus type codes (unused, kept for compatibility)
         case_name: Name of the test case
         output_dir: Directory to save plots
         model_name: Optional model name for title
-        config: Config object for softplus beta
+        config: Config object (unused, kept for compatibility)
     """
-    if bus_types is None:
-        raise ValueError("bus_types is required for OPF mode calibration plot")
+    # MC Dropout: We don't have explicit uncertainty estimates in model_outputs
+    # This function is now a placeholder for compatibility
+    # Real calibration would require multiple forward passes with dropout enabled
     
-    import torch
-    import torch.nn.functional as F
-    from config import ModelOutputIndices
+    print(f"[WARNING] plot_calibration_diagram is not yet implemented for MC Dropout uncertainty.")
+    print(f"          Skipping calibration plot for {case_name}.")
     
-    # Convert to tensors for computation
-    outputs_tensor = torch.from_numpy(model_outputs).float()
-    targets_tensor = torch.from_numpy(targets).float()
-    bus_types_tensor = torch.from_numpy(bus_types).long()
-    
-    # Extract natural parameters
-    eta1_var1 = outputs_tensor[:, :, ModelOutputIndices.ETA1_VAR1]
-    eta1_var2 = outputs_tensor[:, :, ModelOutputIndices.ETA1_VAR2]
-    f2_var1 = outputs_tensor[:, :, ModelOutputIndices.F2_VAR1]
-    f2_var2 = outputs_tensor[:, :, ModelOutputIndices.F2_VAR2]
-    
-    # Get softplus beta
-    softplus_beta = getattr(config, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0) if config else 1.0
-    
-    # Compute g+ and then eta2
-    g_plus_var1 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var1)
-    g_plus_var2 = (1.0 / softplus_beta) * F.softplus(softplus_beta * f2_var2)
-    eta2_var1 = -g_plus_var1
-    eta2_var2 = -g_plus_var2
-    
-    # Convert to mean and variance
-    eps = 1e-8
-    mu_var1 = -eta1_var1 / (2.0 * eta2_var1 + eps)
-    mu_var2 = -eta1_var2 / (2.0 * eta2_var2 + eps)
-    sigma2_var1 = -1.0 / (2.0 * eta2_var1 + eps)
-    sigma2_var2 = -1.0 / (2.0 * eta2_var2 + eps)
-    sigma_var1 = torch.sqrt(sigma2_var1)
-    sigma_var2 = torch.sqrt(sigma2_var2)
-    
-    # Convert back to numpy
-    mu_var1 = mu_var1.numpy()
-    mu_var2 = mu_var2.numpy()
-    sigma_var1 = sigma_var1.numpy()
-    sigma_var2 = sigma_var2.numpy()
-    targets_np = targets_tensor.numpy()
-    
-    # FIXED: Only iterate over available bus types
-    from utils.bus_type_eda import get_available_bus_types
-    has_pq, has_pv, has_slack = get_available_bus_types(bus_types)
-    
-    # Build list of available bus types
-    available_bus_types = []
-    if has_pq:
-        available_bus_types.append((0, 'PQ'))
-    if has_pv:
-        available_bus_types.append((1, 'PV'))
-    if has_slack:
-        available_bus_types.append((2, 'Slack'))
-    
-    # Create grid based on available types: 2 rows x N columns
-    num_cols = len(available_bus_types) if available_bus_types else 1
-    fig, axes = plt.subplots(2, num_cols, figsize=(6 * num_cols, 12))
-    if num_cols == 1:
-        axes = axes.reshape(-1, 1)  # Ensure 2D array
-    fig.suptitle(f'Calibration Diagram (Reliability) - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
-                 fontsize=16, fontweight='bold')
-    
-    # Variable names by bus type
-    var_names = {
-        0: {'var1': 'Voltage', 'var2': 'Angle'},      # PQ
-        1: {'var1': 'Reactive Power', 'var2': 'Angle'},  # PV
-        2: {'var1': 'Active Power', 'var2': 'Reactive Power'}  # Slack
-    }
-    
-    # Confidence levels to test (from 10% to 90%)
-    confidence_levels = np.arange(0.1, 1.0, 0.1)
-    
-    # Only iterate over available bus types
-    for col_idx, (bus_type_code, bus_type_name) in enumerate(available_bus_types):
-        # Create mask for this bus type
-        bus_type_mask = (bus_types == bus_type_code)
-        
-        # Extract predictions, uncertainties, and targets for this bus type
-        mu_var1_list = []
-        mu_var2_list = []
-        sigma_var1_list = []
-        sigma_var2_list = []
-        targ_var1_list = []
-        targ_var2_list = []
-        
-        for sample_idx in range(mu_var1.shape[0]):
-            sample_bus_mask = bus_type_mask[sample_idx]
-            if np.any(sample_bus_mask):
-                mu_var1_list.append(mu_var1[sample_idx, sample_bus_mask])
-                mu_var2_list.append(mu_var2[sample_idx, sample_bus_mask])
-                sigma_var1_list.append(sigma_var1[sample_idx, sample_bus_mask])
-                sigma_var2_list.append(sigma_var2[sample_idx, sample_bus_mask])
-                targ_var1_list.append(targets_np[sample_idx, sample_bus_mask, 0])
-                targ_var2_list.append(targets_np[sample_idx, sample_bus_mask, 1])
-        
-        if len(mu_var1_list) == 0:
-            # This shouldn't happen since we only iterate over available types, but safety check
-            continue
-        
-        # Concatenate all values
-        mu_var1_flat = np.concatenate(mu_var1_list)
-        mu_var2_flat = np.concatenate(mu_var2_list)
-        sigma_var1_flat = np.concatenate(sigma_var1_list)
-        sigma_var2_flat = np.concatenate(sigma_var2_list)
-        targ_var1_flat = np.concatenate(targ_var1_list)
-        targ_var2_flat = np.concatenate(targ_var2_list)
-        
-        # Row 0: Variable 1 calibration
-        ax = axes[0, col_idx]
-        actual_coverage = []
-        for conf_level in confidence_levels:
-            # Calculate z-score for this confidence level (two-tailed)
-            z_score = norm.ppf(0.5 + conf_level / 2.0)
-            
-            # Predicted confidence interval
-            lower_bound = mu_var1_flat - z_score * sigma_var1_flat
-            upper_bound = mu_var1_flat + z_score * sigma_var1_flat
-            
-            # Actual coverage: fraction of true values within predicted interval
-            within_interval = (targ_var1_flat >= lower_bound) & (targ_var1_flat <= upper_bound)
-            actual_coverage.append(np.mean(within_interval))
-        
-        ax.plot(confidence_levels, actual_coverage, 'o-', linewidth=2, markersize=8, label='Actual Coverage')
-        ax.plot([0, 1], [0, 1], 'r--', linewidth=2, label='Perfect Calibration')
-        ax.set_xlabel('Predicted Confidence Level', fontsize=11)
-        ax.set_ylabel('Actual Coverage', fontsize=11)
-        ax.set_title(f'{bus_type_name} Buses: {var_names[bus_type_code]["var1"]}', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0, 1])
-        ax.set_ylim([0, 1])
-        
-        # Row 1: Variable 2 calibration
-        ax = axes[1, col_idx]
-        actual_coverage = []
-        for conf_level in confidence_levels:
-            z_score = norm.ppf(0.5 + conf_level / 2.0)
-            
-            lower_bound = mu_var2_flat - z_score * sigma_var2_flat
-            upper_bound = mu_var2_flat + z_score * sigma_var2_flat
-            
-            within_interval = (targ_var2_flat >= lower_bound) & (targ_var2_flat <= upper_bound)
-            actual_coverage.append(np.mean(within_interval))
-        
-        ax.plot(confidence_levels, actual_coverage, 'o-', linewidth=2, markersize=8, label='Actual Coverage')
-        ax.plot([0, 1], [0, 1], 'r--', linewidth=2, label='Perfect Calibration')
-        ax.set_xlabel('Predicted Confidence Level', fontsize=11)
-        ax.set_ylabel('Actual Coverage', fontsize=11)
-        ax.set_title(f'{bus_type_name} Buses: {var_names[bus_type_code]["var2"]}', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0, 1])
-        ax.set_ylim([0, 1])
+    # Create a placeholder figure to avoid breaking the pipeline
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    ax.text(0.5, 0.5, 'Calibration Plot\n(Not yet implemented for MC Dropout)', 
+           transform=ax.transAxes, ha='center', va='center',
+           fontsize=14, fontweight='bold')
+    ax.set_title(f'Calibration Diagram - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
+                fontsize=16, fontweight='bold')
+    ax.axis('off')
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     

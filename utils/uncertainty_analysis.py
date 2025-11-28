@@ -1,6 +1,8 @@
 """
-Uncertainty Quantification and Visualization for Power System OPF.
+Uncertainty Quantification and Visualization for Power System State Estimation.
 Generates spatial and temporal uncertainty visualizations for trained models.
+
+NOTE: Updated for Full State Reconstruction (10 outputs) with MC Dropout uncertainty.
 """
 
 import os
@@ -63,40 +65,35 @@ def calculate_predicted_uncertainty_metrics(model_outputs: np.ndarray, renewable
                                             min_sigma: float = 0.01, max_sigma: float = 10.0,
                                             timesteps: np.ndarray = None) -> Dict:
     """
-    Calculate PREDICTED uncertainty metrics from model outputs (heteroscedastic mode).
+    Calculate PREDICTED uncertainty metrics from MC Dropout model outputs.
     
-    This extracts the model's predicted uncertainties (log_sigma values) and analyzes them
+    This extracts the model's predicted uncertainties (std dev from MC Dropout) and analyzes them
     spatially and temporally. This is different from calculate_uncertainty_metrics which
     uses actual error statistics.
     
     Args:
-        model_outputs: Shape [n_samples, n_buses, 4] - Model outputs in heteroscedastic mode
-                      [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
+        model_outputs: Shape [n_samples, n_buses, 10] - MC Dropout uncertainty (std dev) for full state
         renewable_fractions: Shape [n_samples] - renewable fraction for each sample
-        min_sigma: Minimum sigma value for clamping
-        max_sigma: Maximum sigma value for clamping
+        min_sigma: Minimum sigma value for clamping (unused, kept for compatibility)
+        max_sigma: Maximum sigma value for clamping (unused, kept for compatibility)
+        timesteps: Optional timestep indices
     
     Returns:
         Dictionary containing predicted uncertainty metrics for each renewable fraction
     """
-    # Extract predicted uncertainties
-    log_sigma_var1 = model_outputs[:, :, 2]  # [n_samples, n_buses]
-    log_sigma_var2 = model_outputs[:, :, 3]  # [n_samples, n_buses]
+    # MC Dropout: model_outputs should be the std dev from multiple forward passes
+    # For now, assume model_outputs is [n_samples, n_buses, 10] with uncertainty estimates
+    # We'll focus on VM (col 8) and VA (col 9) uncertainties
     
-    # Convert to sigma (standard deviation) using natural parametrization
-    # σ² = -1/(2η2), so σ = sqrt(-1/(2η2))
-    # Since log_sigma = 0.5 * log(σ²), we have: σ = exp(log_sigma)
-    sigma_var1 = np.exp(log_sigma_var1)
-    sigma_var2 = np.exp(log_sigma_var2)
+    if model_outputs.shape[2] != 10:
+        raise ValueError(f"Expected model_outputs shape [n_samples, n_buses, 10], got {model_outputs.shape}")
     
-    # NO CLAMPING: Paper (Immer et al., NeurIPS 2023) does not clamp sigma values
-    # Clamping can bias results and is not theoretically justified
-    # If sigma values are extreme, it indicates model calibration issues that should be addressed
+    # Extract VM and VA uncertainties
+    sigma_vm = model_outputs[:, :, 8]  # [n_samples, n_buses]
+    sigma_va = model_outputs[:, :, 9]  # [n_samples, n_buses]
     
-    # Combined uncertainty: Use RMS (root mean square) for proper uncertainty combination
-    # RMS preserves units and is standard for combining uncertainties
-    # Alternative: Report var1 and var2 separately (more informative)
-    sigma_combined = np.sqrt((sigma_var1**2 + sigma_var2**2) / 2.0)  # [n_samples, n_buses] - RMS
+    # Combined uncertainty: Use RMS for VM and VA
+    sigma_combined = np.sqrt((sigma_vm**2 + sigma_va**2) / 2.0)  # [n_samples, n_buses] - RMS
     
     # Get unique renewable fractions
     renewable_fractions_rounded = np.round(renewable_fractions, decimals=1)
@@ -141,33 +138,26 @@ def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray,
                                   renewable_fractions: np.ndarray, bus_types: np.ndarray = None,
                                   timesteps: np.ndarray = None) -> Dict:
     """
-    Calculate uncertainty metrics for each renewable fraction, separated by bus type.
+    Calculate uncertainty metrics for each renewable fraction (Full State Reconstruction).
     
-    OPF Mode: Predictions are bus-type dependent unknowns:
-    - PQ buses: [V, θ] (voltage magnitude, angle)
-    - PV buses: [Q, θ] (reactive power, angle)
-    - Slack buses: [P, Q] (active power, reactive power)
-    
-    This function calculates errors separately for each bus type to preserve physical meaning.
-    This allows for more insightful analysis (e.g., voltage uncertainty at PQ buses).
+    Focuses on VM (col 8) and VA (col 9) errors for all buses.
     
     Args:
-        predictions: Shape [n_samples, n_buses, 2] - OPF unknowns
-        targets: Shape [n_samples, n_buses, 2] - True OPF unknowns
+        predictions: Shape [n_samples, n_buses, 10] - Full state predictions
+        targets: Shape [n_samples, n_buses, 10] - True full state
         renewable_fractions: Shape [n_samples] - renewable fraction for each sample
-        bus_types: Shape [n_samples, n_buses] - bus type codes [0=PQ, 1=PV, 2=Slack] (required for OPF)
+        bus_types: Shape [n_samples, n_buses] - bus type codes (unused, kept for compatibility)
         timesteps: Shape [n_samples] - actual timestep indices for each sample (optional)
     
     Returns:
-        Dictionary containing uncertainty metrics for each renewable fraction, with separate
-        entries for each bus type: 'pq', 'pv', 'slack', and 'combined' (all buses)
+        Dictionary containing uncertainty metrics for each renewable fraction
     """
-    if bus_types is None:
-        raise ValueError("bus_types is required for OPF mode uncertainty analysis")
+    if predictions.shape[2] != 10 or targets.shape[2] != 10:
+        raise ValueError(f"Expected shape [n_samples, n_buses, 10], got predictions: {predictions.shape}, targets: {targets.shape}")
     
-    # Calculate per-feature errors
-    errors_feat0 = predictions[:, :, 0] - targets[:, :, 0]  # [n_samples, n_buses]
-    errors_feat1 = predictions[:, :, 1] - targets[:, :, 1]  # [n_samples, n_buses]
+    # Calculate VM and VA errors
+    errors_vm = predictions[:, :, 8] - targets[:, :, 8]  # [n_samples, n_buses]
+    errors_va = predictions[:, :, 9] - targets[:, :, 9]  # [n_samples, n_buses]
     
     # Get unique renewable fractions
     renewable_fractions_rounded = np.round(renewable_fractions, decimals=1)
@@ -178,82 +168,22 @@ def calculate_uncertainty_metrics(predictions: np.ndarray, targets: np.ndarray,
     for frac in unique_fractions:
         # Get indices for this fraction
         mask = renewable_fractions_rounded == frac
-        frac_errors_feat0 = errors_feat0[mask]  # [n_frac_samples, n_buses]
-        frac_errors_feat1 = errors_feat1[mask]  # [n_frac_samples, n_buses]
-        frac_bus_types = bus_types[mask]  # [n_frac_samples, n_buses]
+        frac_errors_vm = errors_vm[mask]  # [n_frac_samples, n_buses]
+        frac_errors_va = errors_va[mask]  # [n_frac_samples, n_buses]
         
-        frac_data = {}
-        
-        # Calculate errors for each bus type separately
-        for bus_type_code, bus_type_name in [(0, 'pq'), (1, 'pv'), (2, 'slack')]:
-            # Create mask for this bus type across all samples and buses
-            bus_type_mask = (frac_bus_types == bus_type_code)  # [n_frac_samples, n_buses]
-            
-            if not np.any(bus_type_mask):
-                # No buses of this type for this fraction
-                frac_data[bus_type_name] = {
-                    'spatial': np.array([]),
-                    'temporal': np.array([]),
-                    'mean_spatial': 0.0,
-                    'max_spatial': 0.0,
-                    'mean_temporal': 0.0
-                }
-                continue
-            
-            # Extract errors for this bus type
-            # For each sample, get errors at buses of this type
-            errors_by_type = []
-            for sample_idx in range(frac_errors_feat0.shape[0]):
-                sample_bus_mask = bus_type_mask[sample_idx]  # [n_buses]
-                if np.any(sample_bus_mask):
-                    # Get errors for buses of this type in this sample
-                    sample_errors_feat0 = frac_errors_feat0[sample_idx][sample_bus_mask]
-                    sample_errors_feat1 = frac_errors_feat1[sample_idx][sample_bus_mask]
-                    # Calculate error magnitude per bus
-                    sample_errors_mag = np.sqrt(sample_errors_feat0**2 + sample_errors_feat1**2)
-                    errors_by_type.append(sample_errors_mag)
-            
-            if len(errors_by_type) == 0:
-                frac_data[bus_type_name] = {
-                    'spatial': np.array([]),
-                    'temporal': np.array([]),
-                    'mean_spatial': 0.0,
-                    'max_spatial': 0.0,
-                    'mean_temporal': 0.0
-                }
-                continue
-            
-            # Stack to get [n_frac_samples, n_buses_of_this_type] (variable number of buses per sample)
-            # For spatial analysis, we need to aggregate across samples
-            # For temporal analysis, we need to aggregate across buses
-            
-            # Spatial uncertainty: mean error per bus across time
-            # Aggregate all errors for buses of this type across all samples
-            all_bus_errors = np.concatenate(errors_by_type) if errors_by_type else np.array([])
-            spatial_uncertainty = np.array([np.mean(errors) for errors in errors_by_type]) if errors_by_type else np.array([])
-            
-            # Temporal uncertainty: mean error across buses for each timestep
-            temporal_uncertainty = np.array([np.mean(errors) for errors in errors_by_type]) if errors_by_type else np.array([])
-            
-            frac_data[bus_type_name] = {
-                'spatial': spatial_uncertainty,
-                'temporal': temporal_uncertainty,
-                'mean_spatial': np.mean(all_bus_errors) if len(all_bus_errors) > 0 else 0.0,
-                'max_spatial': np.max(all_bus_errors) if len(all_bus_errors) > 0 else 0.0,
-                'mean_temporal': np.mean(temporal_uncertainty) if len(temporal_uncertainty) > 0 else 0.0
-            }
-        
-        # Also calculate combined error (all buses) for backward compatibility
-        errors_combined = np.sqrt(frac_errors_feat0**2 + frac_errors_feat1**2)  # [n_frac_samples, n_buses]
+        # Calculate combined error (VM + VA)
+        errors_combined = np.sqrt(frac_errors_vm**2 + frac_errors_va**2)  # [n_frac_samples, n_buses]
         spatial_uncertainty_combined = np.std(errors_combined, axis=0)  # [n_buses]
         temporal_uncertainty_combined = np.mean(errors_combined, axis=1)  # [n_frac_samples]
         
-        frac_data['combined'] = {
-            'spatial': spatial_uncertainty_combined,
-            'temporal': temporal_uncertainty_combined,
-            'mean_spatial': np.mean(spatial_uncertainty_combined),
-            'max_spatial': np.max(spatial_uncertainty_combined),
-            'mean_temporal': np.mean(temporal_uncertainty_combined)
+        frac_data = {
+            'combined': {
+                'spatial': spatial_uncertainty_combined,
+                'temporal': temporal_uncertainty_combined,
+                'mean_spatial': np.mean(spatial_uncertainty_combined),
+                'max_spatial': np.max(spatial_uncertainty_combined),
+                'mean_temporal': np.mean(temporal_uncertainty_combined)
+            }
         }
         
         # Store timesteps for this fraction if available
@@ -468,16 +398,15 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     Main function to generate all uncertainty visualizations.
     
     Args:
-        predictions: Model predictions [n_samples, n_buses, 2] - OPF unknowns
-        targets: True values [n_samples, n_buses, 2] - OPF unknowns
+        predictions: Model predictions [n_samples, n_buses, 10] - Full state
+        targets: True values [n_samples, n_buses, 10] - Full state
         renewable_fractions: Renewable fraction for each sample [n_samples]
         case_name: Test case name (e.g., "case33")
         output_dir: Directory to save outputs
         model_name: Optional model name for titles and filenames
         config: Optional config object for time-series mode detection
-        bus_types: Optional [n_samples, n_buses] bus type array for OPF mode
-        model_outputs: Optional [n_samples, n_buses, 4] - Full model outputs in heteroscedastic mode
-                      [var1_pred, var2_pred, log_sigma_var1, log_sigma_var2]
+        bus_types: Optional [n_samples, n_buses] bus type array (unused, kept for compatibility)
+        model_outputs: Optional [n_samples, n_buses, 10] - MC Dropout uncertainty (std dev)
         timesteps: Optional [n_samples] - actual timestep indices for temporal plotting
     
     Returns:
@@ -486,15 +415,12 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     # Calculate error statistics (what actually happened)
     error_statistics = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types, timesteps=timesteps)
     
-    # Calculate predicted uncertainties (what model thinks) - always heteroscedastic mode
+    # Calculate predicted uncertainties (what model thinks) - MC Dropout mode
     predicted_uncertainties = None
     if model_outputs is not None:
-        if model_outputs.shape[2] == 4:
-            min_sigma = getattr(config, 'HETEROSCEDASTIC_MIN_SIGMA', 0.01) if config else 0.01
-            max_sigma = getattr(config, 'HETEROSCEDASTIC_MAX_SIGMA', 10.0) if config else 10.0
+        if model_outputs.shape[2] == 10:
             predicted_uncertainties = calculate_predicted_uncertainty_metrics(
-                model_outputs, renewable_fractions, min_sigma=min_sigma, max_sigma=max_sigma,
-                timesteps=timesteps
+                model_outputs, renewable_fractions, timesteps=timesteps
             )
     
     # Use predicted uncertainties if available, otherwise fall back to error statistics

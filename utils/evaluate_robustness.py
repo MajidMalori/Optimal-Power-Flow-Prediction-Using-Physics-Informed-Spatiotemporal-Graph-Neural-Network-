@@ -47,8 +47,8 @@ def evaluate_model_robustness(model: torch.nn.Module, test_loader: torch.utils.d
     baseline_metrics = evaluate_model(model, test_loader, device, config, normalizer, is_sequential=False)
     
     baseline_mse = baseline_metrics.get('mse', float('inf'))
-    baseline_power_violation = baseline_metrics.get('power_violation', float('inf'))
-    baseline_voltage_violation = baseline_metrics.get('voltage_violation', float('inf'))
+    baseline_physics_loss = baseline_metrics.get('physics_loss', float('inf'))
+    baseline_safety_loss = baseline_metrics.get('safety_loss', float('inf'))
     
     # Step 2: Identify critical lines using ContingencyAnalyzer
     # Note: This requires loading the pandapower network
@@ -107,8 +107,8 @@ def evaluate_model_robustness(model: torch.nn.Module, test_loader: torch.utils.d
             contingency_results.append({
                 'line_idx': line_idx,
                 'mse': float('inf'),
-                'power_violation': float('inf'),
-                'voltage_violation': float('inf'),
+                'physics_loss': float('inf'),
+                'safety_loss': float('inf'),
                 'islanding': True,
                 'error': 'Islanding detected'
             })
@@ -189,8 +189,8 @@ def evaluate_model_robustness(model: torch.nn.Module, test_loader: torch.utils.d
         contingency_results.append({
             'line_idx': line_idx,
             'mse': contingency_metrics.get('mse', float('inf')),
-            'power_violation': contingency_metrics.get('power_violation', float('inf')),
-            'voltage_violation': contingency_metrics.get('voltage_violation', float('inf')),
+            'physics_loss': contingency_metrics.get('physics_loss', float('inf')),
+            'safety_loss': contingency_metrics.get('safety_loss', float('inf')),
             'islanding': False
         })
     
@@ -222,20 +222,20 @@ def plot_contingency_comparison(baseline_metrics: Dict[str, float],
     
     # Extract metrics
     baseline_mse = baseline_metrics.get('mse', 0.0)
-    baseline_power_vio = baseline_metrics.get('power_violation', 0.0)
-    baseline_voltage_vio = baseline_metrics.get('voltage_violation', 0.0)
+    baseline_phys = baseline_metrics.get('physics_loss', 0.0)
+    baseline_safe = baseline_metrics.get('safety_loss', 0.0)
     
     # Filter out islanding cases for plotting (they have inf values)
     plot_results = [r for r in contingency_results if not r.get('islanding', False)]
     islanding_results = [r for r in contingency_results if r.get('islanding', False)]
     
     contingency_mse = [r['mse'] for r in plot_results]
-    contingency_power_vio = [r['power_violation'] for r in plot_results]
-    contingency_voltage_vio = [r['voltage_violation'] for r in plot_results]
+    contingency_phys = [r['physics_loss'] for r in plot_results]
+    contingency_safe = [r['safety_loss'] for r in plot_results]
     line_indices = [r['line_idx'] for r in plot_results]
     islanding_line_indices = [r['line_idx'] for r in islanding_results]
     
-    # Create 1x3 subplot: MSE, Power Violation, Voltage Violation
+    # Create 1x3 subplot: MSE, Physics Loss, Safety Loss
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     title = f'Robustness Analysis: Baseline vs N-1 Contingencies - {case_name.upper()}'
     if model_name:
@@ -265,30 +265,30 @@ def plot_contingency_comparison(baseline_metrics: Dict[str, float],
                 transform=ax.transAxes, fontsize=9, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.5))
     
-    # Plot 2: Power Violation
+    # Plot 2: Physics Loss
     ax = axes[1]
-    power_vio_values = [baseline_power_vio] + contingency_power_vio
+    phys_values = [baseline_phys] + contingency_phys
     colors = ['green'] + ['red'] * len(plot_results)
-    bars = ax.bar(x_pos, power_vio_values, width, color=colors)
-    ax.set_ylabel('Power Violation (p.u.)', fontsize=12)
-    ax.set_title('Power Balance Violation', fontweight='bold')
+    bars = ax.bar(x_pos, phys_values, width, color=colors)
+    ax.set_ylabel('Physics Loss', fontsize=12)
+    ax.set_title('Physics Balance Loss', fontweight='bold')
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=45, ha='right')
     ax.grid(True, alpha=0.3, axis='y')
-    if max(power_vio_values) > 0:
+    if max(phys_values) > 0:
         ax.set_yscale('log')
     
-    # Plot 3: Voltage Violation
+    # Plot 3: Safety Loss
     ax = axes[2]
-    voltage_vio_values = [baseline_voltage_vio] + contingency_voltage_vio
+    safe_values = [baseline_safe] + contingency_safe
     colors = ['green'] + ['purple'] * len(plot_results)
-    bars = ax.bar(x_pos, voltage_vio_values, width, color=colors)
-    ax.set_ylabel('Voltage Violation (p.u.)', fontsize=12)
-    ax.set_title('Voltage Limit Violation', fontweight='bold')
+    bars = ax.bar(x_pos, safe_values, width, color=colors)
+    ax.set_ylabel('Safety Loss', fontsize=12)
+    ax.set_title('Voltage Limit Violation Loss', fontweight='bold')
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, rotation=45, ha='right')
     ax.grid(True, alpha=0.3, axis='y')
-    if max(voltage_vio_values) > 0:
+    if max(safe_values) > 0:
         ax.set_yscale('log')
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])

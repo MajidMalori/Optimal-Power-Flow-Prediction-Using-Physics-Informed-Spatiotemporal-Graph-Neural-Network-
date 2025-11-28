@@ -46,12 +46,11 @@ class BaseAdaptiveGCN(nn.Module):
         """
         Compute adaptive adjacency matrix combining physical and learned graphs.
         
-        PERFORMANCE NOTE: static_adj is now PRE-NORMALIZED from the data loader.
+        NOTE: static_adj is RAW (from data loader) if data_loader disabled pre-normalization.
         The combined (static + learned) adjacency needs normalization before use in GCN layers.
         
         Args:
             static_adj: Static physical adjacency matrix [batch_size, num_buses, num_buses]
-                       NOTE: This is now PRE-NORMALIZED (computed once in data loader)
             batch_size: Batch size
             normalize: Whether to normalize the combined adaptive adjacency (default: True)
             
@@ -63,13 +62,14 @@ class BaseAdaptiveGCN(nn.Module):
         learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
         
         # Adjacency matrix is guaranteed to be 3D [batch_size, num_buses, num_buses] from data loader
-        # NOTE: static_adj is PRE-NORMALIZED (computed once in data loader for performance)
         physical_adj_batch = static_adj
         
         # Create learned adjacency batch: [batch_size, num_buses, num_buses]
         learned_adj_batch = learned_adj.unsqueeze(0).repeat(batch_size, 1, 1)
         
         # Combine static and learned adjacency matrices
+        # If static_adj is raw, mixing it with learned (softmax) is safe.
+        # If static_adj was pre-normalized, mixing might be odd, but we disabled that.
         A_adp_batch = self.phi * physical_adj_batch + (1 - self.phi) * learned_adj_batch
         
         # Normalize the combined adaptive adjacency (required for GCN layers)

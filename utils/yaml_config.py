@@ -204,7 +204,6 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'training_weight_decay': 'WEIGHT_DECAY',
         
         # Physics configuration
-        'physics_warmup_epochs': 'PHYSICS_WARMUP_EPOCHS',
         'physics_voltage_min': 'V_MIN',
         'physics_voltage_max': 'V_MAX',
         'physics_apparent_power_max': 'S_MAX',
@@ -225,18 +224,6 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'contingency_enable': 'ENABLE_CONTINGENCY_ANALYSIS',
         'contingency_top_k': 'CONTINGENCY_TOP_K',
         'contingency_method': 'CONTINGENCY_METHOD',
-        
-        # Heteroscedastic configuration
-        'heteroscedastic_softplus_beta': 'HETEROSCEDASTIC_SOFTPLUS_BETA',
-        'heteroscedastic_use_clamping': 'HETEROSCEDASTIC_USE_CLAMPING',
-        'heteroscedastic_weight_violations': 'HETEROSCEDASTIC_WEIGHT_VIOLATIONS',
-        
-        # Empirical Bayes configuration
-        'empirical_bayes_enable': 'USE_EMPIRICAL_BAYES',
-        'empirical_bayes_burn_in_epochs': 'EB_BURN_IN_EPOCHS',
-        'empirical_bayes_update_frequency': 'EB_UPDATE_FREQUENCY',
-        'empirical_bayes_hyperparameter_steps': 'EB_HYPERPARAMETER_STEPS',
-        'empirical_bayes_hyperparameter_lr': 'EB_HYPERPARAMETER_LR',
     }
     
     # Flatten YAML config for easier processing
@@ -428,7 +415,6 @@ def save_config_to_yaml(config_obj: Any, yaml_path: str = 'config_generated.yaml
     
     # Physics configuration
     config_dict['physics'] = {
-        'warmup_epochs': getattr(config_obj, 'PHYSICS_WARMUP_EPOCHS', 10),
         'voltage': {
             'min': getattr(config_obj, 'V_MIN', 0.90),
             'max': getattr(config_obj, 'V_MAX', 1.10),
@@ -461,22 +447,6 @@ def save_config_to_yaml(config_obj: Any, yaml_path: str = 'config_generated.yaml
         'enable': getattr(config_obj, 'ENABLE_CONTINGENCY_ANALYSIS', True),
         'top_k': getattr(config_obj, 'CONTINGENCY_TOP_K', 10),
         'method': getattr(config_obj, 'CONTINGENCY_METHOD', 'power_flow'),
-    }
-    
-    # Heteroscedastic configuration
-    config_dict['heteroscedastic'] = {
-        'softplus_beta': getattr(config_obj, 'HETEROSCEDASTIC_SOFTPLUS_BETA', 1.0),
-        'use_clamping': getattr(config_obj, 'HETEROSCEDASTIC_USE_CLAMPING', False),
-        'weight_violations': getattr(config_obj, 'HETEROSCEDASTIC_WEIGHT_VIOLATIONS', True),
-    }
-    
-    # Empirical Bayes configuration
-    config_dict['empirical_bayes'] = {
-        'enable': getattr(config_obj, 'USE_EMPIRICAL_BAYES', True),
-        'burn_in_epochs': getattr(config_obj, 'EB_BURN_IN_EPOCHS', 2),
-        'update_frequency': getattr(config_obj, 'EB_UPDATE_FREQUENCY', 5),
-        'hyperparameter_steps': getattr(config_obj, 'EB_HYPERPARAMETER_STEPS', 20),
-        'hyperparameter_lr': getattr(config_obj, 'EB_HYPERPARAMETER_LR', 0.001),
     }
     
     # Write to YAML file

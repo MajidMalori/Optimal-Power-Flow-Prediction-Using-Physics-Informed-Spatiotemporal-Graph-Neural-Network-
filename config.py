@@ -1,10 +1,161 @@
 import os
 import torch
+import yaml
+import csv
+import json
 from datetime import datetime
+from typing import Dict, Any, Optional
+from pathlib import Path
 
 # FIXED: Args class has been REMOVED.
 # All experimental settings are now part of Config class and loaded from YAML.
 # See Config class below for experimental settings (test_config, bus_systems, etc.)
+
+# ============================================================================
+# YAML Configuration Loader (Merged from utils/yaml_config.py)
+# ============================================================================
+
+def _load_yaml_file(yaml_path: str) -> Dict[str, Any]:
+    """Load a YAML configuration file."""
+    yaml_path = Path(yaml_path)
+    
+    if not yaml_path.is_absolute():
+        current_dir = Path(__file__).parent
+        yaml_path = current_dir / yaml_path
+    
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"YAML configuration file not found: {yaml_path}")
+    
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        config_dict = yaml.safe_load(f)
+    
+    return config_dict if config_dict is not None else {}
+
+
+def _convert_numeric_string(value: Any) -> Any:
+    """Convert string representations of numbers to proper numeric types."""
+    if not isinstance(value, str):
+        return value
+    
+    try:
+        float_val = float(value)
+        if '.' not in value and 'e' not in value.lower():
+            try:
+                return int(value)
+            except ValueError:
+                pass
+        return float_val
+    except (ValueError, OverflowError):
+        return value
+
+
+def _flatten_dict(nested_dict: Dict[str, Any], parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
+    """Flatten a nested dictionary."""
+    items = []
+    for key, value in nested_dict.items():
+        new_key = f"{parent_key}{sep}{key}" if parent_key else key
+        if isinstance(value, dict):
+            items.extend(_flatten_dict(value, new_key, sep=sep).items())
+        else:
+            items.append((new_key, value))
+    return dict(items)
+
+
+def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = False) -> None:
+    """Merge YAML configuration into an existing Config object."""
+    yaml_config = _load_yaml_file(yaml_path)
+    
+    # Mapping from YAML keys to Config attribute names
+    attribute_mapping = {
+        'system_device': 'DEVICE',
+        'system_num_buses': 'NUM_BUSES',
+        'system_seed': 'SEED',
+        'system_num_workers': 'NUM_WORKERS',
+        'system_case_name': 'CASE_NAME',
+        'training_batch_size': 'BATCH_SIZE',
+        'training_learning_rate': 'LEARNING_RATE',
+        'training_max_grad_norm': 'MAX_GRAD_NORM',
+        'training_num_epochs': 'NUM_EPOCHS',
+        'training_early_stopping_patience': 'EARLY_STOPPING_PATIENCE',
+        'training_use_learning_rate_scheduler': 'USE_LEARNING_RATE_SCHEDULER',
+        'training_cosine_annealing_lr_t_max': 'COSINEANNEALINGLR_T_MAX',
+        'training_cosine_annealing_lr_eta_min': 'COSINEANNEALINGLR_ETA_MIN',
+        'training_weight_decay': 'WEIGHT_DECAY',
+        'physics_voltage_min': 'V_MIN',
+        'physics_voltage_max': 'V_MAX',
+        'physics_apparent_power_max': 'S_MAX',
+        'physics_split_mode': 'DATA_SPLIT_MODE',
+        'physics_splits_train': 'TRAIN_SPLIT',
+        'physics_splits_val': 'VAL_SPLIT',
+        'data_hours_per_day': 'HOURS_PER_DAY',
+        'data_sequence_length': 'SEQUENCE_LENGTH',
+        'moopf_weights_loss': 'MOOPF_WEIGHT_LOSS',
+        'moopf_weights_voltage_deviation': 'MOOPF_WEIGHT_VDEV',
+        'moopf_weights_carbon': 'MOOPF_WEIGHT_CARBON',
+        'contingency_enable': 'ENABLE_CONTINGENCY_ANALYSIS',
+        'contingency_top_k': 'CONTINGENCY_TOP_K',
+        'contingency_method': 'CONTINGENCY_METHOD',
+    }
+    
+    flat_yaml = _flatten_dict(yaml_config)
+    
+    for yaml_key, value in flat_yaml.items():
+        if value is None:
+            continue
+        
+        value = _convert_numeric_string(value)
+        config_attr = attribute_mapping.get(yaml_key, yaml_key.upper().replace('-', '_'))
+        
+        if yaml_key == 'system_device' and value == 'cuda':
+            if not torch.cuda.is_available():
+                value = 'cpu'
+        
+        if hasattr(config_obj, config_attr):
+            setattr(config_obj, config_attr, value)
+        elif hasattr(config_obj.__class__, config_attr):
+            setattr(config_obj.__class__, config_attr, value)
+        else:
+            setattr(config_obj, config_attr, value)
+    
+    # Handle model capacity settings
+    for bus_size in [33, 57, 118]:
+        key = f'model_capacity_bus_{bus_size}'
+        if key in flat_yaml:
+            setattr(Config, f'CAPACITY_{bus_size}_BUS', flat_yaml[key])
+    
+    # Handle experimental arguments
+    experimental_mappings = {
+        'experimental_test_config': 'test_config',
+        'experimental_bus_systems': 'bus_systems',
+        'experimental_models_to_train': 'models_to_train',
+        'experimental_data_mode': 'data_mode',
+        'experimental_train_timesteps': 'train_timesteps',
+        'experimental_test_timesteps': 'test_timesteps',
+        'experimental_plot_data_info': 'plot_data_info',
+        'experimental_force_cpu': 'force_cpu',
+        'experimental_parallel_data_loading': 'parallel_data_loading',
+        'experimental_data_workers': 'data_workers',
+        'experimental_save_results': 'save_results',
+        'experimental_clear_results': 'clear_results',
+    }
+    
+    for yaml_key, config_attr in experimental_mappings.items():
+        if yaml_key in flat_yaml and flat_yaml[yaml_key] is not None:
+            setattr(Config, config_attr, flat_yaml[yaml_key])
+    
+    # Handle system-specific limits
+    if 'system_limits' in yaml_config:
+        case_name = getattr(config_obj, 'CASE_NAME', None)
+        if case_name:
+            case_name_lower = case_name.lower()
+            system_limits = yaml_config['system_limits']
+            
+            if case_name_lower in system_limits:
+                limits = system_limits[case_name_lower]
+                if 'v_min' in limits:
+                    setattr(config_obj, 'V_MIN', limits['v_min'])
+                if 'v_max' in limits:
+                    setattr(config_obj, 'V_MAX', limits['v_max'])
 
 class FeatureIndices:
     """
@@ -35,32 +186,40 @@ class FeatureIndices:
 
 class TargetIndices:
     """
-    Target indices for the 2-dimensional OPF unknown vector.
-    
-    In OPF mode, targets are bus-type dependent:
-    - PQ bus (0): [V, θ] - both unknown
-    - PV bus (1): [Q, θ] - V is known, Q and θ are predicted
-    - Slack bus (2): [P, Q] - V and θ are known, P and Q are predicted
+    Target indices for the 10-dimensional clean state vector.
+    In Full State Reconstruction, Targets are identical to Features (but clean).
     """
-    VAR1 = 0  # First unknown (bus-type dependent)
-    VAR2 = 1  # Second unknown (bus-type dependent)
+    P_LOAD = 0      
+    Q_LOAD = 1      
+    P_EXT_GRID = 2  
+    Q_EXT_GRID = 3  
+    P_CONV = 4      
+    Q_CONV = 5      
+    P_REN = 6       
+    Q_REN = 7       
+    VM = 8          
+    VA = 9          
     
-    NUM_TARGETS = 2
+    NUM_TARGETS = 10
 
 
 class ModelOutputIndices:
     """
-    Model output indices for the 4-dimensional natural parameter vector.
-    
-    Heteroscedastic uncertainty with natural parametrization (Immer et al., NeurIPS 2023):
-    [η1_var1, η1_var2, f2_var1, f2_var2]
+    Model output indices for the 10-dimensional reconstructed state.
+    Direct regression of the clean state.
     """
-    ETA1_VAR1 = 0  # Natural parameter η1 for variable 1
-    ETA1_VAR2 = 1  # Natural parameter η1 for variable 2
-    F2_VAR1 = 2    # f2 for variable 1 (used to compute η2 via softplus)
-    F2_VAR2 = 3    # f2 for variable 2 (used to compute η2 via softplus)
+    P_LOAD = 0      
+    Q_LOAD = 1      
+    P_EXT_GRID = 2  
+    Q_EXT_GRID = 3  
+    P_CONV = 4      
+    Q_CONV = 5      
+    P_REN = 6       
+    Q_REN = 7       
+    VM = 8          
+    VA = 9          
     
-    NUM_OUTPUTS = 4
+    NUM_OUTPUTS = 10
 
 
 class Config:
@@ -130,22 +289,21 @@ class Config:
         """
         Base template for all model configurations.
         
-        OPF APPROACH:
-        - INPUT_DIM: Number of input features (measurements from sensors)
-        - OUTPUT_DIM: Number of output features (OPF unknowns: 2 per bus, bus-type dependent)
-        - FEATURE_DIM: Legacy name for OUTPUT_DIM (kept for backward compatibility)
+        FULL STATE RECONSTRUCTION APPROACH:
+        - INPUT_DIM: Number of input features (noisy measurements)
+        - OUTPUT_DIM: Number of output features (clean state)
         """
-        # Input features (measurements): [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm_partial, va_partial]
+        # Input features (measurements): [p_load, q_load, p_ext, q_ext, p_conv, q_conv, p_ren, q_ren, vm, va]
         INPUT_DIM = 10
         
-        # Output features (OPF unknowns): 2 per bus (PQ: V,θ | PV: Q,θ | Slack: P,Q)
-        OUTPUT_DIM = 2
+        # Output features (Clean State): Same 10 features
+        OUTPUT_DIM = 10
         
         # Legacy field (kept for backward compatibility with older model code)
         FEATURE_DIM = OUTPUT_DIM  # This refers to the OUTPUT dimension
         
-        DROPOUT = 0.2  # Dropout rate (0.0 = disabled, 0.1-0.3 = typical, 0.5+ = aggressive)
-        # Higher dropout = stronger regularization = less overfitting but may underfit
+        DROPOUT = 0.1  # Dropout rate (0.1 Mandatory for MC Dropout Uncertainty)
+        
         HIDDEN_DIM_RANGE = (16, 128)  # Default fallback
         NUM_GC_LAYERS_RANGE = (1, 5)
         
@@ -414,7 +572,6 @@ class Config:
         """
         # YAML IS REQUIRED - Fail fast if missing (no fallback)
         if load_yaml:
-            from utils.yaml_config import merge_yaml_with_config
             yaml_path = yaml_config_path or 'config.yaml'
             yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(self.ROOT_DIR, yaml_path)
             
@@ -426,7 +583,7 @@ class Config:
                 )
             
             try:
-                merge_yaml_with_config(yaml_path, self, verbose=False)
+                _merge_yaml_with_config(yaml_path, self, verbose=False)
                 # print(f"[Config] Loaded configuration from {yaml_path}")
             except Exception as e:
                 raise RuntimeError(
@@ -511,10 +668,7 @@ class Config:
         from models.adaptive_gcn import adaptiveGCN
         from models.gcn import GCN
         from models.adaptive_pigcn import AdaptivePIGCN
-        from models.pigclstm import PIGCLSTM
-        from models.pigcgru import PIGCGRU
-        from models.ResnetPIGCGRU import ResnetPIGCGRU
-        from models.ResnetPIGCLSTM import ResnetPIGCLSTM
+        from models.pigc_rnn import PIGCLSTM, PIGCGRU, ResnetPIGCGRU, ResnetPIGCLSTM
         
         return {
             'adaptiveGCN': adaptiveGCN, 
@@ -652,10 +806,10 @@ class Config:
             'timestamp': self._CURRENT_RUN_TIMESTAMP,
             'config': {
                 'device': self.DEVICE,
-                'num_buses': self.NUM_BUSES,
-                'learning_rate': self.LEARNING_RATE,
-                'num_epochs': self.NUM_EPOCHS,
-                'batch_size': self.BATCH_SIZE,
+                'num_buses': getattr(self, 'NUM_BUSES', 'auto'),
+                'learning_rate': getattr(self, 'LEARNING_RATE', 'auto'),
+                'num_epochs': getattr(self, 'NUM_EPOCHS', 'auto'),
+                'batch_size': getattr(self, 'BATCH_SIZE', 'auto'),
                 's_base_mva': 'system_specific',  # Determined dynamically based on case type
                 'loss_weighting': 'learnable_uncertainty',  # Kendall et al., CVPR 2018
                 'note': 'Loss weights (σ_data, σ_power, σ_voltage) learned automatically during training'

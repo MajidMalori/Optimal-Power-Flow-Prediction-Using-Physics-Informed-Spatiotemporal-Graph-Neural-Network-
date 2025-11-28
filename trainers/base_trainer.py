@@ -38,13 +38,10 @@ class BaseTrainer(ABC):
         # Add history tracking
         self.history = {
             'train_total_loss': [], 'train_mse': [], 
-            'train_mse_var1': [], 'train_mse_var2': [],
-            'train_power_violation': [], 'train_voltage_violation': [],
+            'train_physics_loss': [], 'train_safety_loss': [],
             'val_total_loss': [], 'val_mse': [],
-            'val_mse_var1': [], 'val_mse_var2': [],
-            'val_power_violation': [], 'val_voltage_violation': [],
-            'sigma_data': [], 'sigma_power': [], 'sigma_voltage': [],
-            'effective_lambda_p': [], 'effective_lambda_v': []
+            'val_physics_loss': [], 'val_safety_loss': [],
+            'train_sigmas': []
         }
 
     @abstractmethod
@@ -146,24 +143,7 @@ class BaseTrainer(ABC):
             self.scheduler = None
             self.scheduler_type = None
         
-        # Initialize Empirical Bayes optimizer if enabled (always using heteroscedastic mode)
-        use_eb = getattr(self.config, 'USE_EMPIRICAL_BAYES', False)
-        
-        if use_eb:
-            from utils.empirical_bayes import EmpiricalBayesOptimizer
-            self.eb_optimizer = EmpiricalBayesOptimizer(
-                model=self.model,
-                config=self.config,
-                device=self.device,
-                burn_in_epochs=getattr(self.config, 'EB_BURN_IN_EPOCHS', 100),
-                update_frequency=getattr(self.config, 'EB_UPDATE_FREQUENCY', 50),
-                hyperparameter_steps=getattr(self.config, 'EB_HYPERPARAMETER_STEPS', 50),
-                hyperparameter_lr=getattr(self.config, 'EB_HYPERPARAMETER_LR', 0.01)
-            )
-        else:
-            self.eb_optimizer = None
-        
-        # Print scheduler and EB info in one concise line
+        # Print scheduler info
         scheduler_info = ""
         if hasattr(self, 'scheduler') and self.scheduler is not None and hasattr(self, 'scheduler_type'):
             if self.scheduler_type == 'CosineAnnealingLR':
@@ -175,12 +155,8 @@ class BaseTrainer(ABC):
         else:
             scheduler_info = "No scheduler"
         
-        eb_info = ""
-        if use_eb and self.eb_optimizer is not None:
-            eb_info = f" | EB(burn={self.eb_optimizer.burn_in_epochs}, freq={self.eb_optimizer.update_frequency})"
-        
         # Log config info to file (not terminal - cleaner training output)
-        _log(f"[Config] {scheduler_info}{eb_info}")
+        _log(f"[Config] {scheduler_info}")
         
         for epoch in range(1, self.config.NUM_EPOCHS + 1):
             # Check for shutdown flag (set by signal handler)
@@ -189,8 +165,8 @@ class BaseTrainer(ABC):
                 if get_shutdown():
                     _log("Shutdown signal received - finishing current epoch and exiting gracefully")
                     break
-            except:
-                pass  # If check fails, continue training
+            except (ImportError, AttributeError):
+                pass  # If shutdown module not available, continue training
             
             self.current_epoch = epoch
             
@@ -198,57 +174,25 @@ class BaseTrainer(ABC):
 
             self.history['train_total_loss'].append(train_metrics['total_loss'])
             self.history['train_mse'].append(train_metrics['mse'])
-            self.history['train_mse_var1'].append(train_metrics.get('mse_var1', 0.0))
-            self.history['train_mse_var2'].append(train_metrics.get('mse_var2', 0.0))
-            self.history['train_power_violation'].append(train_metrics['power_violation'])
-            self.history['train_voltage_violation'].append(train_metrics['voltage_violation'])
-            
-            # Update Empirical Bayes hyperparameters if enabled
-            if self.eb_optimizer is not None:
-                # Pass log function to EB optimizer
-                self.eb_optimizer.log_file = self.log_file
-                self.eb_optimizer.update_hyperparameters(train_loader, self.criterion, epoch)
+            self.history['train_physics_loss'].append(train_metrics.get('physics_loss', 0.0))
+            self.history['train_safety_loss'].append(train_metrics.get('safety_loss', 0.0))
+            if 'sigmas' in train_metrics:
+                self.history['train_sigmas'].append(train_metrics['sigmas'])
             
             val_metrics = self._val_epoch(val_loader)
 
             self.history['val_total_loss'].append(val_metrics['total_loss'])
             self.history['val_mse'].append(val_metrics['mse'])
-            self.history['val_mse_var1'].append(val_metrics.get('mse_var1', 0.0))
-            self.history['val_mse_var2'].append(val_metrics.get('mse_var2', 0.0))
-            self.history['val_power_violation'].append(val_metrics['power_violation'])
-            self.history['val_voltage_violation'].append(val_metrics['voltage_violation'])
+            self.history['val_physics_loss'].append(val_metrics.get('physics_loss', 0.0))
+            self.history['val_safety_loss'].append(val_metrics.get('safety_loss', 0.0))
             
-            # Heteroscedastic: Data loss uses natural parametrization (per-sample uncertainty)
-            # Physics losses use Kendall-style learnable weights (global parameters)
-            if hasattr(self, 'criterion'):
-                loss_type_display = 'Natural + Kendall'  # Natural Parametrization (data) + Kendall (physics)
-                
-                # Data loss: per-sample uncertainty (not a single global parameter)
-                sigma_data = 1.0  # Placeholder (heteroscedastic: per-sample, varies with input)
-                
-                # Only log physics loss sigmas if this is a physics-informed model
-                if self.criterion.is_physics_informed:
-                    # Physics losses: Kendall-style learnable weights
-                    sigma_power = torch.exp(self.criterion.log_sigma_power).item()
-                    sigma_voltage = torch.exp(self.criterion.log_sigma_voltage).item()
-                    
-                    effective_lambda_p = 1.0 / (2.0 * sigma_power ** 2)
-                    effective_lambda_v = 1.0 / (2.0 * sigma_voltage ** 2)
-                    
-                    self.history['sigma_data'].append(sigma_data)
-                    self.history['sigma_power'].append(sigma_power)
-                    self.history['sigma_voltage'].append(sigma_voltage)
-                    self.history['effective_lambda_p'].append(effective_lambda_p)
-                    self.history['effective_lambda_v'].append(effective_lambda_v)
-                else:
-                    # Non-physics model: no physics losses, so no physics sigmas to display
-                    self.history['sigma_data'].append(sigma_data)
-                    self.history['sigma_power'].append(0.0)  # Not applicable
-                    self.history['sigma_voltage'].append(0.0)  # Not applicable
-                    self.history['effective_lambda_p'].append(0.0)  # Not applicable
-                    self.history['effective_lambda_v'].append(0.0)  # Not applicable
+            # Forensic: Log model weights periodically
+            if hasattr(self, 'forensic_logger') and self.forensic_logger and self.forensic_logger.enabled:
+                log_weights_interval = getattr(self.config, 'DEBUG_LOG_WEIGHTS_EVERY_N_EPOCHS', 10)
+                if epoch % log_weights_interval == 0:
+                    self.forensic_logger.log_model_weights(self.model, epoch)
 
-            val_loss = val_metrics.get('loss', float('inf'))
+            val_loss = val_metrics.get('total_loss', float('inf'))
             
             # Step CosineAnnealingLR scheduler (per-epoch)
             if self.scheduler is not None:
@@ -259,23 +203,31 @@ class BaseTrainer(ABC):
             
             # Log complete epoch summary to file (one line per epoch)
             if hasattr(self, 'criterion') and self.criterion.is_physics_informed:
-                # Physics-informed model: include MSE, physics violations, sigmas, lambdas, and LR
+                # Physics-informed model: include MSE, physics, safety, sigmas, and LR
                 train_mse = train_metrics['mse']
-                train_p_vio = train_metrics['power_violation']
-                train_v_vio = train_metrics['voltage_violation']
+                train_phys = train_metrics.get('physics_loss', 0.0)
+                train_safe = train_metrics.get('safety_loss', 0.0)
                 val_mse = val_metrics['mse']
-                val_p_vio = val_metrics['power_violation']
-                val_v_vio = val_metrics['voltage_violation']
-                sigma_power = torch.exp(self.criterion.log_sigma_power).item()
-                sigma_voltage = torch.exp(self.criterion.log_sigma_voltage).item()
-                effective_lambda_p = 1.0 / (2.0 * sigma_power ** 2)
-                effective_lambda_v = 1.0 / (2.0 * sigma_voltage ** 2)
-                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, P-Vio={train_p_vio:.6f}, V-Vio={train_v_vio:.6f} | Val: MSE={val_mse:.6f}, P-Vio={val_p_vio:.6f}, V-Vio={val_v_vio:.6f} | σ(p,v)=({sigma_power:.4f},{sigma_voltage:.4f}), λ(p,v)=({effective_lambda_p:.4f},{effective_lambda_v:.4f}) | LR={current_lr:.6f}")
+                val_phys = val_metrics.get('physics_loss', 0.0)
+                val_safe = val_metrics.get('safety_loss', 0.0)
+                
+                # Extract sigmas from train_metrics if available
+                if 'sigmas' in train_metrics:
+                    sigmas = train_metrics['sigmas']
+                    sigma_str = f"σ=[{sigmas[0]:.2f},{sigmas[1]:.2f},{sigmas[2]:.2f}]"
+                else:
+                    sigma_str = "σ=N/A"
+                
+                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f} | {sigma_str} | LR={current_lr:.6f}")
             else:
                 # Non-physics model: only MSE and LR
                 train_mse = train_metrics['mse']
                 val_mse = val_metrics['mse']
                 _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f} | Val: MSE={val_mse:.6f} | LR={current_lr:.6f}")
+            
+            # Forensic: Log epoch summary
+            if hasattr(self, 'forensic_logger') and self.forensic_logger and self.forensic_logger.enabled:
+                self.forensic_logger.log_epoch_summary(epoch, train_metrics, val_metrics)
             
             # Early stopping logic: Track best model on ANY improvement (no threshold)
             # Deep learning progress is often incremental - small improvements matter

@@ -18,176 +18,88 @@ system:
   test_cases: ["case33", "case57", "case118"]  # Default cases to run
   seed: 42
   num_workers: 2  # Data loading workers (auto-configured if 'auto')
-  case_name: null  # Set dynamically based on bus system (case33, case57, case118)
 
-# --- System Limits (Voltage) ---
+# --- System-Specific Voltage Limits ---
+# These are loaded based on CASE_NAME during runtime
 system_limits:
   case33:
     v_min: 0.90
     v_max: 1.10
   case57:
-    v_min: 0.70  # Wide limits for transmission
-    v_max: 1.20
+    v_min: 0.90
+    v_max: 1.10
   case118:
-    v_min: 0.85  # Standard transmission limits
-    v_max: 1.15
+    v_min: 0.90
+    v_max: 1.10
 
-# --- Training Parameters ---
+# --- Training Configuration ---
 training:
-  batch_size: 64  # Default, will be overridden by adaptive function
-  learning_rate: 0.0005  # Best from LR testing: 0.0005 works well
-  max_grad_norm: 1.0  # Gradient clipping to prevent explosion
-  num_epochs: 10  # Set to 200 for full training
-  early_stopping_patience: 20  # Reasonable patience to prevent overfitting
-  gradient_accumulation_steps: 1  # Gradient accumulation: 1=disabled, >1=simulate larger batch size
-  
-  # Learning Rate Scheduler (Golden Configuration: CosineAnnealingLR only)
+  batch_size: 64
+  learning_rate: 0.0005
+  max_grad_norm: 1.0  # Gradient clipping
+  num_epochs: 50
+  early_stopping_patience: 10
   use_learning_rate_scheduler: true
   cosine_annealing_lr:
-    t_max: null  # None: Use NUM_EPOCHS (one full cosine cycle)
-    eta_min: 1e-6  # Minimum learning rate
-  
-  # Weight Decay (Golden Configuration: AdamW with weight_decay=0.0)
-  weight_decay: 0.0  # Rely on Empirical Bayes for regularization
+    t_max: null  # Auto-set to num_epochs if null
+    eta_min: 0.000001
+  weight_decay: 0.0
 
-# --- Physics Loss Configuration ---
+# --- Physics Configuration ---
 physics:
-  split_mode: "blocked_timeseries"  # Options: "blocked_timeseries" (recommended), "chronological"
-  # blocked_timeseries: Groups by renewable_fraction, then splits chronologically
-  #   Ensures all fractions appear in train/val/test while maintaining temporal order
-  # chronological: Simple chronological split (may miss some renewable fractions)
-  
+  voltage:
+    min: 0.90  # Default, overridden by system_limits
+    max: 1.10  # Default, overridden by system_limits
+  apparent_power_max: 1.2  # p.u.
+  split_mode: "blocked_timeseries"  # Data split strategy
   splits:
     train: 0.6
     val: 0.2
-    test: 0.2  # Automatically calculated: 1.0 - train - val
-  
-  # Time-Series Configuration (set dynamically from Args)
-  hours_per_day: 24
-  sequence_length: 5  # Sequence length for LSTM/GRU models (past N hours)
-  
-  # Data Mode Configuration (set dynamically from Args)
-  # data_mode: "train" or "test"
-  # train_timesteps: 12000  # Set in Args class
-  # test_timesteps: 960  # Set in Args class
+    # test: 0.2 (implicit)
 
-# --- Multi-Objective Optimization (MOOPF) Weights ---
+# --- Data Configuration ---
+data:
+  hours_per_day: 24
+  sequence_length: 5  # For RNN models
+
+# --- Model Capacity (Hidden Dimensions) ---
+model_capacity:
+  bus_33: 64
+  bus_57: 128
+  bus_118: 256
+
+# --- MOOPF (Multi-Objective Optimal Power Flow) Weights ---
 moopf:
   weights:
-    loss: 0.333333  # 1/3 - Power loss weight
-    voltage_deviation: 0.333333  # 1/3 - Voltage deviation weight
-    carbon: 0.333333  # 1/3 - Carbon emissions weight
-  # Weights are normalized to sum to 1.0
+    loss: 0.33333333
+    voltage_deviation: 0.33333333
+    carbon: 0.33333333
 
-# --- Contingency Analysis Configuration ---
+# --- Contingency Analysis ---
 contingency:
-  enable: true  # Enable targeted N-1 contingency analysis
-  top_k: 10  # Number of critical lines to test
-  method: "power_flow"  # Options: "power_flow", "centrality", "historical"
+  enable: true
+  top_k: 10  # Number of worst-case contingencies to analyze
+  method: "power_flow"  # Method for contingency ranking
 
-# --- Heteroscedastic Loss Configuration ---
-heteroscedastic:
-  # Natural Parametrization (Immer et al., NeurIPS 2023)
-  # Natural parameters: η1 = μ/σ², η2 = -1/(2σ²) < 0
-  # Model outputs: [η1_var1, η1_var2, f2_var1, f2_var2] where η2 = -g+(f2)
-  
-  softplus_beta: 1.0  # Beta parameter for softplus function
-  use_clamping: false  # Set to False to match paper exactly (no clamping)
-  weight_violations: true  # Weight violations using predicted uncertainties
-
-# --- Empirical Bayes Configuration ---
-empirical_bayes:
-  enable: True  # Enable Empirical Bayes regularization
-  burn_in_epochs: 5  # Let model stabilize before starting EB optimization
-  update_frequency: 20  # Update hyperparameters every N epochs (reduces noise)
-  hyperparameter_steps: 20  # Number of gradient steps for δ optimization
-  hyperparameter_lr: 0.001  # Learning rate for δ optimization (conservative, stable)
-
-# --- Model Capacity Configuration ---
-model_capacity:
-  # Control model size per bus system
-  # Options: "normal" (conservative), "medium" (balanced), "large" (maximum)
-  bus_33: "normal"   # 33-bus: H:32-64, GC:1-4
-  bus_57: "normal"   # 57-bus: H:32-64, GC:1-4
-  bus_118: "normal"  # 118-bus: H:64-128, GC:2-4 (Reduced to prevent oversmoothing)
-
-# --- Model-Specific Configurations ---
-models:
-  # Base configuration (applies to all models)
-  base:
-    input_dim: 10  # Number of input features (measurements)
-    output_dim: 2  # Number of output features (OPF unknowns: 2 per bus)
-    dropout: 0.2  # Dropout rate
-  
-  # GCN Configuration
-  gcn:
-    hidden_dim_range: [16, 128]  # Default fallback
-    num_gc_layers_range: [2, 4]  # FIX: Cap at 4 layers to prevent oversmoothing
-  
-  # AdaptivePIGCN Configuration
-  adaptive_pigcn:
-    embedding_dim_range: [8, 32]  # Will be overridden for 118-bus
-    phi_range: [0.0, 1.0]  # Interpolation parameter for adaptive adjacency
-    num_gc_layers_range: [1, 6]  # Slightly more layers for 118-bus
-  
-  # adaptiveGCN Configuration
-  adaptive_gcn:
-    embedding_dim_range: [8, 32]
-    phi_range: [0.0, 1.0]
-  
-  # Sequential Models (PIGCLSTM, PIGCGRU, Resnet variants)
-  sequential:
-    rnn_layers_range: [1, 3]
-    sequence_length_range: [5, 10]
-    embedding_dim_range: [8, 16]
-    phi_range: [0.0, 1.0]
-    # System-size-dependent ranges (set dynamically):
-    # 33-bus: hidden_dim=[32,64], seq_len=[5,10], rnn_layers=[1,3]
-    # 57-bus: hidden_dim=[16,48], seq_len=[3,8], rnn_layers=[1,2]
-    # 118-bus: hidden_dim=[16,32], seq_len=[3,5], rnn_layers=[1,2]
-
-# --- Model Testing Configuration ---
-model_testing:
-  # Test configurations
-  configs:
-    quick: ["AdaptivePIGCN"]
-    core: ["adaptiveGCN", "AdaptivePIGCN"]
-    comprehensive: ["GCN", "adaptiveGCN", "AdaptivePIGCN", "PIGCLSTM", "PIGCGRU"]
-    physics_only: ["AdaptivePIGCN", "PIGCLSTM", "PIGCGRU", "ResnetPIGCLSTM", "ResnetPIGCGRU"]
-    non_physics_only: ["GCN", "adaptiveGCN"]
-    sequential_only: ["PIGCLSTM", "PIGCGRU", "ResnetPIGCLSTM", "ResnetPIGCGRU"]
-    all: ["GCN", "adaptiveGCN", "AdaptivePIGCN", "PIGCLSTM", "PIGCGRU", "ResnetPIGCLSTM", "ResnetPIGCGRU"]
-  
-  # Default test configuration
-  default: "quick"
-
-# --- Experimental Arguments (Args class) ---
-# These are typically set in the Args class in config.py, but can be overridden here
+# --- Experimental Configuration ---
+# These control what gets tested during experimental runs
 experimental:
-  test_config: "quick"  # Options: "quick", "core", "comprehensive", "physics_only", "non_physics_only", "sequential_only", "all"
-  bus_systems: "all"  # Options: "all", "33", "57", "118", or comma-separated like "33,57"
-  models_to_train: "AdaptivePIGCN"  # Options: "all", or comma-separated model names
-  data_mode: "test"  # Options: "train" or "test"
-  train_timesteps: 2400  # Reduced for faster iteration (100 days)
-  test_timesteps: 120  # Quick test with 24 timesteps (User requested)
-  plot_data_info: true  # Generate data validation and profile story plots
+  test_config: true
+  bus_systems: [33, 57, 118]
+  models_to_train: ["GCN", "adaptiveGCN", "AdaptivePIGCN"]
+  data_mode: "test"
+  train_timesteps: 8760  # Full year
+  test_timesteps: 2160   # 3 months
+  plot_data_info: false
+  force_cpu: false
+  parallel_data_loading: true
+  data_workers: 4
+  save_results: true
+  clear_results: false
 
-  force_cpu: false  # Force CPU training even if GPU is available
-  parallel_data_loading: true  # Enable parallel data loading
-  data_workers: "auto"  # Number of data loading workers ("auto" for auto-config)
-  save_results: true  # Save all results to files
-  clear_results: true  # Delete experimental_results folder before running
-
-# --- Directory Configuration ---
-directories:
-  root: null  # Set automatically to project root
-  data: null  # Set automatically: root/data/[train|test]
-  experimental_results: null  # Set automatically: root/experimental_results
-
-# --- Forensic Debug Logging ---
+# --- Debug Configuration ---
 debug:
-  enable: true  # Enable comprehensive forensic debugging
-  log_dir: "debug_logs"  # Directory for debug logs
-  log_interval: 1  # Log every N batches (1 = every batch, 10 = every 10 batches)
-  log_gradients: true  # Log gradient flow
-  log_weights_every_n_epochs: 1  # Log model weights every N epochs
+  enable: false  # Enable forensic logging (generates large log files)
+  log_interval: 100  # Log every N forward passes
+  log_gradients: false
+  log_weights: false

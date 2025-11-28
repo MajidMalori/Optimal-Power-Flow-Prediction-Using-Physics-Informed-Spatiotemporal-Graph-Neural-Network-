@@ -202,6 +202,18 @@ def main():
     # Setup professional logging
     logger = setup_professional_logging()
     logger.info("Starting training session with memory optimizations")
+
+        
+    # Clean up old debug logs if forensic logging is enabled
+    if os.environ.get('FORENSIC_DEBUG', 'false').lower() == 'true':
+        debug_logs_dir = os.path.join(os.path.dirname(__file__), 'debug_logs')
+        if os.path.exists(debug_logs_dir):
+            try:
+                import shutil
+                shutil.rmtree(debug_logs_dir)
+                logger.info(f"Cleaned up old debug logs: {debug_logs_dir}")
+            except Exception as e:
+                logger.warning(f"Could not delete debug logs: {e}")
     
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
@@ -489,11 +501,15 @@ def main():
                     # Initialize forensic logger if debug mode is enabled
                     debug_config = getattr(run_config, 'DEBUG_ENABLE', True)  # From config.yaml debug.enable
                     if debug_config:
+                        # Get log_interval from config (default to 10 if not set)
+                        log_interval = getattr(run_config, 'DEBUG_LOG_INTERVAL', 10)
+                        
                         forensic_logger = init_forensic_logger(
                             log_dir="debug_logs",
                             model_name=model_name,
                             bus_system=str(num_buses),
-                            enabled=True
+                            enabled=True,
+                            log_interval=log_interval
                         )
                         # Attach logger to model if it's a ForensicGCN
                         if hasattr(model, 'set_logger'):

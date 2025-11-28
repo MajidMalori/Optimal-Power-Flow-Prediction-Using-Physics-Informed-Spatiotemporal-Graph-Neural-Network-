@@ -8,36 +8,18 @@ from utils.forensic_logger import get_logger
 
 class GCN(BaseModel):
     """
-    Graph Convolutional Network with professional GCN layers.
-    
-    Uses ProfessionalGCNLayer which implements:
-    - Self-loops (A_hat = A + I) to preserve node features
-    - Symmetric normalization (D_hat^(-0.5) * A_hat * D_hat^(-0.5)) to prevent gradient explosion
-    - Proper GCN operation (A_norm @ features @ weight)
+    Standard Graph Convolutional Network.
+    Refactored for Full State Reconstruction (10 features).
+    Originally GCN.
     """
     def __init__(self,
                  feature_dim: int = 10,
                  hidden_dim: int = 64,
                  num_gc_layers: int = 3,
                  num_buses: int = 118,
-                 dropout: float = 0.1,
-                 config=None,
-                 normalizer=None):
-        """
-        Simple GCN for OPF prediction.
+                 dropout: float = 0.1):
         
-        Args:
-            feature_dim: Number of input features (10 measurements)
-            hidden_dim: Hidden layer dimension
-            num_gc_layers: Number of graph convolution layers
-            num_buses: Number of buses in the system
-            dropout: Dropout rate
-            config: Configuration object (unused, kept for compatibility)
-            normalizer: PowerSystemNormalizer (unused, kept for compatibility)
-        """
-        # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is softplus
-        output_features_per_bus = 4
+        output_features_per_bus = 10
         output_dim = num_buses * output_features_per_bus
         
         super().__init__(
@@ -45,75 +27,68 @@ class GCN(BaseModel):
             num_gc_layers=num_gc_layers, num_buses=num_buses, dropout=dropout
         )
         
-        # Professional GCN layers with self-loops and symmetric normalization
         self.gc_layers = nn.ModuleList()
         for i in range(num_gc_layers):
             in_dim = feature_dim if i == 0 else hidden_dim
-            # Use ReLU activation for all layers except potentially the last (but we apply it manually)
             self.gc_layers.append(ProfessionalGCNLayer(in_dim, hidden_dim, bias=True, activation='relu'))
         
         self.dropout_layer = nn.Dropout(dropout)
-        
-        # Output Layer (no activation - raw outputs for natural parametrization)
-        # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is softplus
         self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)
         
-        # Forensic logging state
         self.forensic_logger = None
         self.forward_count = 0
 
     def set_logger(self, logger):
-        """Attach a forensic logger."""
         self.forensic_logger = logger
-        
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None):
-        """
-        Forward pass.
-        
-        Args:
-            x: Input measurements [batch_size, num_buses, 10]
-            adj: Adjacency matrix [batch_size, num_buses, num_buses] or [num_buses, num_buses]
-            bus_types: Optional bus type codes [batch_size, num_buses] with [0=PQ, 1=PV, 2=Slack] (unused, kept for compatibility)
-            
-        Returns:
-            torch.Tensor: Predicted unknowns [batch_size, num_buses, 4]
-                         OPF mode: [η1_var1, η1_var2, f2_var1, f2_var2] (natural parameters)
-        """
-        # Ensure adj has batch dimension for ProfessionalGCNLayer
         if adj.dim() == 2:
             batch_size = x.shape[0]
-            num_nodes = adj.shape[0]
-            adj = adj.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, num_nodes, num_nodes]
+            adj = adj.unsqueeze(0).expand(batch_size, -1, -1)
         
-        # FORENSIC: Log input
         self.forward_count += 1
-        if self.forensic_logger and self.forward_count % 10 == 1:
+        if self.forensic_logger and self.forensic_logger.log_interval > 0 and self.forward_count % self.forensic_logger.log_interval == 1:
             self.forensic_logger.log_model_forward(
                 "GCN_INPUT",
-                {'features': x, 'adjacency': adj, 'bus_types': bus_types},
+                {'features': x, 'adjacency': adj},
                 None
             )
-            self.forensic_logger.logger.debug(f"\n  GCN FORWARD PASS #{self.forward_count}:")
-            self.forensic_logger.log_tensor_stats("Input features", x, indent=2)
 
-        # Apply professional GCN layers (adjacency is pre-normalized in data loader)
-        for i, gc_layer in enumerate(self.gc_layers):
-            x = gc_layer(x, adj, is_pre_normalized=True)  # Adjacency is pre-normalized for performance
-            if i < len(self.gc_layers) - 1:  # Apply dropout to all but last layer
-                x = self.dropout_layer(x)
-        
-        # Output: [batch, buses, 4] = [η1_var1, η1_var2, f2_var1, f2_var2]
-        # Natural parameters: η1 = f1 (direct), η2 = -g+(f2) where g+ is softplus
-        out = self.output_layer(x)  # [batch_size, num_buses, 4]
-        
-        # FORENSIC: Log output
-        if self.forensic_logger and self.forward_count % 10 == 1:
-            self.forensic_logger.log_tensor_stats("Final output", out, indent=2)
-            if out.std().item() < 1e-6:
-                self.forensic_logger.log_diagnosis(
-                    f"MODEL COLLAPSE in forward pass #{self.forward_count}: Output std = {out.std().item():.2e}"
-                )
+        # Standard GCN needs to normalize adjacency internally if not pre-normalized
+        # In Suspect #2 fix, we disabled pre-normalization in loader.
+        # So we need to normalize here.
+        adj_norm = self._normalize_adjacency_batch(adj)
 
+        for gc_layer in self.gc_layers:
+            # Use normalized adjacency
+            x = gc_layer(x, adj_norm, is_pre_normalized=True)
+            x = self.dropout_layer(x)
+        
+        out = self.output_layer(x)
         return out
+        
+    def _normalize_adjacency_batch(self, adj: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize a batch of adjacency matrices (Symmetric normalization).
+        D^-0.5 * (A + I) * D^-0.5
+        """
+        batch_size, num_nodes, _ = adj.shape
+        device = adj.device
+        dtype = adj.dtype
+        
+        # Add self-loops (A_hat = A + I)
+        identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
+        adj_hat = adj + identity
+        
+        # Compute degree matrix
+        degree = torch.sum(adj_hat, dim=-1)  # [batch_size, num_nodes]
+        epsilon = 1e-8
+        degree = degree + epsilon
+        
+        # Symmetric normalization: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
+        degree_inv_sqrt = torch.pow(degree, -0.5)  # [batch_size, num_nodes]
+        degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)
+        degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
+        
+        adj_norm = torch.bmm(torch.bmm(degree_matrix_inv_sqrt, adj_hat), degree_matrix_inv_sqrt)
+        return adj_norm

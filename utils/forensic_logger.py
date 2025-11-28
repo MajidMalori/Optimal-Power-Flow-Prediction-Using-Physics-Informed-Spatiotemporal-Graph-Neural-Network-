@@ -22,11 +22,12 @@ class ForensicLogger:
     """
     FBI-style forensic logger that tracks everything happening in the training pipeline.
     """
-    def __init__(self, log_dir="debug_logs", model_name="GCN", bus_system="33", enabled=True):
+    def __init__(self, log_dir="debug_logs", model_name="GCN", bus_system="33", enabled=True, log_interval=10):
         self.enabled = enabled
         if not enabled:
             return
-            
+        
+        self.log_interval = log_interval  # Store for use by models    
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
@@ -278,10 +279,10 @@ class ForensicLogger:
 # Global logger instance (will be initialized by train.py)
 _global_logger = None
 
-def init_forensic_logger(log_dir="debug_logs", model_name="GCN", bus_system="33", enabled=True):
+def init_forensic_logger(log_dir="debug_logs", model_name="GCN", bus_system="33", enabled=True, log_interval=10):
     """Initialize the global forensic logger."""
     global _global_logger
-    _global_logger = ForensicLogger(log_dir, model_name, bus_system, enabled)
+    _global_logger = ForensicLogger(log_dir, model_name, bus_system, enabled, log_interval)
     return _global_logger
 
 def get_logger():

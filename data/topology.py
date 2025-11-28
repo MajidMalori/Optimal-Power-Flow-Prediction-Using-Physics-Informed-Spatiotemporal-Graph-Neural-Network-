@@ -171,61 +171,52 @@ def identify_bus_types(net: pp.pandapowerNet) -> np.ndarray:
 
 def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarray:
     """
-    Create OPF-style targets based on bus type (predict only unknowns):
-    - PQ bus: Predict [V, θ] (unknowns)
-    - PV bus: Predict [Q, θ] (unknowns, V is known/specified)
-    - Slack bus: Predict [P, Q] (unknowns, V and θ are known/specified)
+    Create Full State Reconstruction targets (10 features).
     
-    **UNIT CONSISTENCY FIX (Option A):**
-    - V: In per-unit (vm_pu) - standard for power systems
-    - θ: In radians - standard for power systems  
-    - P, Q: In MW/MVAR (NOT per-unit) - for consistency with features
+    Returns the Clean (Ground Truth) values for all 10 features:
+    [p_load, q_load, p_ext_grid, q_ext_grid, p_conv, q_conv, p_ren, q_ren, vm, va]
     
-    This ensures features and targets use the same units for power,
-    making normalization consistent and avoiding information loss.
+    All power values in MW/MVAR.
+    Voltage in p.u., Angle in radians.
     
     Args:
         net: Pandapower network AFTER power flow solution
-        bus_types: Array of bus type codes [0=PQ, 1=PV, 2=Slack] from identify_bus_types()
+        bus_types: Unused here, but kept for signature compatibility
     
     Returns:
-        targets: Array [num_buses, 2] with unknowns for each bus
+        targets: Array [num_buses, 10] with clean ground truth values
     """
     num_buses = len(net.bus)
-    targets = np.zeros((num_buses, 2), dtype=np.float64)
     
-    # Get power flow results
-    vm_pu = net.res_bus.vm_pu.values
-    va_rad = np.deg2rad(net.res_bus.va_degree.values)
+    # Initialize targets array [num_buses, 10]
+    targets = np.zeros((num_buses, 10), dtype=np.float32)
     
-    # Get power injections (net injection = generation - load)
-    ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-    ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
-    gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-    gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
-    sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-    sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    # 1. Load (P, Q)
     load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
     load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    targets[:, 0] = load_p_by_bus.values
+    targets[:, 1] = load_q_by_bus.values
     
-    # Net power injection at each bus (generation - load) in MW/MVAR
-    p_inj_mw = (ext_grid_p_by_bus + gen_p_by_bus + sgen_p_by_bus - load_p_by_bus).values
-    q_inj_mvar = (ext_grid_q_by_bus + gen_q_by_bus + sgen_q_by_bus - load_q_by_bus).values
+    # 2. External Grid (P, Q)
+    ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    targets[:, 2] = ext_grid_p_by_bus.values
+    targets[:, 3] = ext_grid_q_by_bus.values
     
-    # **UNIT CONSISTENCY FIX**: Store power in MW/MVAR (same as features)
-    # Previously converted to p.u., causing unit mismatch with features
-    # Now both features and targets use MW/MVAR for power values
+    # 3. Conventional Generation (P, Q)
+    gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    targets[:, 4] = gen_p_by_bus.values
+    targets[:, 5] = gen_q_by_bus.values
     
-    # Create targets based on bus type (only unknowns)
-    for bus_idx in range(num_buses):
-        if bus_types[bus_idx] == 0:  # PQ bus: unknowns = [V, θ]
-            targets[bus_idx, 0] = vm_pu[bus_idx]  # Voltage magnitude in per-unit
-            targets[bus_idx, 1] = va_rad[bus_idx]  # Voltage angle in radians
-        elif bus_types[bus_idx] == 1:  # PV bus: unknowns = [Q, θ]
-            targets[bus_idx, 0] = q_inj_mvar[bus_idx]  # Reactive power in MVAR (not p.u.)
-            targets[bus_idx, 1] = va_rad[bus_idx]  # Voltage angle in radians
-        else:  # Slack bus: unknowns = [P, Q]
-            targets[bus_idx, 0] = p_inj_mw[bus_idx]  # Active power in MW (not p.u.)
-            targets[bus_idx, 1] = q_inj_mvar[bus_idx]  # Reactive power in MVAR (not p.u.)
+    # 4. Renewable Generation (P, Q)
+    sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
+    sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+    targets[:, 6] = sgen_p_by_bus.values
+    targets[:, 7] = sgen_q_by_bus.values
+    
+    # 5. Voltage (VM, VA)
+    targets[:, 8] = net.res_bus.vm_pu.values
+    targets[:, 9] = np.deg2rad(net.res_bus.va_degree.values)
     
     return targets
