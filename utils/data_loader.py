@@ -17,7 +17,7 @@ class PowerSystemNormalizer:
     
     Targets (10-dim) are normalized exactly the same way as features.
     """
-    def __init__(self, features, targets, base_mva=100.0):
+    def __init__(self, features, targets, base_mva):
         """
         Args:
             features: Input measurements [samples, buses, 10]
@@ -181,6 +181,12 @@ class PowerSystemLazyDataset(Dataset):
         self.topology_ids = topology_ids
 
     def __len__(self):
+        # For sequential models, reduce available samples by sequence_length
+        # because we need sequence_length past samples + 1 future sample for target
+        if not self.is_static and self.sequence_length > 1:
+            # Valid indices: 0 to (total - sequence_length - 1)
+            # This ensures target_idx = idx + sequence_length stays within bounds
+            return max(0, len(self.file_metadata) - self.sequence_length)
         return len(self.file_metadata)
 
     def __getitem__(self, idx):
@@ -397,11 +403,11 @@ def load_power_system_data(config, case_name):
     try:
         num_buses = int(''.join(filter(str.isdigit, case_name)))
         
-        # Determine Base MVA based on case name
-        if num_buses <= 33:
-            base_mva = 10.0
-        else:
-            base_mva = 100.0
+        # Get Base MVA from config (system-specific from config.yaml)
+        # Config must have BASE_MVA loaded from system_limits based on CASE_NAME
+        if not hasattr(config, 'BASE_MVA'):
+            raise ValueError(f"Config must have BASE_MVA attribute. Ensure CASE_NAME is set and system_limits are loaded from config.yaml")
+        base_mva = config.BASE_MVA
         
         first_features_path = feature_files[0]
         base_adj_path = first_features_path.replace('features', 'base_adjacency')

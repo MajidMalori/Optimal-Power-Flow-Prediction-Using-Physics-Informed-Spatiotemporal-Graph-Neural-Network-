@@ -8,6 +8,11 @@ import subprocess
 import sys
 import threading
 import time
+import glob
+import re
+import json
+import shutil
+import numpy as np
 from typing import List, Tuple
 from tqdm import tqdm
 
@@ -18,8 +23,6 @@ def find_latest_timestamp(data_dir: str) -> str:
     Returns:
         Latest timestamp string found in filenames, or None if no timestamped files exist
     """
-    import glob
-    import re
     
     if not os.path.exists(data_dir):
         return None
@@ -249,10 +252,6 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     Returns:
         Tuple of (is_consistent: bool, reason: str)
     """
-    import re
-    import glob
-    import numpy as np
-    import json
     
     data_dir = config.DATA_DIR  # Use mode-specific directory
     
@@ -382,8 +381,6 @@ def monitor_data_generation_progress_per_system(config, stop_event):
     
     Waits for filesystem synchronization before starting to ensure accurate tracking.
     """
-    import glob
-    import re
     bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     data_dir = config.DATA_DIR  # Use mode-specific directory
@@ -489,8 +486,6 @@ def clean_existing_data(config, aggressive=True):
         config: Configuration object
         aggressive: If True, removes ALL files including metadata (recommended)
     """
-    import glob
-    import shutil
     
     data_dir = config.DATA_DIR  # Use mode-specific directory (train or test)
     files_removed = 0
@@ -730,8 +725,6 @@ def display_data_generation_summary(config, bus_systems_to_show=None):
         config: Configuration object
         bus_systems_to_show: List of bus systems to show (if None, shows all available)
     """
-    import json
-    import glob
     
     data_dir = config.DATA_DIR
     if bus_systems_to_show is not None:

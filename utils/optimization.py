@@ -408,7 +408,7 @@ def setup_hyperparameter_bounds(model_name: str, model_config: Any, num_buses: i
 
 def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: int, 
                        is_sequential: bool, uses_adaptive_graph: bool, model_name: str = None,
-                       config: Any = None, normalizer: Any = None) -> Dict[str, Any]:
+                       config: Any = None, normalizer: Any = None, is_physics_informed: bool = False) -> Dict[str, Any]:
     """
     Create model keyword arguments from optimized parameters.
     Always assumes OPF mode.
@@ -422,6 +422,7 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
         model_name: Name of the model (for logging)
         config: Main config object (for generator constraints)
         normalizer: PowerSystemNormalizer (for generator constraints)
+        is_physics_informed: Whether model is physics-informed (needs config/normalizer)
         
     Returns:
         Dictionary of model keyword arguments
@@ -435,11 +436,12 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
         'dropout': model_config.DROPOUT
     }
     
-    # Add config and normalizer for generator constraints (if available)
-    if config is not None:
-        model_kwargs['config'] = config
-    if normalizer is not None:
-        model_kwargs['normalizer'] = normalizer
+    # Add config and normalizer ONLY for physics-informed models
+    if is_physics_informed:
+        if config is not None:
+            model_kwargs['config'] = config
+        if normalizer is not None:
+            model_kwargs['normalizer'] = normalizer
     
     if is_sequential:
         model_kwargs['rnn_layers'] = int(params['RNN_LAYERS'])
@@ -534,32 +536,41 @@ def calculate_objective_score(metrics: Dict[str, float], config: Any, is_physics
     """
     Calculate objective score for MoSOA optimization.
     
-    CRITICAL: We MUST use Validation MSE (Denormalized, Physical Units) as the objective.
-    We cannot use 'total_loss' because it contains learnable uncertainty weights (sigmas).
-    If we optimize 'total_loss', MoSOA will pick hyperparameters that inflate sigma 
-    to cheat the loss function, rather than improving accuracy.
+    CRITICAL ARCHITECTURAL DECISION:
+    - For PHYSICS-INFORMED models: Optimize the TOTAL LOSS (MSE + Physics + Safety)
+    - For NON-PHYSICS models: Optimize MSE only
     
-    The loss function L = MSE/(2σ²) + log(σ) can be minimized by making σ→∞,
-    which makes the first term go to zero while log(σ) grows slowly.
-    This results in a numerically low "Total Loss" but terrible predictions.
+    WHY THIS MATTERS:
+    If we optimize only MSE for physics-informed models, we create a "physics cheating" 
+    phenomenon where the model can achieve low MSE by violating physical laws 
+    (e.g., creating energy out of thin air).
     
-    Validation MSE (denormalized) measures actual prediction error in physical units
-    (per-unit for voltages/power, radians for angles), which is what we actually care about.
+    Kendall's weighting (w = exp(-log_var)) automatically balances the three losses:
+    - MoSOA finds hyperparameters that allow the model to be confident (low uncertainty)
+      about BOTH data accuracy AND physics validity simultaneously
+    - This forces learning of physical constraints, not just curve fitting
+    
+    The Total Loss = (w_data * MSE + log_var_data) + (w_phys * Physics + log_var_phys) + ...
+    ensures that:
+    1. Low MSE is achieved
+    2. Physical laws are respected (low physics loss)
+    3. The model is confident about both (low uncertainties/high weights)
     
     Args:
         metrics: Dictionary of evaluation metrics from the VALIDATION set.
         config: Configuration object.
-        is_physics_informed: Boolean flag (not used, but kept for compatibility).
+        is_physics_informed: Boolean flag determining which metric to use.
         
     Returns:
-        float: The objective score to minimize (Validation MSE in physical units).
+        float: The objective score to minimize.
     """
-    # ALWAYS use the denormalized MSE (physical units) as the gold standard.
-    # This allows fair comparison between PI and non-PI models, 
-    # and between models with different learned uncertainties.
+    # For physics-informed models: Use the total weighted loss (includes physics)
+    # For non-physics models: Use MSE only
     
-    if 'mse' in metrics:
-        return metrics['mse']  # This is the denormalized MSE from evaluation.py
+    if is_physics_informed and 'total_loss' in metrics:
+        return metrics['total_loss']  # Total = MSE + Physics + Safety (Kendall-weighted)
+    elif 'mse' in metrics:
+        return metrics['mse']  # MSE only (for non-physics models)
     elif 'mse_score' in metrics:
         return metrics['mse_score']
     else:

@@ -19,25 +19,29 @@ system:
   seed: 42
   num_workers: 2  # Data loading workers (auto-configured if 'auto')
 
-# --- System-Specific Voltage Limits ---
+# --- System-Specific Voltage Limits and BASE_MVA ---
 # These are loaded based on CASE_NAME during runtime
+# NOTE: These MUST match the limits used in data generation (data/validation.py)
 system_limits:
   case33:
-    v_min: 0.90
-    v_max: 1.10
+    base_mva: 10.0  # Distribution system (from pandapower case33bw)
+    v_min: 0.85
+    v_max: 1.15
   case57:
-    v_min: 0.90
-    v_max: 1.10
+    base_mva: 100.0  # Transmission system (from pandapower case57)
+    v_min: 0.70  # More relaxed for transmission
+    v_max: 1.20
   case118:
-    v_min: 0.90
-    v_max: 1.10
+    base_mva: 100.0  # Transmission system (from pandapower case118)
+    v_min: 0.85
+    v_max: 1.15
 
 # --- Training Configuration ---
 training:
   batch_size: 64
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 50
+  num_epochs: 2
   early_stopping_patience: 10
   use_learning_rate_scheduler: true
   cosine_annealing_lr:
@@ -61,12 +65,15 @@ physics:
 data:
   hours_per_day: 24
   sequence_length: 5  # For RNN models
+  contingency_rate: 0.05  # Probability of line contingency per timestep
+  pmu_coverage: 0.3  # Fraction of buses with PMU measurements
 
 # --- Model Capacity (Hidden Dimensions) ---
+# Options: 'normal' (conservative), 'medium' (balanced), 'large' (maximum)
 model_capacity:
-  bus_33: 64
-  bus_57: 128
-  bus_118: 256
+  bus_33: 'normal'    # 33-bus: normal=32-64, medium=48-96, large=64-128
+  bus_57: 'normal'    # 57-bus: normal=32-64, medium=48-96, large=64-128
+  bus_118: 'normal'   # 118-bus: normal=64-128, medium=96-160, large=128-256
 
 # --- MOOPF (Multi-Objective Optimal Power Flow) Weights ---
 moopf:
@@ -75,21 +82,35 @@ moopf:
     voltage_deviation: 0.33333333
     carbon: 0.33333333
 
-# --- Contingency Analysis ---
-contingency:
-  enable: true
-  top_k: 10  # Number of worst-case contingencies to analyze
-  method: "power_flow"  # Method for contingency ranking
-
 # --- Experimental Configuration ---
 # These control what gets tested during experimental runs
 experimental:
-  test_config: true
-  bus_systems: [33, 57, 118]
-  models_to_train: ["GCN", "adaptiveGCN", "AdaptivePIGCN"]
+  # Model selection strategy (hierarchical):
+  # 1. If models_to_train is set to specific models → Uses those (overrides test_config)
+  # 2. If models_to_train is "all" or not set → Uses test_config
+  
+  # Option 1: Use test_config presets (convenient)
+  # Options: quick, core, comprehensive, physics_only, non_physics_only, sequential_only, all
+  # - quick: [AdaptivePIGCN] - fast testing
+  # - core: [adaptiveGCN, AdaptivePIGCN] - best comparison
+  # - comprehensive: [GCN, adaptiveGCN, AdaptivePIGCN, PIGCLSTM, PIGCGRU] - full comparison
+  # - physics_only: All physics-informed models
+  # - non_physics_only: [GCN, adaptiveGCN]
+  # - sequential_only: All LSTM/GRU models
+  # - all: ALL 7 MODELS
+  test_config: "physics_only"
+  
+  # Option 2: Override with specific models (precise control)
+  # Examples:
+  # models_to_train: ["GCN"]  # Train only GCN
+  # models_to_train: ["GCN", "adaptiveGCN"]  # Train only these two
+  # models_to_train: "all"  # Use test_config above (default behavior)
+  models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
+  
+  bus_systems: [118]
   data_mode: "test"
-  train_timesteps: 8760  # Full year
-  test_timesteps: 2160   # 3 months
+  train_timesteps: 1200  # Full year
+  test_timesteps: 120   # 3 months
   plot_data_info: false
   force_cpu: false
   parallel_data_loading: true

@@ -41,7 +41,7 @@ class BaseTrainer(ABC):
             'train_physics_loss': [], 'train_safety_loss': [],
             'val_total_loss': [], 'val_mse': [],
             'val_physics_loss': [], 'val_safety_loss': [],
-            'train_sigmas': []
+            'train_weights': []
         }
 
     @abstractmethod
@@ -174,17 +174,20 @@ class BaseTrainer(ABC):
 
             self.history['train_total_loss'].append(train_metrics['total_loss'])
             self.history['train_mse'].append(train_metrics['mse'])
-            self.history['train_physics_loss'].append(train_metrics.get('physics_loss', 0.0))
-            self.history['train_safety_loss'].append(train_metrics.get('safety_loss', 0.0))
-            if 'sigmas' in train_metrics:
-                self.history['train_sigmas'].append(train_metrics['sigmas'])
+            self.history['train_physics_loss'].append(train_metrics['physics_loss'])
+            self.history['train_safety_loss'].append(train_metrics['safety_loss'])
+            # Track Kendall's learned weights
+            if 'weights' in train_metrics:
+                self.history['train_weights'].append(train_metrics['weights'])
+            else:
+                self.history['train_weights'].append(None)
             
             val_metrics = self._val_epoch(val_loader)
 
             self.history['val_total_loss'].append(val_metrics['total_loss'])
             self.history['val_mse'].append(val_metrics['mse'])
-            self.history['val_physics_loss'].append(val_metrics.get('physics_loss', 0.0))
-            self.history['val_safety_loss'].append(val_metrics.get('safety_loss', 0.0))
+            self.history['val_physics_loss'].append(val_metrics['physics_loss'])
+            self.history['val_safety_loss'].append(val_metrics['safety_loss'])
             
             # Forensic: Log model weights periodically
             if hasattr(self, 'forensic_logger') and self.forensic_logger and self.forensic_logger.enabled:
@@ -192,7 +195,7 @@ class BaseTrainer(ABC):
                 if epoch % log_weights_interval == 0:
                     self.forensic_logger.log_model_weights(self.model, epoch)
 
-            val_loss = val_metrics.get('total_loss', float('inf'))
+            val_loss = val_metrics['total_loss']
             
             # Step CosineAnnealingLR scheduler (per-epoch)
             if self.scheduler is not None:
@@ -203,22 +206,22 @@ class BaseTrainer(ABC):
             
             # Log complete epoch summary to file (one line per epoch)
             if hasattr(self, 'criterion') and self.criterion.is_physics_informed:
-                # Physics-informed model: include MSE, physics, safety, sigmas, and LR
+                # Physics-informed model: include MSE, physics, safety, weights, and LR
                 train_mse = train_metrics['mse']
-                train_phys = train_metrics.get('physics_loss', 0.0)
-                train_safe = train_metrics.get('safety_loss', 0.0)
+                train_phys = train_metrics['physics_loss']
+                train_safe = train_metrics['safety_loss']
                 val_mse = val_metrics['mse']
-                val_phys = val_metrics.get('physics_loss', 0.0)
-                val_safe = val_metrics.get('safety_loss', 0.0)
+                val_phys = val_metrics['physics_loss']
+                val_safe = val_metrics['safety_loss']
                 
-                # Extract sigmas from train_metrics if available
-                if 'sigmas' in train_metrics:
-                    sigmas = train_metrics['sigmas']
-                    sigma_str = f"σ=[{sigmas[0]:.2f},{sigmas[1]:.2f},{sigmas[2]:.2f}]"
+                # Extract Kendall's learned weights
+                if 'weights' in train_metrics:
+                    weights = train_metrics['weights']
+                    weight_str = f"w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f}]"
                 else:
-                    sigma_str = "σ=N/A"
+                    weight_str = "w=N/A"
                 
-                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f} | {sigma_str} | LR={current_lr:.6f}")
+                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f} | {weight_str} | LR={current_lr:.6f}")
             else:
                 # Non-physics model: only MSE and LR
                 train_mse = train_metrics['mse']

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict
 from config import FeatureIndices
 
 class PowerSystemLoss(nn.Module):
@@ -13,34 +12,34 @@ class PowerSystemLoss(nn.Module):
     2. L2 (Physics Balance): MSE(Net Injection - Flow).
     3. L3 (Safety): Voltage limit violations.
     
-    Weights are learned using Kendall's Loss (Multi-Task Learning Using Uncertainty).
+    Uses Kendall's Homoscedastic Uncertainty method to automatically learn task weights.
+    MC Dropout handles aleatoric uncertainty quantification during evaluation.
     """
     def __init__(self, config: object, normalizer, is_gcn: bool = False):
         super().__init__()
         self.config = config
         self.normalizer = normalizer
         self.is_physics_informed = not is_gcn
-        self.mse_loss_fn = nn.MSELoss()
         
-        # Learnable weights (log variance) for Kendall's Loss
-        # Initialize with 0.0 (variance = 1.0)
+        # Learnable weights using Kendall's method (log variance for numerical stability)
+        # Initialize with 0.0 (variance = 1.0, precision weight = 1.0)
         self.log_vars = nn.Parameter(torch.zeros(3))  # [Data, Physics, Safety]
         
         # System Limits
         self.register_buffer('v_min', torch.tensor(getattr(config, 'V_MIN', 0.9), dtype=torch.float32))
         self.register_buffer('v_max', torch.tensor(getattr(config, 'V_MAX', 1.1), dtype=torch.float32))
         
-        # Base MVA for unit conversion (if needed internally, though we work in p.u. mostly)
-        self.base_mva = getattr(normalizer, 'base_mva', 100.0)
+        # Base MVA for unit conversion (from normalizer, which gets it from config.yaml)
+        self.base_mva = normalizer.base_mva
 
     def forward(self, 
                 outputs_norm: torch.Tensor,
                 targets_norm: torch.Tensor,
-                measurements_norm: torch.Tensor, # Not used in Denoising (we compare preds vs clean targets)
+                measurements_norm: torch.Tensor,  # Not used in Denoising (we compare preds vs clean targets)
                 ybus_batch: torch.Tensor,
-                bus_types: torch.Tensor = None,
+                bus_types: torch.Tensor = None,  # Reserved for future use
                 return_components: bool = False,
-                epoch: int = None) -> torch.Tensor:
+                epoch: int = None) -> torch.Tensor:  # Reserved for future use
         """
         Forward pass for loss calculation.
         
@@ -49,8 +48,9 @@ class PowerSystemLoss(nn.Module):
             targets_norm: True clean state [batch, buses, 10] (Normalized)
             ybus_batch: Ybus matrices [batch, buses, buses] (p.u.)
         """
-        # 1. Data Loss (L1) - Compare Normalized Predictions to Normalized Targets
-        # This ensures equal weighting across features regardless of scale
+        # 1. Data Loss (L1) - MSE on Normalized Data
+        # Normalized space ensures equal weighting across all 10 features
+        # (voltages, powers, angles all contribute equally)
         l1_loss = F.mse_loss(outputs_norm, targets_norm)
         
         if not self.is_physics_informed:
@@ -58,25 +58,13 @@ class PowerSystemLoss(nn.Module):
                 return {
                     'total_loss': l1_loss,
                     'mse': l1_loss.item(),
-                    'physics': 0.0,
-                    'safety': 0.0
+                    'physics_loss': 0.0,
+                    'safety_loss': 0.0
                 }
             return l1_loss
 
         # 2. Physics Loss (L2) - Power Balance
-        # Requires Denormalization to Physical Units (p.u. for Voltage, MW/MVar for Power)
-        # Or better: Convert everything to per-unit for physics calculation.
-        # Our Global Per-Unit scaling in Normalizer handles this!
-        # Actually, Normalizer: Power -> val / base_mva. So normalized power IS per-unit power.
-        # Normalizer: Voltage -> (val - 1.0) * 10.0. We need to reverse this to get p.u. Voltage.
-        
-        # Denormalize ONLY for Physics Calculation (to get V in p.u. and P/Q in p.u.)
-        # Since our "Normalized" Power is ALREADY p.u. (Power/BaseMVA), we can use it directly?
-        # No, let's stick to explicit denormalization to be safe and consistent.
-        # Wait, denormalize returns physical units (MW/MVar).
-        # We need p.u. for Ybus calculation.
-        # So: Denormalize -> Divide Power by BaseMVA -> Physics Check.
-        
+        # Denormalize for physics calculation (need actual p.u. voltages for Ybus)
         preds_phys = self.normalizer.denormalize(outputs_norm)
         
         # Extract State Variables (Physical Units)
@@ -126,41 +114,28 @@ class PowerSystemLoss(nn.Module):
         v_lower_violation = F.relu(self.v_min - vm_pu)
         l3_loss = torch.mean(v_upper_violation**2 + v_lower_violation**2)
         
-        # 4. Combine with Kendall's Loss Weighting
-        # Loss = Σ (L_i * exp(-s_i) + s_i)
-        # s_i = log_var
+        # 4. Combine with Kendall's Homoscedastic Uncertainty Weighting
+        # Loss = (w_i * L_i + log_var_i) where w_i = exp(-log_var_i)
+        # L1 (MSE) is in normalized space, L2/L3 in physics space (p.u.)
+        # Kendall's weights automatically learn to balance these different scales
         
-        # Precision weights (exp(-s))
+        # Calculate precision weights (higher weight = more confident in that task)
         w_data = torch.exp(-self.log_vars[0])
         w_phys = torch.exp(-self.log_vars[1])
         w_safe = torch.exp(-self.log_vars[2])
         
-        # Weighted Loss
+        # Kendall's weighted loss formula (all components in physical units)
         loss = (w_data * l1_loss + self.log_vars[0]) + \
                (w_phys * l2_loss + self.log_vars[1]) + \
                (w_safe * l3_loss + self.log_vars[2])
                
         if return_components:
             return {
-                'total_loss': loss,
+                'total_loss': loss,  # Keep as tensor for backprop!
                 'mse': l1_loss.item(),
                 'physics_loss': l2_loss.item(),
                 'safety_loss': l3_loss.item(),
-                'sigmas': torch.exp(0.5 * self.log_vars).detach().cpu().numpy().tolist()
+                'weights': [w_data.item(), w_phys.item(), w_safe.item()]
             }
             
         return loss
-
-def compute_metrics(outputs: torch.Tensor, targets: torch.Tensor, ybus_batch: torch.Tensor, config: object, bus_types: torch.Tensor) -> Dict[str, float]:
-    """
-    Computes evaluation metrics.
-    Args:
-        outputs: Predicted Clean State (Physical Units)
-        targets: True Clean State (Physical Units)
-    """
-    with torch.no_grad():
-        # MSE
-        mse = F.mse_loss(outputs, targets).item()
-        rmse = mse ** 0.5
-        
-        return {'mse': mse, 'rmse': rmse}

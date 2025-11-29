@@ -67,11 +67,15 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
     
     # Mapping from YAML keys to Config attribute names
     attribute_mapping = {
+        # System configuration
         'system_device': 'DEVICE',
         'system_num_buses': 'NUM_BUSES',
+        'system_test_cases': 'TEST_CASES',
         'system_seed': 'SEED',
         'system_num_workers': 'NUM_WORKERS',
         'system_case_name': 'CASE_NAME',
+        
+        # Training configuration
         'training_batch_size': 'BATCH_SIZE',
         'training_learning_rate': 'LEARNING_RATE',
         'training_max_grad_norm': 'MAX_GRAD_NORM',
@@ -81,20 +85,50 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'training_cosine_annealing_lr_t_max': 'COSINEANNEALINGLR_T_MAX',
         'training_cosine_annealing_lr_eta_min': 'COSINEANNEALINGLR_ETA_MIN',
         'training_weight_decay': 'WEIGHT_DECAY',
+        
+        # Physics configuration
         'physics_voltage_min': 'V_MIN',
         'physics_voltage_max': 'V_MAX',
         'physics_apparent_power_max': 'S_MAX',
         'physics_split_mode': 'DATA_SPLIT_MODE',
         'physics_splits_train': 'TRAIN_SPLIT',
         'physics_splits_val': 'VAL_SPLIT',
+        
+        # Data configuration
         'data_hours_per_day': 'HOURS_PER_DAY',
         'data_sequence_length': 'SEQUENCE_LENGTH',
+        'data_contingency_rate': 'CONTINGENCY_RATE',
+        'data_pmu_coverage': 'PMU_COVERAGE',
+        
+        # MOOPF configuration
         'moopf_weights_loss': 'MOOPF_WEIGHT_LOSS',
         'moopf_weights_voltage_deviation': 'MOOPF_WEIGHT_VDEV',
         'moopf_weights_carbon': 'MOOPF_WEIGHT_CARBON',
+        
+        # Contingency analysis configuration
         'contingency_enable': 'ENABLE_CONTINGENCY_ANALYSIS',
         'contingency_top_k': 'CONTINGENCY_TOP_K',
         'contingency_method': 'CONTINGENCY_METHOD',
+        
+        # Experimental configuration
+        'experimental_test_config': 'EXPERIMENTAL_TEST_CONFIG',
+        'experimental_bus_systems': 'EXPERIMENTAL_BUS_SYSTEMS',
+        'experimental_models_to_train': 'EXPERIMENTAL_MODELS_TO_TRAIN',
+        'experimental_data_mode': 'EXPERIMENTAL_DATA_MODE',
+        'experimental_train_timesteps': 'EXPERIMENTAL_TRAIN_TIMESTEPS',
+        'experimental_test_timesteps': 'EXPERIMENTAL_TEST_TIMESTEPS',
+        'experimental_plot_data_info': 'EXPERIMENTAL_PLOT_DATA_INFO',
+        'experimental_force_cpu': 'EXPERIMENTAL_FORCE_CPU',
+        'experimental_parallel_data_loading': 'EXPERIMENTAL_PARALLEL_DATA_LOADING',
+        'experimental_data_workers': 'EXPERIMENTAL_DATA_WORKERS',
+        'experimental_save_results': 'EXPERIMENTAL_SAVE_RESULTS',
+        'experimental_clear_results': 'EXPERIMENTAL_CLEAR_RESULTS',
+        
+        # Debug configuration
+        'debug_enable': 'DEBUG_ENABLE',
+        'debug_log_interval': 'DEBUG_LOG_INTERVAL',
+        'debug_log_gradients': 'DEBUG_LOG_GRADIENTS',
+        'debug_log_weights': 'DEBUG_LOG_WEIGHTS',
     }
     
     flat_yaml = _flatten_dict(yaml_config)
@@ -152,6 +186,8 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
             
             if case_name_lower in system_limits:
                 limits = system_limits[case_name_lower]
+                if 'base_mva' in limits:
+                    setattr(config_obj, 'BASE_MVA', limits['base_mva'])
                 if 'v_min' in limits:
                     setattr(config_obj, 'V_MIN', limits['v_min'])
                 if 'v_max' in limits:
@@ -336,14 +372,18 @@ class Config:
             
             # Get capacity setting from Config (moved from Args class)
             # Note: This will be set from YAML or use default values
+            # Map num_buses to the correct capacity_settings key
             if num_buses <= 33:
                 capacity = Config.CAPACITY_33_BUS
+                bus_key = 33
             elif num_buses <= 57:
                 capacity = Config.CAPACITY_57_BUS
+                bus_key = 57
             else:
                 capacity = Config.CAPACITY_118_BUS
+                bus_key = 118
             
-            return capacity_settings[num_buses][capacity]
+            return capacity_settings[bus_key][capacity]
         
         @staticmethod
         def get_num_gc_layers_range(num_buses):
@@ -370,14 +410,18 @@ class Config:
             }
             
             # Get capacity setting from Config
+            # Map num_buses to the correct capacity_settings key
             if num_buses <= 33:
                 capacity = Config.CAPACITY_33_BUS
+                bus_key = 33
             elif num_buses <= 57:
                 capacity = Config.CAPACITY_57_BUS
+                bus_key = 57
             else:
                 capacity = Config.CAPACITY_118_BUS
+                bus_key = 118
             
-            return capacity_settings[num_buses][capacity]
+            return capacity_settings[bus_key][capacity]
         
         @staticmethod
         def get_embedding_dim_range(num_buses):
@@ -405,14 +449,18 @@ class Config:
             
             # Get capacity setting from Config (moved from Args class)
             # Note: This will be set from YAML or use default values
+            # Map num_buses to the correct capacity_settings key
             if num_buses <= 33:
                 capacity = Config.CAPACITY_33_BUS
+                bus_key = 33
             elif num_buses <= 57:
                 capacity = Config.CAPACITY_57_BUS
+                bus_key = 57
             else:
                 capacity = Config.CAPACITY_118_BUS
+                bus_key = 118
             
-            return capacity_settings[num_buses][capacity]
+            return capacity_settings[bus_key][capacity]
         
         @staticmethod
         def get_recommended_model(num_buses):

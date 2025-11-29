@@ -436,9 +436,9 @@ def save_config_to_yaml(config_obj: Any, yaml_path: str = 'config_generated.yaml
     # MOOPF configuration
     config_dict['moopf'] = {
         'weights': {
-            'loss': getattr(config_obj, 'MOOPF_WEIGHT_LOSS', 1/3),
-            'voltage_deviation': getattr(config_obj, 'MOOPF_WEIGHT_VDEV', 1/3),
-            'carbon': getattr(config_obj, 'MOOPF_WEIGHT_CARBON', 1/3),
+            'loss': config_obj.MOOPF_WEIGHT_LOSS,
+            'voltage_deviation': config_obj.MOOPF_WEIGHT_VDEV,
+            'carbon': config_obj.MOOPF_WEIGHT_CARBON,
         }
     }
     

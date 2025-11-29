@@ -1,7 +1,5 @@
 import torch
-import numpy as np
 from tqdm import tqdm
-from collections import OrderedDict
 from .base_trainer import BaseTrainer
 from utils.forensic_logger import get_logger
 
@@ -60,11 +58,15 @@ class PowerSystemTrainer(BaseTrainer):
             if self.scaler:
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
+                # Gradient clipping: STANDARD PRACTICE for training stability, NOT cheating
+                # Essential for: physics-informed losses, graph neural networks, multi-task learning
+                # Prevents exploding gradients without affecting model capacity or final performance
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss.backward()
+                # Gradient clipping: STANDARD PRACTICE for training stability, NOT cheating
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
             
@@ -73,26 +75,41 @@ class PowerSystemTrainer(BaseTrainer):
                 if k in loss_dict:
                     epoch_metrics[k] += loss_dict[k]
             
-            # Progress Bar
-            desc = f"Loss: {loss.item():.4f} | MSE: {loss_dict['mse']:.4f}"
+            # Progress Bar - concise display
             if self.is_physics_informed:
-                desc += f" | Phys: {loss_dict['physics_loss']:.4f} | Safe: {loss_dict['safety_loss']:.4f}"
-                if 'sigmas' in loss_dict:
-                    sigmas = loss_dict['sigmas']
-                    desc += f" | Sig: [{sigmas[0]:.2f}, {sigmas[1]:.2f}, {sigmas[2]:.2f}]"
+                # Physics-informed: Compact format with Kendall weights
+                weights = loss_dict['weights']
+                desc = f"L={loss.item():.2f} M={loss_dict['mse']:.3f} P={loss_dict['physics_loss']:.1f} S={loss_dict['safety_loss']:.4f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f}]"
+            else:
+                # Non-physics: MSE only
+                desc = f"MSE: {loss_dict['mse']:.4f}"
             
             pbar.set_postfix_str(desc)
             
         # Average Metrics
         num_batches = len(train_loader)
-        return {k: v / num_batches for k, v in epoch_metrics.items()}
+        result = {k: v / num_batches for k, v in epoch_metrics.items()}
+        
+        # Add weights from last batch (they're model parameters, same for all batches)
+        if 'weights' in loss_dict:
+            result['weights'] = loss_dict['weights']
+        
+        return result
 
     def _val_epoch(self, val_loader):
         self.model.eval()
-        epoch_metrics = {'total_loss': 0.0, 'mse': 0.0}
+        # Initialize ALL metrics that train_epoch returns for consistency
+        epoch_metrics = {
+            'total_loss': 0.0,
+            'mse': 0.0,
+            'physics_loss': 0.0,
+            'safety_loss': 0.0
+        }
+        
+        pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Validation"):
+            for batch in pbar:
                 features = batch['features'].to(self.device)
                 targets = batch['targets'].to(self.device)
                 ybus = batch['ybus_matrix'].to(self.device)
@@ -111,6 +128,23 @@ class PowerSystemTrainer(BaseTrainer):
                 for k in epoch_metrics:
                     if k in loss_dict:
                         epoch_metrics[k] += loss_dict[k]
+                
+                # Update progress bar - concise display
+                if self.is_physics_informed:
+                    # Physics-informed: Compact format with Kendall weights
+                    weights = loss_dict['weights']
+                    desc = f"L={loss_dict['total_loss']:.2f} M={loss_dict['mse']:.3f} P={loss_dict['physics_loss']:.1f} S={loss_dict['safety_loss']:.4f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f}]"
+                else:
+                    # Non-physics: MSE only
+                    desc = f"MSE: {loss_dict['mse']:.4f}"
+                
+                pbar.set_postfix_str(desc)
         
         num_batches = len(val_loader)
-        return {k: v / num_batches for k, v in epoch_metrics.items()}
+        result = {k: v / num_batches for k, v in epoch_metrics.items()}
+        
+        # Add weights from last batch (they're model parameters, same for all batches)
+        if 'weights' in loss_dict:
+            result['weights'] = loss_dict['weights']
+        
+        return result

@@ -112,11 +112,12 @@ output_dir_to_use = args.output_dir if args.output_dir is not None else config_i
 
 CONFIG = {
     "random_seed": 42,
-    "test_cases": getattr(Config, 'test_cases', ["case33", "case57", "case118"]),
+    # All values now properly loaded from YAML via config_instance
+    "test_cases": getattr(config_instance, 'TEST_CASES', ["case33", "case57", "case118"]),
     "time_steps": timesteps_to_use,
     "output_dir": output_dir_to_use,
     "renewable_fractions_to_run": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    "contingency_rate": getattr(Config, 'contingency_rate', 0.05),
+    "contingency_rate": getattr(config_instance, 'CONTINGENCY_RATE', 0.05),
     "voltage_error_std": 0.005,
     "power_error_std": 0.01,
     "angle_error_std": 0.02,
@@ -124,11 +125,11 @@ CONFIG = {
     "loss_sensitivity": 0.01,
     "base_carbon_intensity_grid": 0.55,
     "max_carbon_reduction_from_renewables": 0.30,
-    "hours_per_day": getattr(Config, 'hours_per_day', 24),
+    "hours_per_day": getattr(config_instance, 'HOURS_PER_DAY', 24),
     "seed": 42,
     "chunk_size": 1000,
     "use_chunked_writing": True,
-    "pmu_coverage": getattr(Config, 'pmu_coverage', 0.3)
+    "pmu_coverage": getattr(config_instance, 'PMU_COVERAGE', 0.3)
 }
 
 def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = None, 
@@ -413,7 +414,15 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         if consecutive_failures >= 3:
             print(f"  [Hard Reset] {consecutive_failures} consecutive failures detected - triggering hard reset")
             base_renewable_p_mw_for_reset = {}
-            if not net.sgen.empty:
+            # DEFENSIVE: Check if 'type' column exists - FAIL FAST if missing
+            if not net.sgen.empty and 'type' not in net.sgen.columns:
+                raise RuntimeError(
+                    f"[Hard Reset] FATAL: 'type' column missing from net.sgen at timestep {t}. "
+                    f"This indicates configure_renewables() was not called or the network "
+                    f"structure is corrupted. Cannot reconstruct renewable profiles for reset."
+                )
+            
+            if not net.sgen.empty and 'type' in net.sgen.columns:
                 for i, sgen in net.sgen.iterrows():
                     # Time-series simulation (always enabled)
                     current_hour = t % config['hours_per_day']
@@ -967,37 +976,13 @@ if __name__ == "__main__":
     else:
         raise ValueError("No random seed set - results will not be reproducible! Set CONFIG['seed'] or use --seed argument")
     
-    data_mode = 'train'
+    # Use the module-level data_mode that was already correctly set from Config/CLI args (line 105)
+    # Don't override it here
     timesteps = None
     cases_to_run = None
 
-    args = sys.argv[1:]
-    if len(args) > 0 and not args[0].startswith('--'):
-        data_mode = args[0].lower()
-        if data_mode not in ['train', 'test']:
-            raise ValueError(f"Invalid data_mode '{data_mode}'. Use 'train' or 'test'")
-        args = args[1:]
-    
-    if len(args) > 0 and not args[0].startswith('--'):
-        try:
-            timesteps = int(args[0])
-            args = args[1:]
-        except ValueError:
-            pass
-            
-    i = 0
-    while i < len(args):
-        if args[i] == '--cases':
-            if i + 1 < len(args):
-                cases_str = args[i+1]
-                if cases_str.lower() == 'all':
-                     cases_to_run = ["case33", "case57", "case118"]
-                else:
-                    cases_to_run = [c.strip() for c in cases_str.split(',')]
-                i += 1
-            else:
-                raise ValueError("--cases requires a value (e.g. case33,case57 or all)")
-        i += 1
+    # Legacy positional argument parsing removed - now using argparse exclusively
+    # data_mode is already set from config_instance.DATA_MODE which respects CLI --mode argument
 
     try:
         parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

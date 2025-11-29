@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from typing import Dict, Optional
+from typing import Dict
 from config import FeatureIndices
 
 class PhysicsMetricEngine:
@@ -14,22 +14,23 @@ class PhysicsMetricEngine:
     4. Carbon Emissions: Based on generation mix
     """
     
-    def __init__(self, base_mva: float = 100.0):
+    def __init__(self, base_mva: float):
         self.base_mva = float(base_mva)
         
     def compute_metrics(self, 
                        preds_phys: torch.Tensor, 
                        ybus_batch: torch.Tensor,
-                       carbon_intensity: Optional[torch.Tensor] = None,
-                       energy_coeff: Optional[torch.Tensor] = None) -> Dict[str, float]:
+                       carbon_intensity: torch.Tensor,
+                       energy_coeff: torch.Tensor,
+                       renewable_fraction: torch.Tensor) -> Dict[str, float]:
         """
         Compute all physics metrics in one pass.
         
         Args:
             preds_phys: Denormalized predictions [batch, buses, 10]
             ybus_batch: Ybus matrices [batch, buses, buses]
-            carbon_intensity: Carbon intensity coefficient [batch] (optional)
-            energy_coeff: Energy coefficient [batch] (optional)
+            carbon_intensity: Carbon intensity coefficient [batch] (required, always present)
+            energy_coeff: Energy coefficient [batch] (required, always present)
             
         Returns:
             Dictionary of scalar metrics (mean over batch)
@@ -49,71 +50,92 @@ class PhysicsMetricEngine:
         # Mean absolute deviation from 1.0 p.u.
         voltage_deviation = torch.mean(torch.abs(vm - 1.0))
         
-        # 2. Power Balance / Flow
+        # 2. Power Flow Magnitude (ACOPF equation 3.8)
         # Complex voltage V = vm * exp(j * va)
         V = vm * torch.exp(1j * va)
         
         # Current Injection I = Y * V
-        # ybus_batch: [batch, buses, buses] (complex)
-        # V: [batch, buses] (complex) -> [batch, buses, 1] for broadcasting
+        # This implements: I_i = Σ_s Y_is * V_s
         I = torch.einsum('bij,bj->bi', ybus_batch.cfloat(), V)
         
-        # S_flow = V * conj(I) (Calculated Flow)
-        S_flow = V * torch.conj(I)
-        P_flow = S_flow.real
-        Q_flow = S_flow.imag
+        # Complex power flows: S = V * conj(I)
+        # This implements the ACOPF equation (3.8):
+        # S_i = V_i * conj(I_i) = V_i * Σ_s Y_is* * V_s*
+        # P_i = Re(S_i) = V_i Σ_s V_s (G_is cos θ_is + B_is sin θ_is)
+        # Q_i = Im(S_i) = V_i Σ_s V_s (G_is sin θ_is - B_is cos θ_is)
+        S_calc_pu = V * torch.conj(I)  # [batch, buses]
         
-        # Net Injection (Predicted)
-        # P_net = (P_ext + P_conv + P_ren) - P_load
-        # All inputs are in MW/MVAR, convert to p.u.
-        P_gen_mw = p_ext + p_conv + p_ren
-        Q_gen_mvar = preds_phys[..., FeatureIndices.Q_EXT_GRID] + \
-                     preds_phys[..., FeatureIndices.Q_CONV] + \
-                     preds_phys[..., FeatureIndices.Q_REN]
-                     
-        P_net_pu = (P_gen_mw - p_load) / self.base_mva
-        Q_net_pu = (Q_gen_mvar - q_load) / self.base_mva
+        # Extract active and reactive power flows (preserve signs for physics accuracy)
+        p_flow_values = S_calc_pu.real  # [batch, buses]
+        q_flow_values = S_calc_pu.imag  # [batch, buses]
         
-        # Power Mismatch (Balance Violation)
-        p_mismatch = F.mse_loss(P_net_pu, P_flow)
-        q_mismatch = F.mse_loss(Q_net_pu, Q_flow)
-        power_balance_mismatch = p_mismatch + q_mismatch
+        # Calculate apparent power flow magnitude per bus
+        s_flow_magnitudes = torch.sqrt(p_flow_values**2 + q_flow_values**2)  # [batch, buses]
+        
+        # Calculate mean apparent power flow magnitude per bus
+        mean_flow_magnitude_per_bus = torch.mean(s_flow_magnitudes, dim=-1)  # [batch]
+        
+        # Normalize by total load magnitude
+        p_load_total = torch.sum(p_load, dim=-1)  # [batch]
+        q_load_total = torch.sum(q_load, dim=-1)  # [batch]
+        total_load_magnitude = torch.sqrt(p_load_total**2 + q_load_total**2)
+        total_load_pu = total_load_magnitude / self.base_mva
+        
+        power_flow = torch.mean(mean_flow_magnitude_per_bus / (total_load_pu + 1e-9))
         
         # 3. Power Loss
-        # Real Loss = Sum of Net Injections (Generation - Load)
-        # Ideally should be sum(P_flow), which accounts for line losses
-        # P_loss_pu = sum(P_flow) across buses
-        system_loss_pu = torch.sum(P_flow, dim=1) # [batch]
-        # Convert to MW for readability? Keep p.u. for consistency? 
-        # Usually % loss is better. Loss / Total Load
-        total_load_pu = torch.sum(p_load, dim=1) / self.base_mva
-        loss_percentage = torch.mean(torch.abs(system_loss_pu) / (torch.abs(total_load_pu) + 1e-6))
+        # Real Loss = Sum of active power flows across buses
+        system_loss_pu = torch.sum(p_flow_values, dim=1) / self.base_mva  # [batch]
+        # Loss percentage relative to total load
+        loss_percentage = torch.mean(torch.abs(system_loss_pu) / (total_load_pu + 1e-6))
         
-        # 4. Carbon Emissions
-        # Carbon = (P_conv + max(0, P_ext)) * CarbonIntensity
-        # P_conv is always carbon (unless nuclear, but assuming fossil for now or general mix)
-        # P_ext: Imports (positive) are carbon, Exports (negative) are saved elsewhere (or 0)
+        # 4. Carbon Emissions (Physics-Consistent with Gemini Approach)
+        # CONSISTENCY: Like power_flow and power_loss, calculate from PHYSICS not predictions
+        # 
+        # Research Paper Formula: f3 = (P_carbon * Cm) / Ef
+        # But calculate P_carbon from PHYSICS (V, Y), not from predicted P_conv/P_ren
         
-        # Carbon emitting generation in MW
-        carbon_gen_mw = p_conv + F.relu(p_ext) 
-        total_carbon_gen_mw = torch.sum(carbon_gen_mw, dim=1) # [batch]
+        # Step 1: Calculate TOTAL generation from physics (already have P_flow from above)
+        # P_gen = sum of all injections at buses
+        # From ACOPF: P_gen_total = sum(P_flow) per bus
+        # We already calculated S_calc_pu = V * conj(I) above
+        p_gen_per_bus = p_flow_values  # [batch, buses] - Real power from physics
         
-        if carbon_intensity is not None:
-            # If intensity provided (e.g., kgCO2/MWh)
-            # Ensure shapes match
-            if carbon_intensity.dim() > 1:
-                carbon_intensity = carbon_intensity.squeeze()
-            
-            # Normalize intensity if needed, or compute raw
-            # Assuming carbon_intensity is per MWh
-            emissions = torch.mean(total_carbon_gen_mw * carbon_intensity)
-        else:
-            # Proxy: Just sum of carbon generation
-            emissions = torch.mean(total_carbon_gen_mw)
+        # Total system generation (sum positive generation only)
+        p_gen_total = torch.sum(F.relu(p_gen_per_bus), dim=1)  # [batch]
+        
+        # Step 2: Split into carbon/renewable using renewable_fraction from data
+        # Physics-based approach (consistent with power flow/loss)
+        # renewable_fraction is always present from data loader (line 303 in data_loader.py)
+        
+        if renewable_fraction.dim() > 1:
+            renewable_fraction = renewable_fraction.squeeze()
+        
+        # P_carbon = P_total * (1 - renewable_fraction)
+        total_carbon_emitting_gen = p_gen_total * (1.0 - renewable_fraction)  # [batch]
+        total_generation = p_gen_total  # [batch]
+        
+        # Ensure carbon_intensity and energy_coeff are 1D
+        if carbon_intensity.dim() > 1:
+            carbon_intensity = carbon_intensity.squeeze()
+        if energy_coeff.dim() > 1:
+            energy_coeff = energy_coeff.squeeze()
+        
+        # Raw emissions using research paper formula
+        raw_emissions = (total_carbon_emitting_gen * carbon_intensity) / (energy_coeff + 1e-9)  # [batch]
+        
+        # Normalize to per-unit by dividing by maximum possible emissions
+        # (total_generation * carbon_intensity / energy_coeff)
+        # This gives: (carbon_gen * C/E) / (total_gen * C/E) = carbon_gen / total_gen
+        max_possible_emissions = (total_generation * carbon_intensity) / (energy_coeff + 1e-9)  # [batch]
+        emissions_pu = raw_emissions / (max_possible_emissions + 1e-9)  # [batch]
+        
+        emissions = torch.mean(emissions_pu)
 
         return {
             'voltage_deviation': voltage_deviation.item(),
-            'power_balance_mismatch': power_balance_mismatch.item(),
+            'power_flow': power_flow.item(),  # For tracking/plotting only, not in MOOPF
             'system_power_loss': loss_percentage.item(),
-            'carbon_emissions': emissions.item()
+            'carbon_emissions': emissions.item(),  # Per-unit (for MOOPF)
+            'carbon_emissions_raw': torch.mean(raw_emissions).item()  # For tracking/plotting only, not in MOOPF
         }

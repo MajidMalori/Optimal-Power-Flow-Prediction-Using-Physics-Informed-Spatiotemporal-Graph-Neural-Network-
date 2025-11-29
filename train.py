@@ -5,10 +5,18 @@ import argparse
 import numpy as np
 import pandas as pd
 import copy
-import gc
-import signal
-import yaml
 import sys
+import yaml
+import signal
+import gc
+
+# Global data cache for bus systems (used across multiple functions)
+_file_metadata = None
+_adjacency = None
+_ybus_metadata = None
+_normalizer = None
+_topology_cache = None
+_topology_ids = None
 
 def check_gpu_memory():
     """Check available GPU memory and return status"""
@@ -30,87 +38,40 @@ def check_gpu_memory():
 
 def clear_gpu_memory():
     """
-    Clear GPU memory cache - ONLY call when actually hitting OOM errors.
-    
-    WARNING: Do NOT call this frequently - it forces CPU-GPU synchronization
-    and pauses execution. PyTorch's allocator manages memory efficiently.
-    Only use this when swapping models or when actually hitting OOM.
+    Clear GPU memory cache when swapping models.
+    Only called between different model architectures to prevent OOM.
     """
-    # REMOVED: Aggressive cleanup slows down training significantly
-    # Only clear cache if actually needed (OOM errors)
-    # if torch.cuda.is_available():
-    #     torch.cuda.empty_cache()
-    #     torch.cuda.synchronize()
-    #     gc.collect()
-    pass
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-def log_memory_usage(stage_name):
-    """Log memory usage at different stages"""
-    # Memory logging disabled
-    pass
-
-def get_adaptive_batch_size(num_buses, base_batch_size=32, use_gradient_accumulation=False):
+def get_adaptive_batch_size(num_buses, base_batch_size=32):
     """
-    Get adaptive batch size based on system size.
-    
-    Gradient accumulation is disabled, so batch size is optimized for memory.
+    Get batch size based on system size.
+    Larger systems use smaller batches due to memory constraints.
     """
-    if use_gradient_accumulation:
-        # With accumulation: use smaller batches to save memory
-        if num_buses >= 118:
-            return max(1, base_batch_size // 4)  # Large systems: smaller batches
-        elif num_buses >= 57:
-            return max(1, base_batch_size // 2)  # Medium systems: medium batches
-        else:
-            return base_batch_size  # Small systems: full batches
+    if num_buses <= 33:
+        return base_batch_size
+    elif num_buses <= 69:
+        return max(16, base_batch_size // 2)
+    elif num_buses <= 118:
+        return max(8, base_batch_size // 4)
     else:
-        # Without accumulation: use larger batches to match effective batch size
-        # This is faster but uses more memory (all gradients stored at once)
-        if num_buses >= 118:
-            return base_batch_size  # Large systems: full batch (was base_batch_size // 4 * 4)
-        elif num_buses >= 57:
-            return base_batch_size  # Medium systems: full batch (was base_batch_size // 2 * 2)
-        else:
-            return base_batch_size  # Small systems: full batches (no change)
+        return max(4, base_batch_size // 8)
 
 def cleanup_bus_system_data():
-    """
-    Clean up data between bus systems to free memory.
+    """Clean up data between bus systems to free memory."""
+    global _file_metadata, _adjacency, _ybus_metadata, _normalizer, _topology_cache, _topology_ids
     
-    REMOVED: Aggressive gc.collect() and empty_cache() - these slow down execution.
-    Only clear references - let Python's GC handle the rest naturally.
-    """
-    global _file_metadata, _adjacency, _ybus_metadata, _normalizer
-    
-    # Clear data structures (metadata is lightweight, but clear for consistency)
-    if '_file_metadata' in globals():
-        del _file_metadata
-    if '_adjacency' in globals():
-        del _adjacency
-    if '_ybus_metadata' in globals():
-        del _ybus_metadata
-    if '_normalizer' in globals():
-        del _normalizer
-
-def cleanup_model_resources(model, trainer, optimizer, criterion):
-    """
-    Clean up model resources between different models.
-    
-    REMOVED: Aggressive gc.collect() and empty_cache() - these slow down execution.
-    Only clear references - let Python's GC handle the rest naturally.
-    """
-    # Delete model and related objects
-    if model is not None:
-        del model
-    if trainer is not None:
-        del trainer
-    if optimizer is not None:
-        del optimizer
-    if criterion is not None:
-        del criterion
+    # Reset global variables to None (Python's GC will handle cleanup)
+    _file_metadata = None
+    _adjacency = None
+    _ybus_metadata = None
+    _normalizer = None
+    _topology_cache = None
+    _topology_ids = None
 
 def enable_gradient_checkpointing(model):
-    """Enable gradient checkpointing for memory efficiency"""
+    """Enable gradient checkpointing for memory efficiency (currently unused)."""
     if hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
         print("  Gradient checkpointing enabled for memory efficiency")
@@ -143,7 +104,6 @@ def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
 # Set matplotlib backend before any plotting imports
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend to prevent threading issues
-import matplotlib.pyplot as plt
 
 from utils.data_loader import load_power_system_data, create_data_loaders
 from utils.metrics import PowerSystemLoss
@@ -151,14 +111,16 @@ from utils.data_validation import validate_data_before_training
 from utils.optimization import (mosoa_optimizer, setup_hyperparameter_bounds, create_model_kwargs, 
                                generate_run_name, process_optimization_params, format_params_concise,
                                calculate_objective_score)
-from utils.evaluation import (evaluate_model, evaluate_model_normalized, evaluate_model_with_uncertainty,
-                             evaluate_moopf_objectives, evaluate_moopf_objectives_normalized, 
-                             save_best_model_results, print_comprehensive_summary, print_model_summary)
 from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
-from utils.evaluate_robustness import evaluate_model_robustness
+from utils.evaluation import (evaluate_model, evaluate_model_normalized,
+                             evaluate_model_mc_dropout, compute_engineering_metrics,
+                             evaluate_renewable_impacts, evaluate_renewable_impacts_from_predictions, save_results,
+                             evaluate_model_with_uncertainty, evaluate_moopf_objectives_normalized,
+                             save_best_model_results, save_model_results_csv, print_model_summary, print_comprehensive_summary)
 from trainers.model_trainer import PowerSystemTrainer
 from utils.forensic_logger import init_forensic_logger, close_logger
+from utils.shutdown_flag import set_shutdown
 from config import Config
 
 
@@ -183,7 +145,6 @@ _config_instance = None
 
 def signal_handler(signum, _):
     """Handle interrupt signals gracefully - set flag instead of printing directly."""
-    from utils.shutdown_flag import set_shutdown
     set_shutdown()
 
 def setup_professional_logging():
@@ -230,7 +191,7 @@ def main():
     parser.add_argument('--output_dir', type=str, default=None, help='Override output directory')
     parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
     parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data mode (train/test)')
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
     
     # Pass CLI overrides to Config
     base_config = Config(
@@ -249,22 +210,35 @@ def main():
     # Parse bus systems to test (from Config, not Args)
     def parse_bus_systems(bus_systems_arg):
         """Parse bus systems argument and return list of bus numbers to test."""
-        if bus_systems_arg.lower() == 'all':
-            return base_config.NUM_BUSES
-        else:
-            # Parse comma-separated values
-            bus_list = []
-            for bus_str in bus_systems_arg.split(','):
-                bus_str = bus_str.strip()
-                try:
-                    bus_num = int(bus_str)
-                    if bus_num in base_config.NUM_BUSES:
-                        bus_list.append(bus_num)
-                    else:
-                        print(f"Warning: {bus_num}-bus system not available. Available: {base_config.NUM_BUSES}")
-                except ValueError:
-                    print(f"Warning: Invalid bus system '{bus_str}'. Skipping.")
-            return bus_list if bus_list else base_config.NUM_BUSES
+        # Handle list (from YAML)
+        if isinstance(bus_systems_arg, list):
+            return [int(b) for b in bus_systems_arg]
+        
+        # Handle string
+        if isinstance(bus_systems_arg, str):
+            if bus_systems_arg.lower() == 'all':
+                return base_config.NUM_BUSES
+            else:
+                # Parse comma-separated values
+                bus_list = []
+                for bus_str in bus_systems_arg.split(','):
+                    bus_str = bus_str.strip()
+                    try:
+                        bus_num = int(bus_str)
+                        if bus_num in base_config.NUM_BUSES:
+                            bus_list.append(bus_num)
+                        else:
+                            print(f"WARNING: {bus_num}-bus system not available. Available: {base_config.NUM_BUSES}")
+                    except ValueError:
+                        print(f"WARNING: Invalid bus system '{bus_str}'. Skipping.")
+                return bus_list if bus_list else base_config.NUM_BUSES
+        
+        # Handle single integer
+        if isinstance(bus_systems_arg, int):
+            return [bus_systems_arg]
+        
+        # Fallback
+        return base_config.NUM_BUSES
     
     bus_systems_to_test = parse_bus_systems(getattr(Config, 'bus_systems', 'all'))
     
@@ -274,12 +248,13 @@ def main():
     # STEP 1: Concise run information (one line)
     run_info = base_config.get_run_info()
     data_mode = getattr(Config, 'data_mode', 'test')
-    actual_timesteps = base_config.DATA_MODE_TIMESTEPS[data_mode]
     
     # STEP 2: Validate data before training
     if not validate_data_before_training(base_config, bus_systems_to_test):
-        print("Data validation failed. Exiting training.")
-        return
+        raise RuntimeError(
+            "Data validation failed! Required data files are missing or invalid.\n"
+            "Run data generation first: python data/main.py"
+        )
     
     seed = getattr(Config, 'SEED', 42)
     torch.manual_seed(seed)
@@ -287,15 +262,13 @@ def main():
     
     # === DEVICE AND PARALLEL CONFIGURATION ===
     force_cpu = getattr(Config, 'force_cpu', False)
-    device, device_reason = get_safe_device(force_cpu, min_free_memory_gb=2.0)
+    device, _ = get_safe_device(force_cpu, min_free_memory_gb=2.0)
     
     # Store Config attributes for later use (replaces args object)
     _config_attrs = {
-
         'save_results': getattr(Config, 'save_results', True),
         'clear_results': getattr(Config, 'clear_results', True),
     }
-    is_gpu = device.type == 'cuda'
     clear_gpu_memory()
     
     # Auto-configure NUM_WORKERS based on CPU cores (heuristic: half cores, capped at 8)
@@ -330,17 +303,32 @@ def main():
     # Get model configurations from config
     model_class_map = base_config.get_model_class_map()
     model_config_map = base_config.model_config_map
-    models_to_test = base_config.get_models_to_test(test_config)
     
-    # Filter models based on user selection
-    models_to_train = getattr(Config, 'models_to_train', 'all')
-    if models_to_train != 'all':
-        selected_models = [m.strip() for m in models_to_train.split(',')]
-        models_to_test = [m for m in models_to_test if m in selected_models]
-        print(f"Selected models to train: {models_to_test}")
-        if not models_to_test:
-            print("ERROR: No valid models selected. Available models: PIGCLSTM, PIGCGRU, ResnetPIGCLSTM, ResnetPIGCGRU")
-            return
+    # Hierarchical model selection:
+    # 1. If models_to_train is specified and not "all" → Use those (override test_config)
+    # 2. Otherwise → Use test_config
+    models_to_train = getattr(Config, 'models_to_train', None)
+    
+    if models_to_train and models_to_train != "all":
+        # User specified exact models → Override test_config
+        if isinstance(models_to_train, str):
+            models_to_test = [m.strip() for m in models_to_train.split(',')]
+        elif isinstance(models_to_train, list):
+            models_to_test = models_to_train
+        else:
+            models_to_test = [models_to_train]
+        print(f"Using explicit model selection (overriding test_config): {models_to_test}")
+    else:
+        # Use test_config presets
+        models_to_test = base_config.get_models_to_test(test_config)
+        print(f"Using test_config '{test_config}': {models_to_test}")
+    
+    if not models_to_test:
+        raise ValueError(
+            f"No models selected for training!\n"
+            f"Available test_config options: quick, core, comprehensive, physics_only, non_physics_only, sequential_only, all\n"
+            f"Or set models_to_train to specific models like: ['GCN', 'adaptiveGCN']"
+        )
 
     # === MAIN TRAINING EXECUTION ===
     for num_buses in bus_systems_to_test:
@@ -368,6 +356,8 @@ def main():
                 system_limits = yaml_config['system_limits']
                 if case_name_lower in system_limits:
                     limits = system_limits[case_name_lower]
+                    if 'base_mva' in limits:
+                        base_config.BASE_MVA = limits['base_mva']
                     if 'v_min' in limits:
                         base_config.V_MIN = limits['v_min']
                     if 'v_max' in limits:
@@ -383,7 +373,8 @@ def main():
             
             bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:
-            print(f"Error: {e}")
+            print(f"WARNING: Skipping {num_buses}-bus system - data not found: {e}")
+            print(f"  Run data generation for this system: python data/main.py")
             continue
 
         for model_name in bus_models_to_test:
@@ -425,8 +416,7 @@ def main():
                     # Use adaptive batch size based on system size
                     run_config.BATCH_SIZE = get_adaptive_batch_size(
                         num_buses, 
-                        run_config.BATCH_SIZE, 
-                        use_gradient_accumulation=False  # Always disabled
+                        run_config.BATCH_SIZE
                     )
                     
                     # Safety check: Cap batch size to prevent OOM
@@ -437,7 +427,6 @@ def main():
                             print(f"  Warning: Batch size {run_config.BATCH_SIZE} may cause OOM for {num_buses}-bus. Capping to {max_safe_batch}")
                             run_config.BATCH_SIZE = max_safe_batch
                     
-                    log_memory_usage(f"Before loading {num_buses}-bus data")
                     
                     loaders = create_data_loaders(
                         _file_metadata, _adjacency, _ybus_metadata, _normalizer, base_config, 
@@ -448,7 +437,8 @@ def main():
                     # Create model with optimized parameters (always OPF mode)
                     model_kwargs = create_model_kwargs(
                         model_config, params, num_buses, is_sequential, uses_adaptive_graph, 
-                        model_name=model_name, config=run_config, normalizer=_normalizer
+                        model_name=model_name, config=run_config, normalizer=_normalizer,
+                        is_physics_informed=is_physics_informed
                     )
                     
                     # Check memory before model creation
@@ -459,7 +449,6 @@ def main():
                             clear_gpu_memory()
                     
                     # Create model with error handling for OOM
-                    log_memory_usage(f"Before creating {model_name} model")
                     try:
                         model = model_class_map[model_name](**model_kwargs).to(device)
                         # Enable gradient checkpointing for large models
@@ -536,11 +525,31 @@ def main():
                     # Train the model 
                     trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses, config_params=config_params)
 
-                    # Get validation metrics for hyperparameter optimization 
-                    val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
+                    # Get training history with validation total loss (includes physics)
+                    training_history = trainer.get_training_history()
                     
-                    # Get test metrics for final evaluation
-                    test_metrics = evaluate_model(model, test_loader, device, run_config, _normalizer, is_sequential)
+                    # For physics-informed models: Use the TOTAL LOSS (MSE + Physics + Safety)
+                    # For non-physics models: Use MSE only
+                    if is_physics_informed and 'val_total_loss' in training_history:
+                        # Use the final validation total loss (last epoch)
+                        # This includes MSE + weighted physics + weighted safety with Kendall balancing
+                        final_val_loss = training_history['val_total_loss'][-1]
+                        # Convert to float if it's a tensor
+                        if hasattr(final_val_loss, 'detach'):
+                            final_val_loss = final_val_loss.detach().item()
+                        elif hasattr(final_val_loss, 'item'):
+                            final_val_loss = final_val_loss.item()
+                        
+                        val_metrics = {
+                            'total_loss': float(final_val_loss),
+                            'mse': float(training_history['val_mse'][-1])
+                        }
+                    else:
+                        # Non-physics: Just use MSE
+                        val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
+                    
+                    # Get test metrics for final evaluation (use normalized MSE for consistency)
+                    test_metrics = evaluate_model_normalized(model, test_loader, device, run_config, _normalizer, is_sequential)
 
                     # Calculate objective score for MoSOA optimization
                     total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
@@ -559,6 +568,11 @@ def main():
                         print(f"  Could not save model state: {e}")
                         model_state = None
                     
+                    # Extract final physics_loss and safety_loss from training history
+                    training_history = trainer.get_training_history()
+                    final_physics_loss = training_history['val_physics_loss'][-1] if training_history['val_physics_loss'] else 0.0
+                    final_safety_loss = training_history['val_safety_loss'][-1] if training_history['val_safety_loss'] else 0.0
+                    
                     run_results = {
                         'run_name': run_name, 
                         'model_name': model_name, 
@@ -567,7 +581,9 @@ def main():
                         'val_metrics': val_metrics,  # Validation metrics used for optimization
                         'total_loss': total_loss,  # Based on validation metrics
                         'training_mse': val_metrics['mse'],
-                        'training_history': trainer.get_training_history(),
+                        'physics_loss': final_physics_loss,  # Final validation physics loss
+                        'safety_loss': final_safety_loss,  # Final validation safety loss
+                        'training_history': training_history,
                         'model_state': model_state,  # May be None for large models
                         'model_config': run_config  
                     }
@@ -580,15 +596,6 @@ def main():
                     error_msg = str(e).replace('η', 'eta').replace('δ', 'delta').replace('σ', 'sigma').replace('λ', 'lambda')
                     logging.error(f"Run {run_name} failed: {error_msg}", exc_info=True)
                     return float('inf')
-                finally:
-                    # Clean up model and memory
-                    cleanup_model_resources(
-                        locals().get('model'), 
-                        locals().get('trainer'), 
-                        locals().get('optimizer'), 
-                        locals().get('criterion')
-                    )
-                    log_memory_usage(f"After {model_name} training")
 
             # Always use MoSOA for hyperparameter optimization
             if True:  # MoSOA always enabled
@@ -608,12 +615,12 @@ def main():
             print("="*80)  # Add clear separator after MoSOA completion
 
             if not model_specific_results: 
-                print(f"No successful runs for {model_name}.")
+                print(f"WARNING: No successful runs for {model_name} - skipping to next model.")
                 continue
 
             best_run_df = pd.DataFrame(model_specific_results)
             if 'total_loss' not in best_run_df.columns or best_run_df['total_loss'].notna().sum() == 0:
-                print(f"All runs for {model_name} failed.")
+                print(f"WARNING: All optimization runs for {model_name} failed - skipping to next model.")
                 continue
 
             # Get the best run and add MoSOA results
@@ -634,7 +641,8 @@ def main():
             # Create model kwargs for best model (always OPF mode)
             model_kwargs_best = create_model_kwargs(
                 model_config, best_params, num_buses, is_sequential, uses_adaptive_graph, 
-                model_name=model_name, config=best_config, normalizer=_normalizer
+                model_name=model_name, config=best_config, normalizer=_normalizer,
+                is_physics_informed=is_physics_informed
             )
 
             # Create data loaders for best model
@@ -669,10 +677,73 @@ def main():
                 else:
                     raise e
 
+            # Define model output directory (needed for saving results)
+            case_name = f"case{num_buses}"
+            model_output_dir = os.path.join(
+                base_config.CURRENT_RUN_DIR, 
+                f"{num_buses}bus", 
+                "models",
+                model_name
+            )
+            os.makedirs(model_output_dir, exist_ok=True)
+            
             # Evaluate MOOPF objectives for the best model 
             moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
                 model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
             )
+            
+            # Save mse_detailed.csv (only for physics-informed models)
+            if is_physics_informed and 'mse_per_sample' in moopf_results:
+                mse_df = pd.DataFrame({'mse_score': moopf_results['mse_per_sample']})
+                mse_detailed_path = os.path.join(model_output_dir, 'mse_detailed.csv')
+                mse_df.to_csv(mse_detailed_path, index=False)
+                print(f"  Saved mse_detailed.csv ({len(moopf_results['mse_per_sample'])} samples)")
+            
+            # Comprehensive MC Dropout evaluation with physics metrics (only for physics-informed models)
+            if is_physics_informed and base_config.SAVE_RESULTS:
+                try:
+                    print(f"\n[{model_name}] Running comprehensive MC Dropout evaluation...")
+                    
+                    # Full MC Dropout with ybus for physics validation and carbon/energy coefficients
+                    # This single call provides: predictions, targets, uncertainties, ybus, carbon, energy, renewable_fraction
+                    preds_phys, targets_phys, uncertainties_phys, ybus_batch, carbon_intensity, energy_coeff, renewable_fraction = evaluate_model_mc_dropout(
+                        model_to_eval, test_loader_best, device, best_config, _normalizer, num_samples=50
+                    )
+                    
+                    # Compute detailed engineering metrics using PhysicsMetricEngine with actual coefficients
+                    # Pass renewable_fraction for physics-consistent carbon calculation
+                    engineering_metrics = compute_engineering_metrics(
+                        preds_phys, targets_phys, ybus_batch,
+                        base_mva=_normalizer.base_mva,
+                        carbon_intensity=carbon_intensity, energy_coeff=energy_coeff,
+                        renewable_fraction=renewable_fraction
+                    )
+                    
+                    print(f"  Engineering Metrics:")
+                    print(f"    Voltage Deviation: {engineering_metrics['voltage_deviation']:.6f} p.u.")
+                    print(f"    Power Flow: {engineering_metrics['power_flow']:.6f} p.u.")
+                    print(f"    System Power Loss: {engineering_metrics['system_power_loss']:.4f}%")
+                    print(f"    Carbon Emissions (per-unit): {engineering_metrics['carbon_emissions']:.6f}")
+                    print(f"    Carbon Emissions (raw): {engineering_metrics['carbon_emissions_raw']:.2f}")
+                    
+                    # Renewable penetration impact analysis (reuse MC Dropout results - NO second evaluation!)
+                    renewable_impact_df = evaluate_renewable_impacts_from_predictions(
+                        preds_phys, uncertainties_phys, _normalizer
+                    )
+                    
+                    # Save comprehensive results to files
+                    save_results(
+                        metrics={**moopf_results, **engineering_metrics},
+                        results_df=renewable_impact_df,
+                        config=best_config
+                    )
+                    
+                    print(f"[{model_name}] Comprehensive evaluation complete and saved.")
+                    
+                except Exception as e:
+                    print(f"[{model_name}] Warning: Comprehensive evaluation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Generate uncertainty visualizations (for both train and test modes)
             if base_config.SAVE_RESULTS:
@@ -681,16 +752,6 @@ def main():
                     _, uncertainty_data = evaluate_model_with_uncertainty(
                         model_to_eval, test_loader_best, device, best_config, _normalizer, is_sequential
                     )
-                    
-                    # Generate and save uncertainty graphs in model-specific folder
-                    case_name = f"case{num_buses}"
-                    model_output_dir = os.path.join(
-                        base_config.CURRENT_RUN_DIR, 
-                        f"{num_buses}bus", 
-                        "models", 
-                        model_name
-                    )
-                    os.makedirs(model_output_dir, exist_ok=True)
                     
                     generate_uncertainty_visualizations(
                         predictions=uncertainty_data['predictions'],
@@ -742,35 +803,57 @@ def main():
                         except Exception as e:
                             print(f"  Warning: Could not generate evaluation plots: {e}")
                     
-                    # Evaluate robustness under contingencies (if enabled)
-                    if getattr(best_config, 'ENABLE_CONTINGENCY_ANALYSIS', False):
-                        try:
-                            evaluate_model_robustness(
-                                model=model_to_eval,
-                                test_loader=test_loader_best,
-                                device=device,
-                                config=best_config,
-                                normalizer=_normalizer,
-                                case_name=case_name,
-                                output_dir=model_output_dir,
-                                model_name=model_name,
-                                top_k_contingencies=getattr(best_config, 'CONTINGENCY_TOP_K', 10),
-                                contingency_method=getattr(best_config, 'CONTINGENCY_METHOD', 'power_flow')
-                            )
-                        except Exception as e:
-                            print(f"  Warning: Could not evaluate robustness: {e}")
+                    # Note: Contingency analysis is done during data generation (N-1 scenarios)
+                    # The model is already trained on contingency data, no need to re-evaluate
                 except Exception as e:
                     print(f"  Warning: Could not generate uncertainty visualizations: {e}")
                     import traceback
                     traceback.print_exc()
             
+            # Generate additional plots: training history, convergence, renewable impacts
+            try:
+                from utils.visualization import plot_training_history, plot_convergence, plot_all_renewable_impacts
+                
+                # Training history plot
+                plot_training_history(
+                    history=best_run['training_history'],
+                    model_name=model_name,
+                    config=best_config,
+                    num_buses=num_buses,
+                    is_physics_informed=is_physics_informed
+                )
+                
+                # MoSOA convergence plot (individual per model)
+                if history:  # history = convergence_curve from MoSOA
+                    plot_convergence(
+                        history=history,
+                        model_name=model_name,
+                        config=best_config,
+                        num_buses=num_buses
+                    )
+                
+                # Renewable impact plots (ri_combined.png) - only for physics-informed models
+                if is_physics_informed and renewable_impact_data is not None and not renewable_impact_data.empty:
+                    plot_all_renewable_impacts(
+                        renewable_impact_data=renewable_impact_data,
+                        config=best_config,
+                        num_buses=num_buses,
+                        model_name=model_name
+                    )
+                    
+            except Exception as e:
+                print(f"  Warning: Could not generate additional plots: {e}")
+                import traceback
+                traceback.print_exc()
+            
             # Calculate final test performance metric for comparison
-            if is_physics_informed:
-                # Use MSE as the primary metric, but track MOOPF score separately
-                final_test_score = moopf_results['mse_score'].mean() if 'mse_score' in moopf_results.columns else best_run.get('mse', float('inf'))
-                final_metric_name = "MOOPF Score"  # This is just a label indicating we also have MOOPF evaluation
+            if is_physics_informed and moopf_results:
+                # Use MOOPF score for physics-informed models
+                final_test_score = moopf_results.get('mse_score', best_run.get('mse', 0.0))
+                final_metric_name = "MOOPF Score"
             else:
-                final_test_score = moopf_results['mse_score'].mean()
+                # Use test MSE for non-physics models (moopf_results is empty dict)
+                final_test_score = best_run.get('mse', best_run.get('test_score', 0.0))
                 final_metric_name = "Test MSE"
             
             # Store results for comprehensive summary
@@ -778,13 +861,13 @@ def main():
                 'model_name': model_name,
                 'num_buses': num_buses,
                 'is_physics_informed': is_physics_informed,
-                'best_hidden_dim': best_run.get('HIDDEN_DIM', 'N/A'),
-                'best_gc_layers': best_run.get('NUM_GC_LAYERS', 'N/A'),
-                'training_mse': best_run.get('training_mse', best_run.get('mse', float('inf'))),
+                'best_hidden_dim': best_run['HIDDEN_DIM'],
+                'best_gc_layers': best_run['NUM_GC_LAYERS'],
+                'training_mse': best_run['training_mse'],
                 'final_test_score': final_test_score,
                 'final_metric_name': final_metric_name,
-                'power_violation': best_run.get('power_violation', 'N/A') if is_physics_informed else 'N/A',
-                'voltage_violation': best_run.get('voltage_violation', 'N/A') if is_physics_informed else 'N/A'
+                'physics_loss': best_run['physics_loss'] if is_physics_informed else 'N/A',
+                'safety_loss': best_run['safety_loss'] if is_physics_informed else 'N/A'
             }
             all_results.append(result_entry)
             
@@ -808,7 +891,20 @@ def main():
                 num_buses=num_buses,
                 is_physics_informed=is_physics_informed,
                 iteration_details=iteration_details,
-                param_keys=param_keys
+                param_keys=param_keys,
+                model_name=model_name,
+                output_dir=model_output_dir
+            )
+            
+            # Save model_results.csv
+            save_model_results_csv(
+                best_run=best_run,
+                moopf_results=moopf_results,
+                config=best_config,
+                num_buses=num_buses,
+                model_name=model_name,
+                output_dir=model_output_dir,
+                iteration_details=iteration_details
             )
             
             # Collect data for comparative plots
@@ -877,11 +973,9 @@ def main():
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()
-        log_memory_usage(f"After completing {num_buses}-bus system")
         
         # Clean up data between bus systems
         cleanup_bus_system_data()
-        log_memory_usage("After bus system cleanup")
     
     # Print comprehensive final summary
     print_comprehensive_summary(all_results, base_config)
@@ -915,11 +1009,6 @@ def main():
         base_config.finalize_run({'status': 'no_results', 'test_config': test_config})
 
 
-def signal_handler_legacy(signum, _):
-    """Legacy signal handler - kept for compatibility but uses flag-based approach."""
-    global _shutdown_flag
-    _shutdown_flag = True
-
 if __name__ == '__main__':
     # Set up signal handlers for clean exit (use flag-based approach)
     signal.signal(signal.SIGINT, signal_handler)
@@ -950,7 +1039,6 @@ if __name__ == '__main__':
     finally:
         gc.collect()  # OK at final exit
         if torch.cuda.is_available():
-
             torch.cuda.empty_cache()  # OK at final exit
         print("\nTraining script completed")
         close_logger() # Close forensic logger

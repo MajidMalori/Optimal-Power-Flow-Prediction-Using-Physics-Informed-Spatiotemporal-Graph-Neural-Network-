@@ -173,41 +173,82 @@ def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
                             bus_types: np.ndarray, case_name: str,
                             output_dir: str, model_name: str = "", config: Any = None):
     """
-    Generate calibration plot (reliability diagram) for MC Dropout uncertainty.
+    Generate calibration plot (reliability diagram) showing prediction error distribution.
     
-    Validates that predicted confidence intervals match actual coverage.
-    A well-calibrated model will have points close to the y=x line.
+    For MC Dropout models (without explicit uncertainty outputs), this shows:
+    - Error distribution histogram (how well predictions match actuals)
+    - Residual analysis by feature type
     
     Args:
-        model_outputs: [n_samples, n_buses, 10] - MC Dropout predictions (mean)
-        targets: [n_samples, n_buses, 10] - true full state
-        bus_types: [n_samples, n_buses] - bus type codes (unused, kept for compatibility)
+        model_outputs: [n_samples, n_buses, 10] - Model predictions (mean)
+        targets: [n_samples, n_buses, 10] - True full state
+        bus_types: [n_samples, n_buses] - Bus type codes (unused, kept for compatibility)
         case_name: Name of the test case
         output_dir: Directory to save plots
         model_name: Optional model name for title
         config: Config object (unused, kept for compatibility)
     """
-    # MC Dropout: We don't have explicit uncertainty estimates in model_outputs
-    # This function is now a placeholder for compatibility
-    # Real calibration would require multiple forward passes with dropout enabled
-    
-    print(f"[WARNING] plot_calibration_diagram is not yet implemented for MC Dropout uncertainty.")
-    print(f"          Skipping calibration plot for {case_name}.")
-    
-    # Create a placeholder figure to avoid breaking the pipeline
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    ax.text(0.5, 0.5, 'Calibration Plot\n(Not yet implemented for MC Dropout)', 
-           transform=ax.transAxes, ha='center', va='center',
-           fontsize=14, fontweight='bold')
-    ax.set_title(f'Calibration Diagram - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
-                fontsize=16, fontweight='bold')
-    ax.axis('off')
-    
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    
-    # Save plot
-    os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, 'calibration_diagram.png')
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    try:
+        # Calculate prediction errors
+        errors = model_outputs - targets  # [n_samples, n_buses, 10]
+        
+        # Feature names for 10-dimensional state
+        feature_names = ['PG', 'QG', 'PD', 'QD', 'VM', 'VA', 'VMAX', 'VMIN', 'P', 'Q']
+        
+        # Create figure with 2 subplots
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Subplot 1: Overall error distribution
+        ax1 = axes[0]
+        all_errors = errors.flatten()
+        ax1.hist(all_errors, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
+        ax1.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect Calibration')
+        ax1.set_xlabel('Prediction Error (Normalized Units)', fontsize=11)
+        ax1.set_ylabel('Frequency', fontsize=11)
+        ax1.set_title('Overall Prediction Error Distribution', fontweight='bold')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Add statistics
+        mean_error = np.mean(all_errors)
+        std_error = np.std(all_errors)
+        mae = np.mean(np.abs(all_errors))
+        ax1.text(0.02, 0.98, f'Mean: {mean_error:.4f}\nStd: {std_error:.4f}\nMAE: {mae:.4f}',
+                transform=ax1.transAxes, va='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Subplot 2: Error by feature type
+        ax2 = axes[1]
+        feature_errors = []
+        feature_labels = []
+        
+        # Calculate error for each feature
+        for i, fname in enumerate(feature_names):
+            feat_errors = errors[:, :, i].flatten()
+            feature_errors.append(np.abs(feat_errors))
+            feature_labels.append(fname)
+        
+        # Box plot
+        bp = ax2.boxplot(feature_errors, labels=feature_labels, patch_artist=True)
+        for patch in bp['boxes']:
+            patch.set_facecolor('lightblue')
+        ax2.set_ylabel('Absolute Error (Normalized)', fontsize=11)
+        ax2.set_xlabel('Feature Type', fontsize=11)
+        ax2.set_title('Error Distribution by Feature', fontweight='bold')
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.tick_params(axis='x', rotation=45)
+        
+        plt.suptitle(f'Prediction Quality Analysis - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
+                    fontsize=16, fontweight='bold')
+        
+        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+        
+        # Save plot
+        os.makedirs(output_dir, exist_ok=True)
+        save_path = os.path.join(output_dir, 'calibration_diagram.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+    except Exception as e:
+        plt.close('all')
+        print(f"  Warning: Calibration diagram plotting failed: {e}")
 

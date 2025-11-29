@@ -181,7 +181,7 @@ class ForensicLogger:
         if 'total_loss' in loss_dict:
             total = loss_dict['total_loss'].item() if isinstance(loss_dict['total_loss'], torch.Tensor) else loss_dict['total_loss']
             
-            for key in ['mse', 'power_violation', 'voltage_violation']:
+            for key in ['mse', 'physics_loss', 'safety_loss']:
                 if key in loss_dict:
                     component = loss_dict[key].item() if isinstance(loss_dict[key], torch.Tensor) else loss_dict[key]
                     if total > 0:
