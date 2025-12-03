@@ -21,6 +21,7 @@ from config import FeatureIndices, ModelOutputIndices
 
 warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='matplotlib')
+warnings.filterwarnings('ignore', message='.*Creating legend with loc="best".*')
 
 
 def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray, 
@@ -62,7 +63,7 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
     ax.set_xlabel('Actual Voltage Magnitude (p.u.)', fontsize=11)
     ax.set_ylabel('Predicted Voltage Magnitude (p.u.)', fontsize=11)
     ax.set_title('Voltage Magnitude', fontweight='bold')
-    ax.legend()
+    ax.legend(loc='lower right')  # Lower right to avoid overlap with R² text box
     ax.grid(True, alpha=0.3)
     
     try:
@@ -82,7 +83,7 @@ def plot_predicted_vs_actual(predictions: np.ndarray, targets: np.ndarray,
     ax.set_xlabel('Actual Voltage Angle (rad)', fontsize=11)
     ax.set_ylabel('Predicted Voltage Angle (rad)', fontsize=11)
     ax.set_title('Voltage Angle', fontweight='bold')
-    ax.legend()
+    ax.legend(loc='lower right')  # Lower right to avoid overlap with R² text box
     ax.grid(True, alpha=0.3)
     
     try:
@@ -135,7 +136,7 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
     ax.set_xlabel('Voltage Magnitude Error (p.u.)', fontsize=11)
     ax.set_ylabel('Frequency', fontsize=11)
     ax.set_title('Voltage Magnitude Error Distribution', fontweight='bold')
-    ax.legend()
+    ax.legend(loc='upper right')  # Upper right to avoid overlap with stats text box in upper left
     ax.grid(True, alpha=0.3)
     
     std_err_vm = np.std(errors_vm)
@@ -151,7 +152,7 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
     ax.set_xlabel('Voltage Angle Error (rad)', fontsize=11)
     ax.set_ylabel('Frequency', fontsize=11)
     ax.set_title('Voltage Angle Error Distribution', fontweight='bold')
-    ax.legend()
+    ax.legend(loc='upper right')  # Upper right to avoid overlap with stats text box in upper left
     ax.grid(True, alpha=0.3)
     
     std_err_va = np.std(errors_va)
@@ -171,84 +172,123 @@ def plot_error_distributions(predictions: np.ndarray, targets: np.ndarray,
 
 def plot_calibration_diagram(model_outputs: np.ndarray, targets: np.ndarray,
                             bus_types: np.ndarray, case_name: str,
-                            output_dir: str, model_name: str = "", config: Any = None):
+                            output_dir: str, model_name: str = "", config: Any = None,
+                            uncertainties: np.ndarray = None, targets_norm: np.ndarray = None):
     """
-    Generate calibration plot (reliability diagram) showing prediction error distribution.
+    Generate proper calibration plot (reliability diagram) for uncertainty quantification.
     
-    For MC Dropout models (without explicit uncertainty outputs), this shows:
-    - Error distribution histogram (how well predictions match actuals)
-    - Residual analysis by feature type
+    Shows:
+    1. Reliability diagram: Predicted confidence intervals vs. actual coverage
+    2. Uncertainty vs. Error scatter: Whether high uncertainty correlates with high error
     
     Args:
-        model_outputs: [n_samples, n_buses, 10] - Model predictions (mean)
-        targets: [n_samples, n_buses, 10] - True full state
+        model_outputs: [n_samples, n_buses, 10] - Model predictions (mean) in NORMALIZED space
+        targets: [n_samples, n_buses, 10] - True full state (unused, kept for compatibility)
         bus_types: [n_samples, n_buses] - Bus type codes (unused, kept for compatibility)
         case_name: Name of the test case
         output_dir: Directory to save plots
         model_name: Optional model name for title
         config: Config object (unused, kept for compatibility)
+        uncertainties: [n_samples, n_buses, 10] - Prediction uncertainties (std from MC Dropout) in NORMALIZED space
+                       REQUIRED - function will fail if None
+        targets_norm: [n_samples, n_buses, 10] - True full state in NORMALIZED space
+                      REQUIRED - function will fail if None (needed for proper scale matching with uncertainties)
+    
+    Raises:
+        ValueError: If uncertainties is None or has wrong shape
     """
-    try:
-        # Calculate prediction errors
-        errors = model_outputs - targets  # [n_samples, n_buses, 10]
+    if uncertainties is None:
+        raise ValueError("uncertainties is required for calibration diagram. Cannot plot without uncertainty data.")
+    
+    if uncertainties.shape != model_outputs.shape:
+        raise ValueError(f"uncertainties shape {uncertainties.shape} must match model_outputs shape {model_outputs.shape}")
+    
+    if targets_norm is None:
+        raise ValueError("targets_norm is required for calibration diagram. Cannot compare normalized uncertainties with denormalized targets.")
+    
+    if targets_norm.shape != model_outputs.shape:
+        raise ValueError(f"targets_norm shape {targets_norm.shape} must match model_outputs shape {model_outputs.shape}")
+    
+    # Calculate prediction errors in NORMALIZED space (matches uncertainties)
+    errors = model_outputs - targets_norm  # [n_samples, n_buses, 10]
+    abs_errors = np.abs(errors)  # Absolute errors
+    
+    # Flatten for analysis
+    errors_flat = abs_errors.flatten()
+    uncertainties_flat = uncertainties.flatten()
+    
+    # Create figure with 2 subplots
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Subplot 1: Reliability Diagram (Calibration Curve)
+    ax1 = axes[0]
+    
+    # Create reliability diagram: For each confidence level, check actual coverage
+    confidence_levels = np.linspace(0.1, 0.99, 20)  # 10% to 99% confidence
+    actual_coverage = []
+    predicted_coverage = []
+    
+    for conf_level in confidence_levels:
+        # For Gaussian assumption: z-score for confidence level
+        z_score = norm.ppf(0.5 + conf_level / 2.0)  # Two-tailed
         
-        # Feature names for 10-dimensional state
-        feature_names = ['PG', 'QG', 'PD', 'QD', 'VM', 'VA', 'VMAX', 'VMIN', 'P', 'Q']
+        # Predicted coverage: fraction of predictions within z_score * uncertainty
+        predicted_interval = z_score * uncertainties_flat
+        within_interval = errors_flat <= predicted_interval
+        actual_frac = np.mean(within_interval)
         
-        # Create figure with 2 subplots
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # Subplot 1: Overall error distribution
-        ax1 = axes[0]
-        all_errors = errors.flatten()
-        ax1.hist(all_errors, bins=50, alpha=0.7, color='steelblue', edgecolor='black')
-        ax1.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect Calibration')
-        ax1.set_xlabel('Prediction Error (Normalized Units)', fontsize=11)
-        ax1.set_ylabel('Frequency', fontsize=11)
-        ax1.set_title('Overall Prediction Error Distribution', fontweight='bold')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Add statistics
-        mean_error = np.mean(all_errors)
-        std_error = np.std(all_errors)
-        mae = np.mean(np.abs(all_errors))
-        ax1.text(0.02, 0.98, f'Mean: {mean_error:.4f}\nStd: {std_error:.4f}\nMAE: {mae:.4f}',
-                transform=ax1.transAxes, va='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        # Subplot 2: Error by feature type
-        ax2 = axes[1]
-        feature_errors = []
-        feature_labels = []
-        
-        # Calculate error for each feature
-        for i, fname in enumerate(feature_names):
-            feat_errors = errors[:, :, i].flatten()
-            feature_errors.append(np.abs(feat_errors))
-            feature_labels.append(fname)
-        
-        # Box plot
-        bp = ax2.boxplot(feature_errors, labels=feature_labels, patch_artist=True)
-        for patch in bp['boxes']:
-            patch.set_facecolor('lightblue')
-        ax2.set_ylabel('Absolute Error (Normalized)', fontsize=11)
-        ax2.set_xlabel('Feature Type', fontsize=11)
-        ax2.set_title('Error Distribution by Feature', fontweight='bold')
-        ax2.grid(True, alpha=0.3, axis='y')
-        ax2.tick_params(axis='x', rotation=45)
-        
-        plt.suptitle(f'Prediction Quality Analysis - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
-                    fontsize=16, fontweight='bold')
-        
-        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-        
-        # Save plot
-        os.makedirs(output_dir, exist_ok=True)
-        save_path = os.path.join(output_dir, 'calibration_diagram.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-    except Exception as e:
-        plt.close('all')
-        print(f"  Warning: Calibration diagram plotting failed: {e}")
+        actual_coverage.append(actual_frac)
+        predicted_coverage.append(conf_level)
+    
+    # Plot reliability diagram
+    ax1.plot(predicted_coverage, actual_coverage, 'o-', linewidth=2, markersize=6, 
+            label='Model Calibration', color='steelblue')
+    ax1.plot([0, 1], [0, 1], 'r--', linewidth=2, label='Perfect Calibration')
+    ax1.set_xlabel('Predicted Confidence Level', fontsize=11)
+    ax1.set_ylabel('Actual Coverage', fontsize=11)
+    ax1.set_title('Reliability Diagram (Calibration Curve)', fontweight='bold')
+    ax1.legend(loc='lower right')  # Lower right to avoid overlap with ECE text box in upper left
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim([0, 1])
+    ax1.set_ylim([0, 1])
+    
+    # Calculate Expected Calibration Error (ECE)
+    ece = np.mean(np.abs(np.array(actual_coverage) - np.array(predicted_coverage)))
+    ax1.text(0.05, 0.95, f'ECE: {ece:.4f}\n(Lower is better)', 
+            transform=ax1.transAxes, va='top', fontsize=10,
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    # Subplot 2: Uncertainty vs. Error Scatter
+    ax2 = axes[1]
+    
+    # Sample for visualization if too many points
+    n_points = len(errors_flat)
+    if n_points > 10000:
+        indices = np.random.choice(n_points, 10000, replace=False)
+        errors_flat = errors_flat[indices]
+        uncertainties_flat = uncertainties_flat[indices]
+    
+    ax2.scatter(uncertainties_flat, errors_flat, alpha=0.3, s=5, color='steelblue')
+    ax2.set_xlabel('Predicted Uncertainty (Std)', fontsize=11)
+    ax2.set_ylabel('Absolute Error', fontsize=11)
+    ax2.set_title('Uncertainty vs. Error', fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    
+    # Add correlation coefficient
+    if len(errors_flat) > 1:
+        correlation = np.corrcoef(uncertainties_flat, errors_flat)[0, 1]
+        ax2.text(0.05, 0.95, f'Correlation: {correlation:.4f}\n(Positive = Good)', 
+                transform=ax2.transAxes, va='top', fontsize=10,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.suptitle(f'Uncertainty Calibration - {case_name.upper()}' + (f' - {model_name}' if model_name else ''), 
+                fontsize=16, fontweight='bold')
+    
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+    
+    # Save plot
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, 'calibration_diagram.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
 

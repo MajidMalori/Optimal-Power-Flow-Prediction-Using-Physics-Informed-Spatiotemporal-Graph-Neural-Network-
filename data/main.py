@@ -11,8 +11,6 @@ import tempfile
 import random
 import argparse
 import yaml
-import shutil
-import time
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -78,20 +76,30 @@ def parse_arguments():
 args = parse_arguments()
 
 # Initialize Config
-# CLI arguments override YAML configuration
+# Priority: CLI args > YAML > Default ('train')
 try:
-    # Determine data mode: CLI > Config > Default
-    # We need to peek at Config default if CLI is None, but Config isn't loaded yet.
-    # So we load Config with CLI override if present, otherwise let Config use its internal default logic (which reads YAML)
-    # However, Config init requires data_mode.
-    # Let's pass CLI mode if present, otherwise 'test' (or whatever default we want if YAML doesn't specify, but YAML is required).
-    # Actually Config loads YAML.
+    # First, load YAML to get experimental_data_mode if it exists
+    yaml_path = args.config if args.config else 'config.yaml'
+    yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(os.path.dirname(__file__), 'config.yaml')
+    
+    # Determine data mode with correct priority
+    if args.mode is not None:
+        # CLI argument has highest priority
+        data_mode_to_use = args.mode
+    else:
+        # Try to load from YAML
+        try:
+            with open(yaml_full_path, 'r') as f:
+                yaml_config = yaml.safe_load(f)
+                data_mode_to_use = yaml_config.get('experimental', {}).get('data_mode', 'train')
+        except:
+            # If YAML loading fails, use default
+            data_mode_to_use = 'train'
     
     config_instance = Config(
         yaml_config_path=args.config,
         load_yaml=True,
-        # If CLI args are provided, they override the config defaults
-        data_mode=args.mode if args.mode is not None else getattr(Config, 'data_mode', 'test'),
+        data_mode=data_mode_to_use,
         train_timesteps=args.time_steps, 
         test_timesteps=args.time_steps,
         save_results=True
@@ -203,14 +211,12 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         target_file = os.path.join(temp_dir, 'targets_temp.npy')
         bus_types_file = os.path.join(temp_dir, 'bus_types_temp.npy')
         topology_ids_file = os.path.join(temp_dir, 'topology_ids_temp.npy')
-        energy_coeffs_file = os.path.join(temp_dir, 'energy_coeffs_temp.npy')
         carbon_coeffs_file = os.path.join(temp_dir, 'carbon_coeffs_temp.npy')
         
         feature_matrix = np.memmap(feature_file, mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
         target_matrix = np.memmap(target_file, mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
         bus_types_array = np.memmap(bus_types_file, mode='w+', dtype=np.int32, shape=(time_steps, num_buses))
         topology_ids = np.memmap(topology_ids_file, mode='w+', dtype=np.int32, shape=(time_steps,))
-        time_energy_coeffs = np.memmap(energy_coeffs_file, mode='w+', dtype=np.float32, shape=(time_steps,))
         time_carbon_coeffs = np.memmap(carbon_coeffs_file, mode='w+', dtype=np.float32, shape=(time_steps,))
         
         chunks_written = 0
@@ -219,7 +225,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         target_matrix = np.zeros((time_steps, num_buses, 10), dtype=np.float32)
         bus_types_array = np.zeros((time_steps, num_buses), dtype=np.int32)
         topology_ids = np.zeros(time_steps, dtype=np.int32)
-        time_energy_coeffs = np.zeros(time_steps, dtype=np.float32)
         time_carbon_coeffs = np.zeros(time_steps, dtype=np.float32)
         temp_dir = None
     
@@ -385,27 +390,35 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         
         current_total_renewable_p_mw = 0
         if 'type' in net.sgen.columns and not net.sgen.empty:
-            for i, sgen in net.sgen.iterrows():
-                p_gen = 0
-                if sgen.type == 'solar':
-                    solar_profile = get_solar_generation_profile(
-                        current_hour, 
-                        day_of_year=180 + current_day % 180,
-                        weather_state=solar_weather
-                    )
-                    p_gen = solar_profile * max_individual_solar_mw
-                elif sgen.type == 'wind':
-                    wind_profile = get_wind_generation_profile(
-                        current_hour, 
-                        day=current_day,
-                        weather_state=wind_weather
-                    )
-                    p_gen = wind_profile * max_individual_wind_mw
-                
-                net.sgen.at[i, 'p_mw'] = p_gen
-                q_gen = calculate_renewable_reactive_power(p_gen, sgen.bus, net, t > 0)
+            # Vectorized renewable generation update (much faster than iterrows)
+            solar_mask = net.sgen['type'] == 'solar'
+            wind_mask = net.sgen['type'] == 'wind'
+            
+            # Calculate profiles once
+            solar_profile = get_solar_generation_profile(
+                current_hour, 
+                day_of_year=180 + current_day % 180,
+                weather_state=solar_weather
+            ) if solar_mask.any() else 0.0
+            
+            wind_profile = get_wind_generation_profile(
+                current_hour, 
+                day=current_day,
+                weather_state=wind_weather
+            ) if wind_mask.any() else 0.0
+            
+            # Vectorized assignment
+            p_gen_values = np.zeros(len(net.sgen))
+            p_gen_values[solar_mask] = solar_profile * max_individual_solar_mw
+            p_gen_values[wind_mask] = wind_profile * max_individual_wind_mw
+            net.sgen['p_mw'] = p_gen_values
+            
+            # Calculate reactive power (vectorized where possible)
+            for i in net.sgen.index:
+                q_gen = calculate_renewable_reactive_power(p_gen_values[i], net.sgen.at[i, 'bus'], net, t > 0)
                 net.sgen.at[i, 'q_mvar'] = q_gen
-                current_total_renewable_p_mw += p_gen
+            
+            current_total_renewable_p_mw = p_gen_values.sum()
         
         convergence_successful = False
         resolution_method = None
@@ -666,19 +679,23 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         vm_pu = net.res_bus.vm_pu.values
         va_rad = np.deg2rad(net.res_bus.va_degree.values)
         
-        load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-        load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        # Vectorized groupby operations (cache bus index for efficiency)
+        bus_index = net.bus.index
+        
+        # Use vectorized operations with fill_value=0 for missing buses
+        load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(bus_index, fill_value=0)
+        load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
         p_load = load_p_by_bus.values
         q_load = load_q_by_bus.values
 
-        ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-        ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(bus_index, fill_value=0)
+        ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
         
-        gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-        gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(bus_index, fill_value=0)
+        gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
 
-        sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0)
-        sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0)
+        sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(bus_index, fill_value=0)
+        sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
 
         current_ybus = calculate_ybus_from_net(net)
         
@@ -686,6 +703,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             ybus_base = current_ybus.copy()
         elif has_contingency:
             contingency_timesteps.append(t)
+            # Only copy if needed (avoid unnecessary memory allocation)
             contingency_ybus_list.append(current_ybus.copy())
         
         detailed_metrics.append({
@@ -710,7 +728,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         
         renewable_util_frac = current_total_renewable_p_mw / max_total_renewable_mw
         time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
-        time_energy_coeffs[t] = config['max_energy_utilization_coeff'] - (net.res_line.pl_mw.sum() * config['loss_sensitivity'])
         
         bus_types = identify_bus_types(net)
         bus_types_array[t] = bus_types
@@ -718,9 +735,11 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         opf_targets = create_opf_targets(net, bus_types)
         target_matrix[t] = opf_targets
         
-        positive_noise_vm = np.abs(np.random.normal(0, config['voltage_error_std'], num_buses))
-        positive_noise_angle = np.abs(np.random.normal(0, config['angle_error_std'], num_buses))
-        positive_noise_power = np.abs(np.random.normal(0, config['power_error_std'], num_buses))
+        # Batch random number generation (more efficient)
+        noise_rng = np.random.default_rng()
+        positive_noise_vm = np.abs(noise_rng.normal(0, config['voltage_error_std'], num_buses))
+        positive_noise_angle = np.abs(noise_rng.normal(0, config['angle_error_std'], num_buses))
+        positive_noise_power = np.abs(noise_rng.normal(0, config['power_error_std'], num_buses))
         
         meas_pl = p_load * (1 + positive_noise_power)
         meas_ql = q_load * (1 + positive_noise_power)
@@ -762,7 +781,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             target_matrix.flush()
             bus_types_array.flush()
             topology_ids.flush()
-            time_energy_coeffs.flush()
             time_carbon_coeffs.flush()
             chunks_written += 1
             # print(f"  [Chunked Writing] Flushed chunk {chunks_written} ({(t + 1)}/{time_steps} timesteps written)") # UI Cleanup
@@ -772,7 +790,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         target_matrix.flush()
         bus_types_array.flush()
         topology_ids.flush()
-        time_energy_coeffs.flush()
         time_carbon_coeffs.flush()
         # print(f"  [Chunked Writing] All data flushed to disk ({time_steps}/{time_steps} timesteps)") # UI Cleanup
     
@@ -798,11 +815,10 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         targets_return = np.array(target_matrix)
         bus_types_return = np.array(bus_types_array)
         topology_ids_return = np.array(topology_ids)
-        energy_coeffs_return = np.array(time_energy_coeffs)
         carbon_coeffs_return = np.array(time_carbon_coeffs)
         
         del feature_matrix, target_matrix, bus_types_array, topology_ids
-        del time_energy_coeffs, time_carbon_coeffs
+        del time_carbon_coeffs
         gc.collect()
         
         convergence_stats['_temp_dir'] = temp_dir
@@ -811,7 +827,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
             'targets': target_file,
             'bus_types': bus_types_file,
             'topology_ids': topology_ids_file,
-            'energy_coeffs': energy_coeffs_file,
             'carbon_coeffs': carbon_coeffs_file
         }
     else:
@@ -819,7 +834,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         targets_return = target_matrix
         bus_types_return = bus_types_array
         topology_ids_return = topology_ids
-        energy_coeffs_return = time_energy_coeffs
         carbon_coeffs_return = time_carbon_coeffs
     
     # Save detailed metrics CSV (skip if output_dir is None for in-memory tests)
@@ -840,7 +854,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         "base_adjacency": base_adjacency_matrix,
         "topology_ids": topology_ids_return,
         "ybus_data": ybus_data,
-        "time_energy_coeffs": energy_coeffs_return, 
         "time_carbon_coeffs": carbon_coeffs_return,
         "convergence_stats": convergence_stats
     }
@@ -866,15 +879,14 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
             'targets': f"{case_name}_targets_frac{renewable_fraction:.1f}_{timestamp}.npy",
             'bus_types': f"{case_name}_bus_types_frac{renewable_fraction:.1f}_{timestamp}.npy",
             'topology_ids': f"{case_name}_topology_ids_frac{renewable_fraction:.1f}_{timestamp}.npy",
-            'energy_coeffs': f"{case_name}_time_energy_coeffs_frac{renewable_fraction:.1f}_{timestamp}.txt",
             'carbon_coeffs': f"{case_name}_time_carbon_coeffs_frac{renewable_fraction:.1f}_{timestamp}.txt"
         }
         
         for temp_key, final_filename in file_mappings.items():
                 final_path = os.path.join(output_dir, final_filename)
                 
-                if temp_key in ['energy_coeffs', 'carbon_coeffs']:
-                    coeff_key = 'time_energy_coeffs' if 'energy' in temp_key else 'time_carbon_coeffs'
+                if temp_key in ['carbon_coeffs']:
+                    coeff_key = 'time_carbon_coeffs'
                     if coeff_key in data_dict:
                         data = data_dict[coeff_key]
                         if isinstance(data, np.memmap):
@@ -911,7 +923,7 @@ def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output
     
     for key, data in data_dict.items():
         if use_temp_files and key in ['features', 'targets', 'bus_types', 'topology_ids', 
-                                      'time_energy_coeffs', 'time_carbon_coeffs']:
+                                      'time_carbon_coeffs']:
             continue
         if key == "ybus_data":
             for sub_key, sub_data in data.items():
@@ -1005,7 +1017,8 @@ if __name__ == "__main__":
         if data_mode == 'train':
             timesteps = CONFIG["time_steps"]
         else:
-            timesteps = 120
+            # Respect CLI argument if provided, otherwise default to config or 120
+            timesteps = CONFIG["time_steps"] if CONFIG["time_steps"] is not None else 120
             
     # print(f"Generating {data_mode} data for {timesteps} timesteps...")
     

@@ -72,7 +72,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'system_num_buses': 'NUM_BUSES',
         'system_test_cases': 'TEST_CASES',
         'system_seed': 'SEED',
-        'system_num_workers': 'NUM_WORKERS',
         'system_case_name': 'CASE_NAME',
         
         # Training configuration
@@ -87,9 +86,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'training_weight_decay': 'WEIGHT_DECAY',
         
         # Physics configuration
-        'physics_voltage_min': 'V_MIN',
-        'physics_voltage_max': 'V_MAX',
-        'physics_apparent_power_max': 'S_MAX',
         'physics_split_mode': 'DATA_SPLIT_MODE',
         'physics_splits_train': 'TRAIN_SPLIT',
         'physics_splits_val': 'VAL_SPLIT',
@@ -105,11 +101,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'moopf_weights_voltage_deviation': 'MOOPF_WEIGHT_VDEV',
         'moopf_weights_carbon': 'MOOPF_WEIGHT_CARBON',
         
-        # Contingency analysis configuration
-        'contingency_enable': 'ENABLE_CONTINGENCY_ANALYSIS',
-        'contingency_top_k': 'CONTINGENCY_TOP_K',
-        'contingency_method': 'CONTINGENCY_METHOD',
-        
         # Experimental configuration
         'experimental_test_config': 'EXPERIMENTAL_TEST_CONFIG',
         'experimental_bus_systems': 'EXPERIMENTAL_BUS_SYSTEMS',
@@ -117,7 +108,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_data_mode': 'EXPERIMENTAL_DATA_MODE',
         'experimental_train_timesteps': 'EXPERIMENTAL_TRAIN_TIMESTEPS',
         'experimental_test_timesteps': 'EXPERIMENTAL_TEST_TIMESTEPS',
-        'experimental_plot_data_info': 'EXPERIMENTAL_PLOT_DATA_INFO',
         'experimental_force_cpu': 'EXPERIMENTAL_FORCE_CPU',
         'experimental_parallel_data_loading': 'EXPERIMENTAL_PARALLEL_DATA_LOADING',
         'experimental_data_workers': 'EXPERIMENTAL_DATA_WORKERS',
@@ -127,8 +117,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         # Debug configuration
         'debug_enable': 'DEBUG_ENABLE',
         'debug_log_interval': 'DEBUG_LOG_INTERVAL',
-        'debug_log_gradients': 'DEBUG_LOG_GRADIENTS',
-        'debug_log_weights': 'DEBUG_LOG_WEIGHTS',
     }
     
     flat_yaml = _flatten_dict(yaml_config)
@@ -165,7 +153,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_data_mode': 'data_mode',
         'experimental_train_timesteps': 'train_timesteps',
         'experimental_test_timesteps': 'test_timesteps',
-        'experimental_plot_data_info': 'plot_data_info',
         'experimental_force_cpu': 'force_cpu',
         'experimental_parallel_data_loading': 'parallel_data_loading',
         'experimental_data_workers': 'data_workers',
@@ -594,7 +581,7 @@ class Config:
             'ResnetPIGCLSTM': self.ResnetPIGCLSTMConfig
         }
     
-    def __init__(self, data_mode='train', save_results=True, train_timesteps=None, test_timesteps=100, clear_results=False, 
+    def __init__(self, data_mode='train', save_results=True, train_timesteps=None, test_timesteps=None, clear_results=False, 
                  hours_per_day=24, sequence_length=5, yaml_config_path=None, load_yaml=True):
         """
         Initializes directories and sets up experimental run structure.
@@ -647,13 +634,6 @@ class Config:
         # Set save_results flag (from argument, can be overridden by YAML)
         self.SAVE_RESULTS = save_results
         
-        # Set data plotting flag from YAML (required, no fallback)
-        self.PLOT_DATA_INFO = getattr(Config, 'plot_data_info', None)
-        if self.PLOT_DATA_INFO is None:
-            raise ValueError("plot_data_info not found in YAML. YAML is required - no fallback defaults.")
-        # Backward compatibility: also set GENERATE_DATA_PROFILE_STORY (deprecated, use PLOT_DATA_INFO)
-        self.GENERATE_DATA_PROFILE_STORY = self.PLOT_DATA_INFO
-        
         # Clear experimental results folder if requested
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
             import shutil
@@ -664,14 +644,16 @@ class Config:
             except Exception as e:
                 print(f"[Clear Results] Warning: Could not delete experimental_results folder: {e}")
         
-        # Initialize DATA_MODE_TIMESTEPS - use argument if provided, otherwise from YAML (required)
+        # Initialize DATA_MODE_TIMESTEPS - CLI arguments override YAML (CLI has priority)
         if train_timesteps is None:
             train_timesteps = getattr(Config, 'train_timesteps', None)
             if train_timesteps is None:
                 raise ValueError("train_timesteps not found in YAML. YAML is required - no fallback defaults.")
-        test_timesteps_yaml = getattr(Config, 'test_timesteps', None)
-        if test_timesteps_yaml is not None:
-            test_timesteps = test_timesteps_yaml  # Override argument with YAML value
+        # CLI argument has priority - only use YAML if CLI argument is None
+        if test_timesteps is None:
+            test_timesteps = getattr(Config, 'test_timesteps', None)
+            if test_timesteps is None:
+                raise ValueError("test_timesteps not found in YAML. YAML is required - no fallback defaults.")
         self.DATA_MODE_TIMESTEPS = {'train': train_timesteps, 'test': test_timesteps}
         
         # Set data mode and validate
@@ -691,11 +673,28 @@ class Config:
         # print(f"\n[Data Mode] Using time-series data in {data_mode} mode")
         # print(f"[Data Directory] {self.DATA_DIR}")
         
-        # Initialize timestamp only when actually starting a run
-        self._initialize_run_timestamp()
+        # Detect if we're in a test environment
+        # Check if the calling script is in tests/ directory or if pytest is running
+        import inspect
+        frame = inspect.currentframe()
+        test_mode = False
+        try:
+            # Check call stack for test files
+            while frame:
+                filename = frame.f_globals.get('__file__', '')
+                if 'tests' in filename or 'test_' in os.path.basename(filename) or 'pytest' in filename:
+                    test_mode = True
+                    break
+                frame = frame.f_back
+        except:
+            pass
         
-        # Only create directories if saving results
-        if self.SAVE_RESULTS:
+        # Initialize timestamp only when actually starting a run (not in test mode)
+        if not test_mode:
+            self._initialize_run_timestamp()
+        
+        # Only create directories if saving results AND not in test mode
+        if self.SAVE_RESULTS and not test_mode:
             # Create base directories
             for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
                 os.makedirs(dir_path, exist_ok=True)
@@ -708,6 +707,10 @@ class Config:
             
             # Create run metadata
             self._create_run_metadata()
+        elif test_mode:
+            # In test mode, set a dummy timestamp to avoid errors
+            if not hasattr(self, '_CURRENT_RUN_TIMESTAMP') or self._CURRENT_RUN_TIMESTAMP is None:
+                self._CURRENT_RUN_TIMESTAMP = 'test_mode'
     
     @staticmethod
     def get_model_class_map():

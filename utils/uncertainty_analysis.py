@@ -377,7 +377,7 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     ax.set_title(title, fontsize=12, fontweight='bold')
     
     # Legend and grid (match data profile story style)
-    ax.legend(loc='best', fontsize=9)
+    ax.legend(loc='upper right', fontsize=9)
     ax.grid(True, alpha=0.3)
     
     # Tight layout
@@ -390,8 +390,8 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
 
 
 def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.ndarray,
-                                       renewable_fractions: np.ndarray, case_name: str,
-                                       output_dir: str, model_name: str = "", config=None,
+                                       renewable_fractions: np.ndarray, case_name: str = "",
+                                       output_dir: str = "", model_name: str = "", config=None,
                                        bus_types: np.ndarray = None, model_outputs: np.ndarray = None,
                                        timesteps: np.ndarray = None):
     """
@@ -400,7 +400,7 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     Args:
         predictions: Model predictions [n_samples, n_buses, 10] - Full state
         targets: True values [n_samples, n_buses, 10] - Full state
-        renewable_fractions: Renewable fraction for each sample [n_samples]
+        renewable_fractions: Renewable fraction for each sample [n_samples] - REQUIRED
         case_name: Test case name (e.g., "case33")
         output_dir: Directory to save outputs
         model_name: Optional model name for titles and filenames
@@ -412,6 +412,12 @@ def generate_uncertainty_visualizations(predictions: np.ndarray, targets: np.nda
     Returns:
         uncertainty_data: Dictionary with all calculated metrics
     """
+    # Fail fast if renewable_fractions is missing (required for grouping analysis)
+    if renewable_fractions is None:
+        raise ValueError("renewable_fractions is REQUIRED for uncertainty analysis. Extract it from test batch data.")
+    if len(renewable_fractions) != predictions.shape[0]:
+        raise ValueError(f"renewable_fractions length ({len(renewable_fractions)}) must match predictions batch size ({predictions.shape[0]})")
+    
     # Calculate error statistics (what actually happened)
     error_statistics = calculate_uncertainty_metrics(predictions, targets, renewable_fractions, bus_types=bus_types, timesteps=timesteps)
     

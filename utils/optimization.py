@@ -79,6 +79,9 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
     
     # --- 2. Main Optimization Loop ---
     for l in range(max_iterations):
+        # Add space before each iteration (except first) to separate from epoch progress bars
+        if l > 0:
+            print()
         # --- 2a. Fitness Evaluation and Global Best Update ---
         fitness_all = np.full(num_agents, np.inf)
         for i in range(num_agents):
@@ -156,13 +159,6 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
         })
         
         convergence_curve.append(best_score)
-        
-        # Format hyperparameters concisely for display
-        if param_keys:
-            params_str = ", ".join([f"{k}={_format_value(best_position[i])}" for i, k in enumerate(param_keys)])
-            print(f"MoSOA iter {l+1}/{max_iterations} | Score: {best_score:.6g} | {params_str}")
-        else:
-            print(f"MoSOA iter {l+1}/{max_iterations} | Score: {best_score:.6g}")
 
     return best_score, best_position, convergence_curve, iteration_details
 

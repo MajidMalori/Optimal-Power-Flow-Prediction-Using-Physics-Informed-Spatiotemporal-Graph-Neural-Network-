@@ -76,7 +76,7 @@ class GCN(BaseModel):
         device = adj.device
         dtype = adj.dtype
         
-        # Add self-loops (A_hat = A + I)
+        # Add self-loops (A_hat = A + I) - vectorized
         identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
         adj_hat = adj + identity
         

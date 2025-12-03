@@ -1,10 +1,14 @@
 import os
+import sys
+import re
 import torch
 import numpy as np
 import glob
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.data.dataloader import default_collate
 from torch.nn.utils.rnn import pad_sequence
+from config import FeatureIndices
+from utils.contingency_ybus import modify_adjacency_for_line_outage
 
 class PowerSystemNormalizer:
     """
@@ -56,13 +60,10 @@ class PowerSystemNormalizer:
         """
         # Handle both numpy arrays and PyTorch tensors
         if torch.is_tensor(data):
-            if data.is_cuda:
-                data_cpu = data.detach().cpu()
-            else:
-                data_cpu = data.detach().cpu()
+            data_cpu = data.detach().cpu()
             data_np = data_cpu.numpy()
             was_tensor = True
-            original_device = data.device if data.is_cuda else None
+            original_device = data.device
         else:
             data_np = data
             was_tensor = False
@@ -255,9 +256,7 @@ class PowerSystemLazyDataset(Dataset):
             raise RuntimeError("Ybus base matrix not available")
         
         # Load coefficients
-        energy_coeffs = np.loadtxt(target_meta['energy_path'])
         carbon_coeffs = np.loadtxt(target_meta['carbon_path'])
-        time_energy = energy_coeffs[target_meta['index_in_file']] if len(energy_coeffs) > target_meta['index_in_file'] else energy_coeffs[0]
         time_carbon = carbon_coeffs[target_meta['index_in_file']] if len(carbon_coeffs) > target_meta['index_in_file'] else carbon_coeffs[0]
         
         renewable_fraction = target_meta['renewable_fraction']
@@ -272,7 +271,6 @@ class PowerSystemLazyDataset(Dataset):
                 bus_types_tensor = torch.from_numpy(bus_types.copy()).long()
         
         # Extract generation components (from FEATURES, which are noisy measurements)
-        from config import FeatureIndices
         if features_tensor.dim() == 3:
             features_last = features_tensor[-1]
         else:
@@ -298,7 +296,6 @@ class PowerSystemLazyDataset(Dataset):
             'ybus_matrix': ybus_for_item,
             'targets': target_tensor,
             'bus_types': bus_types_tensor,
-            'time_energy_coeffs': torch.tensor(time_energy, dtype=torch.float32),
             'time_carbon_coeffs': torch.tensor(time_carbon, dtype=torch.float32),
             'renewable_fraction': torch.tensor(renewable_fraction, dtype=torch.float32),
             'ext_grid_gen': ext_grid_gen,
@@ -317,7 +314,6 @@ def _convert_edge_index_to_adj(edge_index, num_nodes):
     return adj
 
 def pre_normalize_adjacency(adj: np.ndarray) -> np.ndarray:
-    import torch
     adj_tensor = torch.from_numpy(adj).float()
     num_nodes = adj_tensor.shape[0]
     identity = torch.eye(num_nodes, dtype=adj_tensor.dtype)
@@ -373,8 +369,6 @@ def _build_topology_cache_from_ids(file_metadata, base_adjacency, num_buses, cas
         else:
             raise ValueError(f"Unknown case name: {case_name}")
         
-        from utils.contingency_ybus import modify_adjacency_for_line_outage
-        
         for topo_id in unique_topology_ids:
             if topo_id > 0:
                 line_idx = topo_id - 1
@@ -427,11 +421,9 @@ def load_power_system_data(config, case_name):
     global_timestep = 0
     ybus_base_path = None
     
-    import re
     for f_path in feature_files:
         targets_path = f_path.replace('features', 'targets')
         bus_types_path = f_path.replace('features', 'bus_types')
-        energy_path = f_path.replace('features', 'time_energy_coeffs').replace('.npy', '.txt')
         carbon_path = f_path.replace('features', 'time_carbon_coeffs').replace('.npy', '.txt')
         
         frac_match = re.search(r'frac(\d+\.\d+)', os.path.basename(f_path))
@@ -465,7 +457,6 @@ def load_power_system_data(config, case_name):
                 'features_path': f_path,
                 'targets_path': targets_path,
                 'bus_types_path': bus_types_path if os.path.exists(bus_types_path) else None,
-                'energy_path': energy_path,
                 'carbon_path': carbon_path,
                 'index_in_file': i,
                 'global_timestep': global_timestep,
@@ -606,11 +597,12 @@ def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, con
     shuffle_train = is_static
     collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
     
-    import sys
     is_windows = sys.platform == 'win32'
     use_cuda = torch.cuda.is_available()
     num_workers = config.NUM_WORKERS
     
+    # Windows: Must use 0 workers due to multiprocessing limitations
+    # (This overrides any auto-detected or configured value)
     if is_windows:
         num_workers = 0
     

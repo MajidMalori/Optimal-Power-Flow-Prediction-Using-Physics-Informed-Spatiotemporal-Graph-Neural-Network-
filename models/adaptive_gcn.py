@@ -70,8 +70,7 @@ class adaptiveGCN(BaseAdaptiveGCN):
         h = x
         for i, gc_layer in enumerate(self.gc_layers):
             h = gc_layer(h, A_adp_batch, is_pre_normalized=True)
-            if i < len(self.gc_layers) - 1:
-                h = self.dropout_layer(h)
+            h = self.dropout_layer(h)
 
         output = self.output_layer(h)
         

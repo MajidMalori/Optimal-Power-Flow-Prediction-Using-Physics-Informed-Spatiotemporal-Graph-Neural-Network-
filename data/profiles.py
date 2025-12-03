@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 import warnings
 import pandapower as pp
 from utils.contingency_ybus import DataGenerationError
@@ -334,7 +333,6 @@ def calculate_renewable_reactive_power(p_mw: float, bus_idx: int, net: pp.pandap
     
     # Log minor clipping (within tolerance, but still worth noting)
     if abs(q_mvar_clipped) < abs(q_mvar) - 1e-6:
-        import warnings
         warnings.warn(
             f"Inverter reactive power clipped: requested {q_mvar:.6f} Mvar, "
             f"limited to {q_mvar_clipped:.6f} Mvar (capability: ±{max_q_capability:.6f} Mvar). "

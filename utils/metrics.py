@@ -23,7 +23,7 @@ class PowerSystemLoss(nn.Module):
         
         # Learnable weights using Kendall's method (log variance for numerical stability)
         # Initialize with 0.0 (variance = 1.0, precision weight = 1.0)
-        self.log_vars = nn.Parameter(torch.zeros(3))  # [Data, Physics, Safety]
+        self.log_vars = nn.Parameter(torch.zeros(4))  # [Data, Physics, Safety, Constraint]
         
         # System Limits
         self.register_buffer('v_min', torch.tensor(getattr(config, 'V_MIN', 0.9), dtype=torch.float32))
@@ -79,7 +79,8 @@ class PowerSystemLoss(nn.Module):
         # Calculate Theoretical Power Flow (Injection)
         # S = V * conj(Y * V)
         # Ybus is in p.u.
-        I_inj = torch.einsum('bij,bj->bi', ybus_batch.cfloat(), V)
+        ybus_complex = ybus_batch if ybus_batch.is_complex() else ybus_batch.to(torch.complex64)
+        I_inj = torch.einsum('bij,bj->bi', ybus_complex, V)
         S_flow_pu = V * torch.conj(I_inj)
         P_flow_pu = S_flow_pu.real
         Q_flow_pu = S_flow_pu.imag
@@ -114,20 +115,36 @@ class PowerSystemLoss(nn.Module):
         v_lower_violation = F.relu(self.v_min - vm_pu)
         l3_loss = torch.mean(v_upper_violation**2 + v_lower_violation**2)
         
-        # 4. Combine with Kendall's Homoscedastic Uncertainty Weighting
+        # 4. Physics Constraint Loss (L4) - Non-negative Physical Quantities
+        # P_conv, P_ren, and VM must be non-negative (physical constraints)
+        # Penalize negative values: ReLU(-P_conv)^2 + ReLU(-P_ren)^2 + ReLU(-VM)^2
+        p_conv_violation = F.relu(-p_conv)  # Positive when p_conv < 0
+        p_ren_violation = F.relu(-p_ren)    # Positive when p_ren < 0
+        vm_negative_violation = F.relu(-vm_pu)  # Positive when vm_pu < 0
+        l4_loss = torch.mean(p_conv_violation**2 + p_ren_violation**2 + vm_negative_violation**2)
+        
+        # 5. Combine with Kendall's Homoscedastic Uncertainty Weighting
         # Loss = (w_i * L_i + log_var_i) where w_i = exp(-log_var_i)
-        # L1 (MSE) is in normalized space, L2/L3 in physics space (p.u.)
+        # L1 (MSE) is in normalized space, L2/L3/L4 in physics space (p.u.)
         # Kendall's weights automatically learn to balance these different scales
+        #
+        # NOTE: The total loss CAN be negative because log_var_i can be negative.
+        # This is mathematically correct in Kendall's method - the loss is actually
+        # a log-likelihood that can be negative. The optimizer will still work correctly.
+        # We do NOT clamp log_vars - that would be "cheating" and break the optimization.
         
         # Calculate precision weights (higher weight = more confident in that task)
         w_data = torch.exp(-self.log_vars[0])
         w_phys = torch.exp(-self.log_vars[1])
         w_safe = torch.exp(-self.log_vars[2])
+        w_constraint = torch.exp(-self.log_vars[3])
         
         # Kendall's weighted loss formula (all components in physical units)
+        # Total loss can be negative if log_vars are very negative - this is mathematically correct
         loss = (w_data * l1_loss + self.log_vars[0]) + \
                (w_phys * l2_loss + self.log_vars[1]) + \
-               (w_safe * l3_loss + self.log_vars[2])
+               (w_safe * l3_loss + self.log_vars[2]) + \
+               (w_constraint * l4_loss + self.log_vars[3])
                
         if return_components:
             return {
@@ -135,7 +152,75 @@ class PowerSystemLoss(nn.Module):
                 'mse': l1_loss.item(),
                 'physics_loss': l2_loss.item(),
                 'safety_loss': l3_loss.item(),
-                'weights': [w_data.item(), w_phys.item(), w_safe.item()]
+                'constraint_loss': l4_loss.item(),
+                'weights': [w_data.item(), w_phys.item(), w_safe.item(), w_constraint.item()]
             }
             
         return loss
+
+def compute_moopf_metrics(preds_phys: torch.Tensor, ybus_batch: torch.Tensor, base_mva: float) -> dict:
+    """
+    Compute Multi-Objective Optimal Power Flow (MOOPF) Metrics.
+    
+    Metric A: Carbon Intensity Score (0.0 - 1.0)
+    Metric B: Power Loss Score (Normalized)
+    Metric C: Voltage Stability Score (p.u.)
+    
+    Args:
+        preds_phys: Denormalized predictions [batch, buses, 10]
+        ybus_batch: Ybus matrices [batch, buses, buses] (p.u.)
+        base_mva: System base power (MVA)
+        
+    Returns:
+        Dictionary of metrics
+    """
+    # Extract features
+    p_load = preds_phys[..., FeatureIndices.P_LOAD]
+    p_ext = preds_phys[..., FeatureIndices.P_EXT_GRID]
+    p_conv = preds_phys[..., FeatureIndices.P_CONV]
+    p_ren = preds_phys[..., FeatureIndices.P_REN]
+    vm_pu = preds_phys[..., FeatureIndices.VM]
+    va_rad = preds_phys[..., FeatureIndices.VA]
+    
+    # --- Metric A: Carbon Intensity Score ---
+    # Fossil = Sum(P_conv) + Sum(ReLU(P_ext))
+    # Total = Fossil + Sum(P_ren)
+    # Score = Fossil / Total
+    
+    # Sum over buses (vectorized: combine all sums in one operation)
+    total_p_conv = p_conv.sum(dim=1)
+    total_p_ext = F.relu(p_ext).sum(dim=1)  # Only imports count as generation
+    total_p_ren = p_ren.sum(dim=1)
+    
+    fossil_gen = total_p_conv + total_p_ext
+    total_gen = fossil_gen + total_p_ren
+    
+    carbon_score = fossil_gen / (total_gen + 1e-6)
+    
+    # --- Metric B: Power Loss Score ---
+    # Loss_MW = P_gen - P_load (from actual power values)
+    # Load_MW = Sum(P_load)
+    # Score = Loss_MW / Load_MW
+    # 
+    # Note: We calculate losses from actual power values (P_gen - P_load),
+    # not from voltages (sum(Real(V*conj(Y*V)))), because predicted voltages
+    # may not satisfy power balance during training. For a balanced system,
+    # both methods give the same result, but P_gen - P_load is more reliable.
+    
+    # Calculate losses from actual power values (always positive for passive network)
+    total_gen_mw = (p_ext + p_conv + p_ren).sum(dim=1)  # Sum all generation
+    total_load_mw = p_load.sum(dim=1)  # Sum all loads
+    total_losses_mw = total_gen_mw - total_load_mw  # Losses = Gen - Load (must be >= 0)
+    
+    power_loss_score = total_losses_mw / (total_load_mw + 1e-6)
+    
+    # --- Metric C: Voltage Stability Score ---
+    # Score = Mean(|V_mag - 1.0|) per sample
+    voltage_stability = torch.abs(vm_pu - 1.0).mean(dim=1)
+    
+    # Return per-sample metrics (not batch averages)
+    return {
+        'carbon_score': carbon_score,  # [batch_size] tensor
+        'power_loss_score': power_loss_score,  # [batch_size] tensor
+        'voltage_stability_score': voltage_stability  # [batch_size] tensor
+    }

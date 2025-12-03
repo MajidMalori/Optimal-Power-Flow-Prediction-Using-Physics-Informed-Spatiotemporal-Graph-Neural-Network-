@@ -8,6 +8,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from typing import Dict, Any
 import warnings
 
@@ -16,7 +17,25 @@ warnings.filterwarnings('ignore', category=RuntimeWarning, module='matplotlib')
 
 def plot_training_history(history: Dict[str, list], model_name: str, config: Any, 
                          num_buses: int, is_physics_informed: bool = True):
-    """Plot training history with automatic error handling."""
+    """
+    Plot training history with 6 subplots (2x3 grid).
+    
+    For Physics-Informed Models:
+    1. MSE (Train vs Val)
+    2. Physics Loss (Train vs Val)
+    3. Safety Loss (Train vs Val)
+    4. Total Loss (Train vs Val)
+    5. Learned Task Weights (Kendall)
+    6. Generalization Gap
+    
+    For Non-Physics Models:
+    1. MSE (Train vs Val)
+    2. RMSE (Train vs Val) - calculated from MSE
+    3. Total Loss (Train vs Val)
+    4. Learning Rate (if available)
+    5. Generalization Gap
+    6. Overfitting Ratio (Val MSE / Train MSE)
+    """
     try:
         plt.clf()
         plt.close('all')
@@ -24,71 +43,195 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         fig.suptitle(f'Training History - {model_name}', fontsize=16, fontweight='bold')
         
-        # Row 1, Col 1: MSE
-        if 'train_mse' in history:
-            axes[0, 0].plot(history['train_mse'], label='Train', linewidth=2)
-            axes[0, 0].plot(history['val_mse'], label='Validation', linewidth=2)
-            axes[0, 0].set_title('MSE (L1 Loss)', fontweight='bold')
-            axes[0, 0].set_ylabel('MSE')
-            axes[0, 0].legend()
-            axes[0, 0].grid(True, alpha=0.3)
+        # Helper function to convert tensor to float
+        def to_float(x):
+            if hasattr(x, 'detach'):
+                return x.detach().item()
+            elif hasattr(x, 'item'):
+                return x.item()
+            else:
+                return float(x)
         
-        # Row 1, Col 2: Physics Loss (L2)
-        if is_physics_informed and 'train_physics_loss' in history:
-            axes[0, 1].plot(history['train_physics_loss'], label='Train', linewidth=2, color='red')
-            axes[0, 1].set_title('Physics Loss (L2)', fontweight='bold')
-            axes[0, 1].set_ylabel('Power Mismatch')
-            axes[0, 1].legend()
-            axes[0, 1].grid(True, alpha=0.3)
+        # Helper function to convert history list to numpy array
+        def to_array(hist_list):
+            return np.array([to_float(x) for x in hist_list])
+        
+        if is_physics_informed:
+            # ========== PHYSICS-INFORMED MODEL PLOTS ==========
+            
+            # Row 1, Col 1: MSE (Train vs Val)
+            if 'train_mse' in history and 'val_mse' in history:
+                train_mse = to_array(history['train_mse'])
+                val_mse = to_array(history['val_mse'])
+                epochs = np.arange(len(train_mse))
+                axes[0, 0].plot(epochs, train_mse, label='Train', linewidth=2)
+                axes[0, 0].plot(epochs, val_mse, label='Validation', linewidth=2)
+                axes[0, 0].set_title('MSE (L1 Loss)', fontweight='bold')
+                axes[0, 0].set_ylabel('MSE')
+                axes[0, 0].set_xlabel('Epoch')
+                axes[0, 0].legend(loc='upper right')
+                axes[0, 0].grid(True, alpha=0.3)
+            
+            # Row 1, Col 2: Physics Loss (Train vs Val)
+            if 'train_physics_loss' in history and 'val_physics_loss' in history:
+                train_phys = to_array(history['train_physics_loss'])
+                val_phys = to_array(history['val_physics_loss'])
+                epochs = np.arange(len(train_phys))
+                axes[0, 1].plot(epochs, train_phys, label='Train', linewidth=2, color='red')
+                axes[0, 1].plot(epochs, val_phys, label='Validation', linewidth=2, color='orange')
+                axes[0, 1].set_title('Physics Loss (L2)', fontweight='bold')
+                axes[0, 1].set_ylabel('Power Mismatch')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].legend(loc='upper right')
+                axes[0, 1].grid(True, alpha=0.3)
+            
+            # Row 1, Col 3: Safety Loss (Train vs Val)
+            if 'train_safety_loss' in history and 'val_safety_loss' in history:
+                train_safe = to_array(history['train_safety_loss'])
+                val_safe = to_array(history['val_safety_loss'])
+                epochs = np.arange(len(train_safe))
+                axes[0, 2].plot(epochs, train_safe, label='Train', linewidth=2, color='blue')
+                axes[0, 2].plot(epochs, val_safe, label='Validation', linewidth=2, color='cyan')
+                axes[0, 2].set_title('Safety Loss (L3)', fontweight='bold')
+                axes[0, 2].set_ylabel('Voltage Violation')
+                axes[0, 2].set_xlabel('Epoch')
+                axes[0, 2].legend(loc='upper right')
+                axes[0, 2].grid(True, alpha=0.3)
+            
+            # Row 2, Col 1: Total Loss (Train vs Val)
+            if 'train_total_loss' in history and 'val_total_loss' in history:
+                train_loss = to_array(history['train_total_loss'])
+                val_loss = to_array(history['val_total_loss'])
+                epochs = np.arange(len(train_loss))
+                axes[1, 0].plot(epochs, train_loss, label='Train', linewidth=2, color='black')
+                axes[1, 0].plot(epochs, val_loss, label='Validation', linewidth=2, color='gray')
+                axes[1, 0].set_title('Total Weighted Loss', fontweight='bold')
+                axes[1, 0].set_ylabel('Total Loss')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].legend(loc='upper right')
+                axes[1, 0].grid(True, alpha=0.3)
+            
+            # Row 2, Col 2: Learned Task Weights (Kendall's Method)
+            if 'train_weights' in history and history['train_weights']:
+                weights = np.array([w for w in history['train_weights'] if w is not None])
+                if weights.ndim == 2 and weights.shape[1] == 4:
+                    epochs = np.arange(len(weights))
+                    axes[1, 1].plot(epochs, weights[:, 0], label='w_data (L1)', linewidth=2)
+                    axes[1, 1].plot(epochs, weights[:, 1], label='w_phys (L2)', linewidth=2)
+                    axes[1, 1].plot(epochs, weights[:, 2], label='w_safe (L3)', linewidth=2)
+                    axes[1, 1].plot(epochs, weights[:, 3], label='w_constraint (L4)', linewidth=2, linestyle='--')
+                    axes[1, 1].set_title('Learned Task Weights (Kendall)', fontweight='bold')
+                    axes[1, 1].set_ylabel('Precision Weight (w)')
+                    axes[1, 1].set_xlabel('Epoch')
+                    axes[1, 1].legend(loc='upper left')
+                    axes[1, 1].grid(True, alpha=0.3)
+                else:
+                    axes[1, 1].axis('off')
+            else:
+                axes[1, 1].axis('off')
+            
+            # Row 2, Col 3: Generalization Gap (Signed: Val - Train)
+            if 'train_mse' in history and 'val_mse' in history:
+                train_mse = to_array(history['train_mse'])
+                val_mse = to_array(history['val_mse'])
+                epochs = np.arange(len(train_mse))
+                gap = val_mse - train_mse
+                axes[1, 2].plot(epochs, gap, color='purple', linewidth=2, label='Gap (Val - Train)')
+                axes[1, 2].axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Perfect Match')
+                axes[1, 2].set_title('Generalization Gap (Val - Train)', fontweight='bold')
+                axes[1, 2].set_ylabel('Gap (Positive = Overfitting)')
+                axes[1, 2].set_xlabel('Epoch')
+                axes[1, 2].legend(loc='upper right')
+                axes[1, 2].grid(True, alpha=0.3)
+        
         else:
-            axes[0, 1].axis('off')
+            # ========== NON-PHYSICS MODEL PLOTS ==========
             
-        # Row 1, Col 3: Safety Loss (L3)
-        if is_physics_informed and 'train_safety_loss' in history:
-            axes[0, 2].plot(history['train_safety_loss'], label='Train', linewidth=2, color='blue')
-            axes[0, 2].set_title('Safety Loss (L3)', fontweight='bold')
-            axes[0, 2].set_ylabel('Voltage Violation')
-            axes[0, 2].legend()
-            axes[0, 2].grid(True, alpha=0.3)
-        else:
-            axes[0, 2].axis('off')
+            # Row 1, Col 1: MSE (Train vs Val)
+            if 'train_mse' in history and 'val_mse' in history:
+                train_mse = to_array(history['train_mse'])
+                val_mse = to_array(history['val_mse'])
+                epochs = np.arange(len(train_mse))
+                axes[0, 0].plot(epochs, train_mse, label='Train', linewidth=2)
+                axes[0, 0].plot(epochs, val_mse, label='Validation', linewidth=2)
+                axes[0, 0].set_title('MSE (Mean Squared Error)', fontweight='bold')
+                axes[0, 0].set_ylabel('MSE')
+                axes[0, 0].set_xlabel('Epoch')
+                axes[0, 0].legend(loc='upper left')
+                axes[0, 0].grid(True, alpha=0.3)
             
-        # Row 2, Col 1: Total Loss
-        if 'train_total_loss' in history:
-            # Convert to numpy array (handles tensors with gradients)
-            train_loss = np.array([x.detach().item() if hasattr(x, 'detach') else (x.item() if hasattr(x, 'item') else x) 
-                                  for x in history['train_total_loss']])
-            axes[1, 0].plot(train_loss, label='Train', linewidth=2, color='black')
-            axes[1, 0].set_title('Total Weighted Loss', fontweight='bold')
-            axes[1, 0].legend()
-            axes[1, 0].grid(True, alpha=0.3)
+            # Row 1, Col 2: RMSE (Train vs Val) - calculated from MSE
+            if 'train_mse' in history and 'val_mse' in history:
+                train_rmse = np.sqrt(to_array(history['train_mse']))
+                val_rmse = np.sqrt(to_array(history['val_mse']))
+                epochs = np.arange(len(train_rmse))
+                axes[0, 1].plot(epochs, train_rmse, label='Train', linewidth=2, color='green')
+                axes[0, 1].plot(epochs, val_rmse, label='Validation', linewidth=2, color='lime')
+                axes[0, 1].set_title('RMSE (Root Mean Squared Error)', fontweight='bold')
+                axes[0, 1].set_ylabel('RMSE')
+                axes[0, 1].set_xlabel('Epoch')
+                axes[0, 1].legend(loc='upper left')
+                axes[0, 1].grid(True, alpha=0.3)
             
-        # Row 2, Col 2: Learned Task Weights (Kendall's Method)
-        if is_physics_informed and 'train_weights' in history and history['train_weights']:
-            # Filter out None values and convert to numpy array
-            weights = np.array([w for w in history['train_weights'] if w is not None])
-            if weights.ndim == 2 and weights.shape[1] == 3:
-                axes[1, 1].plot(weights[:, 0], label='w_data (L1)', linewidth=2)
-                axes[1, 1].plot(weights[:, 1], label='w_phys (L2)', linewidth=2)
-                axes[1, 1].plot(weights[:, 2], label='w_safe (L3)', linewidth=2)
-                axes[1, 1].set_title('Learned Task Weights (Kendall)', fontweight='bold')
-                axes[1, 1].set_ylabel('Precision Weight (w)')
+            # Row 1, Col 3: MAE (Mean Absolute Error) - more relevant than Total Loss for non-physics models
+            if 'train_mae' in history and 'val_mae' in history and history['train_mae'] and history['val_mae']:
+                train_mae = to_array(history['train_mae'])
+                val_mae = to_array(history['val_mae'])
+                epochs = np.arange(len(train_mae))
+                axes[0, 2].plot(epochs, train_mae, label='Train', linewidth=2, color='darkblue')
+                axes[0, 2].plot(epochs, val_mae, label='Validation', linewidth=2, color='lightblue')
+                axes[0, 2].set_title('MAE (Mean Absolute Error)', fontweight='bold')
+                axes[0, 2].set_ylabel('MAE')
+                axes[0, 2].set_xlabel('Epoch')
+                axes[0, 2].legend(loc='upper right')
+                axes[0, 2].grid(True, alpha=0.3)
+            else:
+                axes[0, 2].axis('off')
+            
+            # Row 2, Col 1: Learning Rate (if tracked)
+            if 'learning_rate' in history:
+                lr = to_array(history['learning_rate'])
+                epochs = np.arange(len(lr))
+                axes[1, 0].plot(epochs, lr, linewidth=2, color='orange')
+                axes[1, 0].set_title('Learning Rate', fontweight='bold')
+                axes[1, 0].set_ylabel('Learning Rate')
+                axes[1, 0].set_xlabel('Epoch')
+                axes[1, 0].grid(True, alpha=0.3)
+                axes[1, 0].set_yscale('log')
+            else:
+                # If no LR tracking, show empty plot with message
+                axes[1, 0].text(0.5, 0.5, 'Learning Rate\n(Not Tracked)', 
+                               ha='center', va='center', transform=axes[1, 0].transAxes)
+                axes[1, 0].set_title('Learning Rate', fontweight='bold')
+                axes[1, 0].axis('off')
+            
+            # Row 2, Col 2: Generalization Gap (Signed: Val - Train)
+            if 'train_mse' in history and 'val_mse' in history:
+                train_mse = to_array(history['train_mse'])
+                val_mse = to_array(history['val_mse'])
+                epochs = np.arange(len(train_mse))
+                gap = val_mse - train_mse
+                axes[1, 1].plot(epochs, gap, color='purple', linewidth=2, label='Gap (Val - Train)')
+                axes[1, 1].axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Perfect Match')
+                axes[1, 1].set_title('Generalization Gap (Val - Train)', fontweight='bold')
+                axes[1, 1].set_ylabel('Gap (Positive = Overfitting)')
+                axes[1, 1].set_xlabel('Epoch')
                 axes[1, 1].legend()
                 axes[1, 1].grid(True, alpha=0.3)
-        else:
-            axes[1, 1].axis('off')
-                
-        # Row 2, Col 3: Generalization Gap
-        if 'train_mse' in history and 'val_mse' in history:
-            # Convert to numpy arrays (handles tensors with gradients)
-            train_mse = np.array([x.detach().item() if hasattr(x, 'detach') else (x.item() if hasattr(x, 'item') else x) 
-                                 for x in history['train_mse']])
-            val_mse = np.array([x.detach().item() if hasattr(x, 'detach') else (x.item() if hasattr(x, 'item') else x) 
-                               for x in history['val_mse']])
-            gap = np.abs(train_mse - val_mse)
-            axes[1, 2].plot(gap, color='purple', linewidth=2)
-            axes[1, 2].set_title('Generalization Gap', fontweight='bold')
-            axes[1, 2].grid(True, alpha=0.3)
+            
+            # Row 2, Col 3: Overfitting Ratio (Val MSE / Train MSE)
+            if 'train_mse' in history and 'val_mse' in history:
+                train_mse = to_array(history['train_mse'])
+                val_mse = to_array(history['val_mse'])
+                epochs = np.arange(len(train_mse))
+                ratio = val_mse / (train_mse + 1e-10)  # Avoid division by zero
+                axes[1, 2].plot(epochs, ratio, color='red', linewidth=2, label='Ratio (Val/Train)')
+                axes[1, 2].axhline(y=1.0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Perfect Match')
+                axes[1, 2].set_title('Overfitting Ratio (Val/Train)', fontweight='bold')
+                axes[1, 2].set_ylabel('Ratio (>1.0 = Overfitting)')
+                axes[1, 2].set_xlabel('Epoch')
+                axes[1, 2].legend(loc='upper left')
+                axes[1, 2].grid(True, alpha=0.3)
             
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         
@@ -100,6 +243,8 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
     except Exception as e:
         plt.close('all')
         print(f"Warning: Training history plotting failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 def plot_convergence(history: list, model_name: str, config: Any, num_buses: int):
     """Plot convergence curve with automatic error handling."""
@@ -205,7 +350,6 @@ def create_model_comparison_plot(all_results: list, save_path: str = None):
         ax1.grid(True, alpha=0.3, axis='y')
         
         # Add legend
-        from matplotlib.patches import Patch
         legend_elements = [
             Patch(facecolor='#2E86AB', edgecolor='black', label='Physics-Informed'),
             Patch(facecolor='#A23B72', edgecolor='black', label='Non-Physics')
@@ -313,7 +457,7 @@ def create_comparative_renewable_plots(renewable_data: dict, config: Any, num_bu
             ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
             ax.set_title(f'{ylabel.split("(")[0].strip()} Comparison', 
                         fontsize=13, fontweight='bold')
-            ax.legend(loc='best', fontsize=9, framealpha=0.9)
+            ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
             ax.grid(True, alpha=0.3, linestyle='--')
             ax.set_xlim(-0.05, 1.05)
             
@@ -326,7 +470,14 @@ def create_comparative_renewable_plots(renewable_data: dict, config: Any, num_bu
         plt.tight_layout(rect=[0, 0, 1, 0.97])
         
         # Save to bus-level directory
-        output_dir = os.path.join(config.RESULTS_BASE_DIR, f"{num_buses}bus")
+        if hasattr(config, 'get_experimental_results_dir'):
+            base_dir = config.get_experimental_results_dir()
+        elif hasattr(config, 'CURRENT_RUN_DIR'):
+            base_dir = config.CURRENT_RUN_DIR
+        else:
+            base_dir = 'experimental_results'
+        
+        output_dir = os.path.join(base_dir, f"{num_buses}bus")
         os.makedirs(output_dir, exist_ok=True)
         save_path = os.path.join(output_dir, 'comparative_renewable_impacts.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -354,13 +505,20 @@ def create_comparative_convergence_plot(convergence_data: dict, config: Any, num
         ax.set_title(f'Convergence Comparison - {num_buses}-bus System', fontsize=14, fontweight='bold')
         ax.set_xlabel('Iteration', fontsize=12)
         ax.set_ylabel('Best Loss', fontsize=12)
-        ax.legend(loc='best', fontsize=10)
+        ax.legend(loc='upper right', fontsize=10)
         ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
         
         # Save plot
-        output_dir = os.path.join(config.RESULTS_BASE_DIR, f"{num_buses}bus")
+        if hasattr(config, 'get_experimental_results_dir'):
+            base_dir = config.get_experimental_results_dir()
+        elif hasattr(config, 'CURRENT_RUN_DIR'):
+            base_dir = config.CURRENT_RUN_DIR
+        else:
+            base_dir = 'experimental_results'
+        
+        output_dir = os.path.join(base_dir, f"{num_buses}bus")
         os.makedirs(output_dir, exist_ok=True)
         save_path = os.path.join(output_dir, 'convergence_comparison.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')

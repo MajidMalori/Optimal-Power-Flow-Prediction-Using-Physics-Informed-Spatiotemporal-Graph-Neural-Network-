@@ -97,7 +97,7 @@ class AdaptivePIGCN(BaseModel, BaseAdaptiveGCN):
             x = self.batch_norms[layer_idx](x)
             x = x.transpose(1, 2)
             
-            if layer_idx < len(self.gc_layers) - 1:
+            if layer_idx < len(self.gc_layers):
                 x = self.dropout_layer(x)
         
         # 3. Output

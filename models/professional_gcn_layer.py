@@ -104,11 +104,10 @@ class ProfessionalGCNLayer(nn.Module):
         device = adj.device
         dtype = adj.dtype
         
-        # Step 1: Add self-loops (A_hat = A + I)
-        # Create identity matrix for each batch
-        identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0)  # [1, num_nodes, num_nodes]
-        identity = identity.expand(batch_size, -1, -1)  # [batch_size, num_nodes, num_nodes]
-        adj_hat = adj + identity  # [batch_size, num_nodes, num_nodes]
+        # Step 1: Add self-loops (A_hat = A + I) - vectorized
+        # Create identity matrix for each batch (efficient expand)
+        identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
+        adj_hat = adj + identity
         
         # Step 2: Compute degree matrix D_hat
         # D_hat[i,i] = sum of row i (or column i, since A_hat is symmetric)

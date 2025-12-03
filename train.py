@@ -76,6 +76,79 @@ def enable_gradient_checkpointing(model):
         model.gradient_checkpointing_enable()
         print("  Gradient checkpointing enabled for memory efficiency")
 
+def _auto_detect_num_workers(device):
+    """
+    Automatically determine optimal number of data loading workers based on system specs.
+    
+    Factors considered:
+    - Windows: Must use 0 (multiprocessing issues)
+    - RAM: Low RAM (< 16GB) = fewer workers to avoid memory pressure
+    - GPU: GPU available = can use more workers (GPU handles computation)
+    - CPU cores: More cores = can support more workers
+    - Best practices: Balance between parallelism and overhead
+    
+    Args:
+        device: torch.device (cpu or cuda)
+        
+    Returns:
+        int: Optimal number of workers (0-8)
+    """
+    import sys
+    
+    # Windows: Must use 0 due to multiprocessing limitations
+    if sys.platform == 'win32':
+        return 0
+    
+    try:
+        # Get CPU cores
+        cpu_cores = os.cpu_count() or 4  # Fallback to 4 if None
+        
+        # Try to get RAM (optional dependency)
+        try:
+            import psutil
+            ram_gb = psutil.virtual_memory().total / (1024**3)
+        except ImportError:
+            # Fallback: Assume moderate RAM if psutil not available
+            ram_gb = 16.0
+        
+        # Check GPU availability
+        has_gpu = device.type == 'cuda' and torch.cuda.is_available()
+        
+        # Decision logic:
+        # 1. Low RAM (< 8GB): Conservative (2 workers max)
+        # 2. Moderate RAM (8-16GB): Moderate (2-4 workers)
+        # 3. High RAM (> 16GB): Can use more workers
+        
+        if ram_gb < 8.0:
+            # Very low RAM: Use minimal workers
+            num_workers = min(2, cpu_cores // 4)
+        elif ram_gb < 16.0:
+            # Low-moderate RAM (like user's 8GB system)
+            if has_gpu:
+                # GPU available: Can use moderate workers (GPU handles computation)
+                num_workers = min(4, cpu_cores // 2)
+            else:
+                # CPU-only: Use fewer workers to avoid memory pressure
+                num_workers = min(2, cpu_cores // 4)
+        else:
+            # High RAM: Can use more workers
+            if has_gpu:
+                # GPU available: Use more workers (GPU handles computation, RAM available)
+                num_workers = min(8, cpu_cores // 2)
+            else:
+                # CPU-only: Moderate workers (more RAM but CPU handles computation)
+                num_workers = min(4, cpu_cores // 2)
+        
+        # Ensure at least 1 worker if we have resources (unless Windows)
+        num_workers = max(1, num_workers) if cpu_cores >= 2 else 0
+        
+        return num_workers
+        
+    except Exception as e:
+        # Fallback: Conservative default
+        print(f"Warning: Could not auto-detect num_workers: {e}. Using default: 2")
+        return 2
+
 def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
     """Get a safe device for training, with automatic fallback to CPU if GPU memory is insufficient"""
     if force_cpu:
@@ -113,15 +186,21 @@ from utils.optimization import (mosoa_optimizer, setup_hyperparameter_bounds, cr
                                calculate_objective_score)
 from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
-from utils.evaluation import (evaluate_model, evaluate_model_normalized,
-                             evaluate_model_mc_dropout, compute_engineering_metrics,
-                             evaluate_renewable_impacts, evaluate_renewable_impacts_from_predictions, save_results,
-                             evaluate_model_with_uncertainty, evaluate_moopf_objectives_normalized,
-                             save_best_model_results, save_model_results_csv, print_model_summary, print_comprehensive_summary)
+from utils.visualization import plot_training_history, plot_convergence, plot_all_renewable_impacts
+from utils.evaluation import (evaluate_performance,
+                             evaluate_renewable_impacts_from_predictions,
+                             evaluate_model_with_uncertainty,
+                             evaluate_moopf_objectives_normalized,
+                             save_results)
+from utils.evaluation_summary_funcs import (print_model_summary,
+                                           save_best_model_results,
+                                           save_model_results_csv,
+                                           print_comprehensive_summary)
 from trainers.model_trainer import PowerSystemTrainer
 from utils.forensic_logger import init_forensic_logger, close_logger
 from utils.shutdown_flag import set_shutdown
 from config import Config
+from tqdm import tqdm
 
 
 def setup_logging(log_path: str):
@@ -193,14 +272,29 @@ def main():
     parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data mode (train/test)')
     args = parser.parse_args()
     
-    # Pass CLI overrides to Config
+    # Determine data mode with correct priority: CLI > YAML > Default ('train')
+    if args.mode is not None:
+        data_mode_to_use = args.mode
+    else:
+        # Load from YAML if no CLI arg
+        try:
+            yaml_path = args.config if os.path.isabs(args.config) else os.path.join(os.path.dirname(__file__), args.config)
+            with open(yaml_path, 'r') as f:
+                yaml_config = yaml.safe_load(f)
+                data_mode_to_use = yaml_config.get('experimental', {}).get('data_mode', 'train')
+        except:
+            data_mode_to_use = 'train'
+    
+    # Pass CLI overrides to Config (CLI args override YAML)
+    # Note: YAML is loaded inside Config.__init__, so we pass None and let Config read from YAML
+    # Only override if CLI argument is provided
     base_config = Config(
         yaml_config_path=args.config,
         load_yaml=True,
-        data_mode=args.mode if args.mode is not None else getattr(Config, 'data_mode', 'test'),
+        data_mode=data_mode_to_use,
         save_results=getattr(Config, 'save_results', True),
-        train_timesteps=args.time_steps if args.time_steps is not None else getattr(Config, 'train_timesteps', 12000),
-        test_timesteps=args.time_steps if args.time_steps is not None else getattr(Config, 'test_timesteps', 960),
+        train_timesteps=args.time_steps,  # None if not provided, Config will read from YAML
+        test_timesteps=args.time_steps,   # None if not provided, Config will read from YAML
         clear_results=getattr(Config, 'clear_results', True),
         hours_per_day=24,  # Standard value
         sequence_length=5   # Standard value
@@ -271,17 +365,14 @@ def main():
     }
     clear_gpu_memory()
     
-    # Auto-configure NUM_WORKERS based on CPU cores (heuristic: half cores, capped at 8)
+    # Auto-configure NUM_WORKERS based on system specs (CPU, RAM, GPU, OS)
     data_workers_config = getattr(Config, 'data_workers', 'auto')
     if data_workers_config == 'auto':
-        try:
-            cpu_cores = os.cpu_count()
-            # Heuristic: use half the CPU cores, but cap at 8 to avoid overhead
-            base_config.NUM_WORKERS = min(cpu_cores // 2, 8) if cpu_cores else 2
-        except:
-            base_config.NUM_WORKERS = 2  # Fallback
+        base_config.NUM_WORKERS = _auto_detect_num_workers(device)
+        print(f"Auto-detected data workers: {base_config.NUM_WORKERS} (based on system specs)")
     else:
-        base_config.NUM_WORKERS = data_workers_config
+        base_config.NUM_WORKERS = int(data_workers_config)
+        print(f"Using configured data workers: {base_config.NUM_WORKERS}")
     
     # Ensure parallel_data_loading setting is respected
     parallel_data_loading = getattr(Config, 'parallel_data_loading', True)
@@ -399,6 +490,12 @@ def main():
             lower_bounds = [b[0] for b in param_bounds.values()]
             upper_bounds = [b[1] for b in param_bounds.values()]
 
+            # Track MoSOA iteration and run for display
+            mosoa_iter = [0]  # Current iteration (1-indexed)
+            mosoa_max_iter = mosoa_params['max_iterations']
+            mosoa_run_total = [0]  # Total run counter across all iterations
+            mosoa_runs_per_iter = mosoa_params['num_seagulls']
+
             def objective_function(params_array):
                 params = process_optimization_params(param_keys, params_array)
 
@@ -480,9 +577,8 @@ def main():
                     
                     # Golden Configuration: Use AdamW optimizer
                     # AdamW decouples weight decay from gradient updates (better generalization than Adam)
-                    # Weight decay set to 0.0 - rely on Empirical Bayes for regularization
                     learning_rate = run_config.LEARNING_RATE
-                    weight_decay = 0.0  # Rely on Empirical Bayes, not fixed weight decay
+                    weight_decay = getattr(run_config, 'WEIGHT_DECAY', 0.0001)  # L2 regularization from config
                     # Combine model and criterion parameters for optimization
                     all_params = list(model.parameters()) + list(criterion.parameters())
                     optimizer = torch.optim.AdamW(all_params, lr=learning_rate, weight_decay=weight_decay)
@@ -520,7 +616,12 @@ def main():
                     
                     config_str = ", ".join([f"{k}={v:.6f}" if isinstance(v, float) else f"{k}={v}" 
                                            for k, v in sorted(config_params.items())])
-                    print(f"  Config: {config_str}")
+                    # Add MoSOA progress to config line (get from objective function attributes)
+                    if hasattr(objective_function, '_current_iter'):
+                        iter_info = f" [MoSOA {objective_function._current_iter}/{objective_function._max_iter}, run {objective_function._current_run}/{objective_function._runs_per_iter}]"
+                    else:
+                        iter_info = f" [MoSOA {mosoa_iter[0]}/{mosoa_max_iter}]"
+                    print(f"  Config: {config_str}{iter_info}")
                     
                     # Train the model 
                     trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses, config_params=config_params)
@@ -534,11 +635,7 @@ def main():
                         # Use the final validation total loss (last epoch)
                         # This includes MSE + weighted physics + weighted safety with Kendall balancing
                         final_val_loss = training_history['val_total_loss'][-1]
-                        # Convert to float if it's a tensor
-                        if hasattr(final_val_loss, 'detach'):
-                            final_val_loss = final_val_loss.detach().item()
-                        elif hasattr(final_val_loss, 'item'):
-                            final_val_loss = final_val_loss.item()
+                        final_val_loss = final_val_loss.item() if hasattr(final_val_loss, 'item') else float(final_val_loss)
                         
                         val_metrics = {
                             'total_loss': float(final_val_loss),
@@ -546,10 +643,10 @@ def main():
                         }
                     else:
                         # Non-physics: Just use MSE
-                        val_metrics = evaluate_model_normalized(model, val_loader, device, run_config, _normalizer, is_sequential)
+                        val_metrics = evaluate_performance(model, val_loader, device, run_config, _normalizer, is_sequential, return_denormalized=False)
                     
                     # Get test metrics for final evaluation (use normalized MSE for consistency)
-                    test_metrics = evaluate_model_normalized(model, test_loader, device, run_config, _normalizer, is_sequential)
+                    test_metrics = evaluate_performance(model, test_loader, device, run_config, _normalizer, is_sequential, return_denormalized=False)
 
                     # Calculate objective score for MoSOA optimization
                     total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
@@ -570,8 +667,8 @@ def main():
                     
                     # Extract final physics_loss and safety_loss from training history
                     training_history = trainer.get_training_history()
-                    final_physics_loss = training_history['val_physics_loss'][-1] if training_history['val_physics_loss'] else 0.0
-                    final_safety_loss = training_history['val_safety_loss'][-1] if training_history['val_safety_loss'] else 0.0
+                    final_physics_loss = training_history['val_physics_loss'][-1]
+                    final_safety_loss = training_history['val_safety_loss'][-1]
                     
                     run_results = {
                         'run_name': run_name, 
@@ -600,10 +697,26 @@ def main():
             # Always use MoSOA for hyperparameter optimization
             if True:  # MoSOA always enabled
                 print(f"Optimizing with MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
+                
+                # Wrap objective function to track iteration and run numbers
+                def objective_with_tracking(params_array):
+                    # Update total run counter
+                    mosoa_run_total[0] += 1
+                    # Calculate iteration number (1-indexed)
+                    mosoa_iter[0] = (mosoa_run_total[0] - 1) // mosoa_runs_per_iter + 1
+                    # Calculate run number within current iteration (1-indexed)
+                    mosoa_run_in_iter = ((mosoa_run_total[0] - 1) % mosoa_runs_per_iter) + 1
+                    # Store for display in config line
+                    objective_function._current_iter = mosoa_iter[0]
+                    objective_function._current_run = mosoa_run_in_iter
+                    objective_function._max_iter = mosoa_max_iter
+                    objective_function._runs_per_iter = mosoa_runs_per_iter
+                    return objective_function(params_array)
+                
                 best_score, best_position, history, iteration_details = mosoa_optimizer(
                     mosoa_params['num_seagulls'], 
                     mosoa_params['max_iterations'], 
-                    lower_bounds, upper_bounds, dim, objective_function,
+                    lower_bounds, upper_bounds, dim, objective_with_tracking,
                     param_keys=param_keys
                 )
             # MoSOA is the only optimization method (trial_based_search removed)
@@ -611,7 +724,8 @@ def main():
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
 
-            print(f"\nBest: {format_params_concise(best_params)} | Score: {best_score:.6g}")
+            score_label = "Validation Total Loss" if is_physics_informed else "Validation MSE"
+            print(f"\nBest: {format_params_concise(best_params)} | {score_label}: {best_score:.6g}")
             print("="*80)  # Add clear separator after MoSOA completion
 
             if not model_specific_results: 
@@ -655,7 +769,7 @@ def main():
             # Use the stored model state from the best run (if available)
             try:
                 model_to_eval = model_class_map[model_name](**model_kwargs_best).to(device)
-                if best_run.get('model_state') is not None:
+                if best_run['model_state'] is not None:
                     model_to_eval.load_state_dict(best_run['model_state'])
                 else:
                     print(f"  No model state available for {model_name}, using untrained model for evaluation")
@@ -687,164 +801,140 @@ def main():
             )
             os.makedirs(model_output_dir, exist_ok=True)
             
-            # Evaluate MOOPF objectives for the best model 
-            moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
-                model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
-            )
+            # ==== CONSOLIDATED EVALUATION ====
+            # Removed redundant evaluate_model_mc_dropout and compute_engineering_metrics
+            # (those metrics are already computed by compute_moopf_metrics)
             
-            # Save mse_detailed.csv (only for physics-informed models)
-            if is_physics_informed and 'mse_per_sample' in moopf_results:
-                mse_df = pd.DataFrame({'mse_score': moopf_results['mse_per_sample']})
-                mse_detailed_path = os.path.join(model_output_dir, 'mse_detailed.csv')
-                mse_df.to_csv(mse_detailed_path, index=False)
-                print(f"  Saved mse_detailed.csv ({len(moopf_results['mse_per_sample'])} samples)")
+            if is_physics_informed:
+                # Evaluate MOOPF objectives (single pass through test data)
+                print(f"\n[{model_name}] Running MOOPF evaluation...")
+                moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
+                    model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
+                )
+                
+                # Save mse_detailed.csv
+                if 'mse_per_sample' in moopf_results:
+                    mse_df = pd.DataFrame({'mse_score': moopf_results['mse_per_sample']})
+                    mse_detailed_path = os.path.join(model_output_dir, 'mse_detailed.csv')
+                    mse_df.to_csv(mse_detailed_path, index=False)
+                
+                # Save comprehensive results
+                if base_config.SAVE_RESULTS:
+                    try:
+                        save_results(
+                            metrics=moopf_results,
+                            results_df=renewable_impact_data,
+                            config=base_config,
+                            output_dir=model_output_dir
+                        )
+                    except Exception as e:
+                        print(f"[{model_name}] Warning: Could not save results: {e}")
+                print()  # Add space between MOOPF bar and plot generation bar
+            else:
+                # Non-physics models: skip MOOPF evaluation
+                moopf_results = {}
+                renewable_impact_data = None
+                print(f"[{model_name}] Non-physics model - skipping MOOPF evaluation")
             
-            # Comprehensive MC Dropout evaluation with physics metrics (only for physics-informed models)
-            if is_physics_informed and base_config.SAVE_RESULTS:
-                try:
-                    print(f"\n[{model_name}] Running comprehensive MC Dropout evaluation...")
-                    
-                    # Full MC Dropout with ybus for physics validation and carbon/energy coefficients
-                    # This single call provides: predictions, targets, uncertainties, ybus, carbon, energy, renewable_fraction
-                    preds_phys, targets_phys, uncertainties_phys, ybus_batch, carbon_intensity, energy_coeff, renewable_fraction = evaluate_model_mc_dropout(
-                        model_to_eval, test_loader_best, device, best_config, _normalizer, num_samples=50
-                    )
-                    
-                    # Compute detailed engineering metrics using PhysicsMetricEngine with actual coefficients
-                    # Pass renewable_fraction for physics-consistent carbon calculation
-                    engineering_metrics = compute_engineering_metrics(
-                        preds_phys, targets_phys, ybus_batch,
-                        base_mva=_normalizer.base_mva,
-                        carbon_intensity=carbon_intensity, energy_coeff=energy_coeff,
-                        renewable_fraction=renewable_fraction
-                    )
-                    
-                    print(f"  Engineering Metrics:")
-                    print(f"    Voltage Deviation: {engineering_metrics['voltage_deviation']:.6f} p.u.")
-                    print(f"    Power Flow: {engineering_metrics['power_flow']:.6f} p.u.")
-                    print(f"    System Power Loss: {engineering_metrics['system_power_loss']:.4f}%")
-                    print(f"    Carbon Emissions (per-unit): {engineering_metrics['carbon_emissions']:.6f}")
-                    print(f"    Carbon Emissions (raw): {engineering_metrics['carbon_emissions_raw']:.2f}")
-                    
-                    # Renewable penetration impact analysis (reuse MC Dropout results - NO second evaluation!)
-                    renewable_impact_df = evaluate_renewable_impacts_from_predictions(
-                        preds_phys, uncertainties_phys, _normalizer
-                    )
-                    
-                    # Save comprehensive results to files
-                    save_results(
-                        metrics={**moopf_results, **engineering_metrics},
-                        results_df=renewable_impact_df,
-                        config=best_config
-                    )
-                    
-                    print(f"[{model_name}] Comprehensive evaluation complete and saved.")
-                    
-                except Exception as e:
-                    print(f"[{model_name}] Warning: Comprehensive evaluation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            # Generate uncertainty visualizations (for both train and test modes)
+            # Generate all plots with single progress bar (for all models)
             if base_config.SAVE_RESULTS:
                 try:
-                    # Get predictions with uncertainty data (silent generation)
+                    # Get predictions with uncertainty data for visualization
                     _, uncertainty_data = evaluate_model_with_uncertainty(
                         model_to_eval, test_loader_best, device, best_config, _normalizer, is_sequential
                     )
                     
-                    generate_uncertainty_visualizations(
-                        predictions=uncertainty_data['predictions'],
-                        targets=uncertainty_data['targets'],
-                        renewable_fractions=uncertainty_data['renewable_fractions'],
-                        case_name=case_name,
-                        output_dir=model_output_dir,
-                        model_name=model_name,
-                        config=best_config,  # Pass config for time-series mode detection
-                        model_outputs=uncertainty_data.get('model_outputs', None),  # Full outputs with uncertainties if heteroscedastic
-                        bus_types=uncertainty_data.get('bus_types', None),  # Pass bus_types for OPF mode
-                        timesteps=uncertainty_data.get('timesteps', None)  # Pass timesteps for temporal plotting
-                    )
+                    # Build list of all plotting tasks
+                    plot_tasks = []
                     
-                    # Generate critical evaluation plots
+                    # Evaluation plots
+                    if uncertainty_data.get('renewable_fractions') is not None:
+                        plot_tasks.append(('Uncertainty Visualizations', lambda: generate_uncertainty_visualizations(
+                            predictions=uncertainty_data['predictions'],
+                            targets=uncertainty_data['targets'],
+                            renewable_fractions=uncertainty_data['renewable_fractions'],
+                            case_name=case_name,
+                            output_dir=model_output_dir,
+                            model_name=model_name,
+                            config=best_config,
+                            model_outputs=uncertainty_data.get('model_outputs', None),
+                            bus_types=uncertainty_data.get('bus_types', None),
+                            timesteps=uncertainty_data.get('timesteps', None)
+                        )))
+                    
                     if uncertainty_data.get('bus_types') is not None:
-                        try:
-                            # Predicted vs Actual scatter plots
-                            plot_predicted_vs_actual(
-                                predictions=uncertainty_data['predictions'],
+                        plot_tasks.append(('Predicted vs Actual', lambda: plot_predicted_vs_actual(
+                            predictions=uncertainty_data['predictions'],
+                            targets=uncertainty_data['targets'],
+                            bus_types=uncertainty_data['bus_types'],
+                            case_name=case_name,
+                            output_dir=model_output_dir,
+                            model_name=model_name
+                        )))
+                        
+                        plot_tasks.append(('Error Distributions', lambda: plot_error_distributions(
+                            predictions=uncertainty_data['predictions'],
+                            targets=uncertainty_data['targets'],
+                            bus_types=uncertainty_data['bus_types'],
+                            case_name=case_name,
+                            output_dir=model_output_dir,
+                            model_name=model_name
+                        )))
+                        
+                        if uncertainty_data['model_outputs'] is not None and uncertainty_data.get('uncertainties') is not None:
+                            if uncertainty_data.get('targets_norm') is None:
+                                raise ValueError("targets_norm is required for calibration diagram. Cannot plot without normalized targets.")
+                            plot_tasks.append(('Calibration Diagram', lambda: plot_calibration_diagram(
+                                model_outputs=uncertainty_data['model_outputs'],
                                 targets=uncertainty_data['targets'],
-                                bus_types=uncertainty_data['bus_types'],
+                                bus_types=uncertainty_data.get('bus_types', None),
                                 case_name=case_name,
                                 output_dir=model_output_dir,
-                                model_name=model_name
-                            )
-                            
-                            # Error distribution histograms
-                            plot_error_distributions(
-                                predictions=uncertainty_data['predictions'],
-                                targets=uncertainty_data['targets'],
-                                bus_types=uncertainty_data['bus_types'],
-                                case_name=case_name,
-                                output_dir=model_output_dir,
-                                model_name=model_name
-                            )
-                            
-                            # Calibration diagram (if heteroscedastic model outputs available)
-                            if uncertainty_data.get('model_outputs') is not None:
-                                plot_calibration_diagram(
-                                    model_outputs=uncertainty_data['model_outputs'],
-                                    targets=uncertainty_data['targets'],
-                                    bus_types=uncertainty_data['bus_types'],
-                                    case_name=case_name,
-                                    output_dir=model_output_dir,
-                                    model_name=model_name,
-                                    config=best_config
-                                )
-                        except Exception as e:
-                            print(f"  Warning: Could not generate evaluation plots: {e}")
+                                model_name=model_name,
+                                config=best_config,
+                                uncertainties=uncertainty_data['uncertainties'],
+                                targets_norm=uncertainty_data['targets_norm']
+                            )))
+                    
+                    # Training history plots
+                    plot_tasks.append(('Training History', lambda: plot_training_history(
+                        history=best_run['training_history'],
+                        model_name=model_name,
+                        config=best_config,
+                        num_buses=num_buses,
+                        is_physics_informed=is_physics_informed
+                    )))
+                    
+                    if history:  # history = convergence_curve from MoSOA
+                        plot_tasks.append(('MoSOA Convergence', lambda: plot_convergence(
+                            history=history,
+                            model_name=model_name,
+                            config=best_config,
+                            num_buses=num_buses
+                        )))
+                    
+                    if is_physics_informed and renewable_impact_data is not None and not renewable_impact_data.empty:
+                        plot_tasks.append(('Renewable Impact', lambda: plot_all_renewable_impacts(
+                            renewable_impact_data=renewable_impact_data,
+                            config=best_config,
+                            num_buses=num_buses,
+                            model_name=model_name
+                        )))
+                    
+                    # Execute all plotting tasks with single progress bar
+                    if plot_tasks:
+                        for task_name, task_func in tqdm(plot_tasks, desc=f"Generating plots ({model_name})", unit="plot"):
+                            try:
+                                task_func()
+                            except Exception as e:
+                                print(f"  Warning: {task_name} failed: {e}")
                     
                     # Note: Contingency analysis is done during data generation (N-1 scenarios)
                     # The model is already trained on contingency data, no need to re-evaluate
                 except Exception as e:
-                    print(f"  Warning: Could not generate uncertainty visualizations: {e}")
+                    print(f"  Warning: Could not generate plots: {e}")
                     import traceback
                     traceback.print_exc()
-            
-            # Generate additional plots: training history, convergence, renewable impacts
-            try:
-                from utils.visualization import plot_training_history, plot_convergence, plot_all_renewable_impacts
-                
-                # Training history plot
-                plot_training_history(
-                    history=best_run['training_history'],
-                    model_name=model_name,
-                    config=best_config,
-                    num_buses=num_buses,
-                    is_physics_informed=is_physics_informed
-                )
-                
-                # MoSOA convergence plot (individual per model)
-                if history:  # history = convergence_curve from MoSOA
-                    plot_convergence(
-                        history=history,
-                        model_name=model_name,
-                        config=best_config,
-                        num_buses=num_buses
-                    )
-                
-                # Renewable impact plots (ri_combined.png) - only for physics-informed models
-                if is_physics_informed and renewable_impact_data is not None and not renewable_impact_data.empty:
-                    plot_all_renewable_impacts(
-                        renewable_impact_data=renewable_impact_data,
-                        config=best_config,
-                        num_buses=num_buses,
-                        model_name=model_name
-                    )
-                    
-            except Exception as e:
-                print(f"  Warning: Could not generate additional plots: {e}")
-                import traceback
-                traceback.print_exc()
             
             # Calculate final test performance metric for comparison
             if is_physics_informed and moopf_results:

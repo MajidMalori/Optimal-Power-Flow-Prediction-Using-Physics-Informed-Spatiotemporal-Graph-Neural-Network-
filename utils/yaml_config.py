@@ -21,6 +21,7 @@ import yaml
 import torch
 from typing import Dict, Any, Optional
 from pathlib import Path
+from config import Config
 
 
 def load_yaml_file(yaml_path: str) -> Dict[str, Any]:
@@ -203,11 +204,6 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'training_cosine_annealing_lr_eta_min': 'COSINEANNEALINGLR_ETA_MIN',
         'training_weight_decay': 'WEIGHT_DECAY',
         
-        # Physics configuration
-        'physics_voltage_min': 'V_MIN',
-        'physics_voltage_max': 'V_MAX',
-        'physics_apparent_power_max': 'S_MAX',
-        
         # Data configuration
         'physics_split_mode': 'DATA_SPLIT_MODE',
         'physics_splits_train': 'TRAIN_SPLIT',
@@ -220,10 +216,6 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'moopf_weights_voltage_deviation': 'MOOPF_WEIGHT_VDEV',
         'moopf_weights_carbon': 'MOOPF_WEIGHT_CARBON',
         
-        # Contingency configuration
-        'contingency_enable': 'ENABLE_CONTINGENCY_ANALYSIS',
-        'contingency_top_k': 'CONTINGENCY_TOP_K',
-        'contingency_method': 'CONTINGENCY_METHOD',
     }
     
     # Flatten YAML config for easier processing
@@ -270,19 +262,16 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
     
     # Handle model capacity settings (stored in Config class, not Args)
     if 'model_capacity_bus_33' in flat_yaml:
-        from config import Config
         Config.CAPACITY_33_BUS = flat_yaml['model_capacity_bus_33']
         if verbose:
             print(f"[YAML Config] Set Config.CAPACITY_33_BUS = {flat_yaml['model_capacity_bus_33']}")
     
     if 'model_capacity_bus_57' in flat_yaml:
-        from config import Config
         Config.CAPACITY_57_BUS = flat_yaml['model_capacity_bus_57']
         if verbose:
             print(f"[YAML Config] Set Config.CAPACITY_57_BUS = {flat_yaml['model_capacity_bus_57']}")
     
     if 'model_capacity_bus_118' in flat_yaml:
-        from config import Config
         Config.CAPACITY_118_BUS = flat_yaml['model_capacity_bus_118']
         if verbose:
             print(f"[YAML Config] Set Config.CAPACITY_118_BUS = {flat_yaml['model_capacity_bus_118']}")
@@ -295,8 +284,6 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'experimental_data_mode': 'data_mode',
         'experimental_train_timesteps': 'train_timesteps',
         'experimental_test_timesteps': 'test_timesteps',
-        'experimental_plot_data_info': 'plot_data_info',
-
         'experimental_force_cpu': 'force_cpu',
         'experimental_parallel_data_loading': 'parallel_data_loading',
         'experimental_data_workers': 'data_workers',
@@ -306,7 +293,6 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
     
     for yaml_key, config_attr in experimental_mappings.items():
         if yaml_key in flat_yaml and flat_yaml[yaml_key] is not None:
-            from config import Config
             setattr(Config, config_attr, flat_yaml[yaml_key])
             if verbose:
                 print(f"[YAML Config] Set Config.{config_attr} = {flat_yaml[yaml_key]}")
@@ -360,8 +346,6 @@ def load_config_from_yaml(yaml_path: str = 'config.yaml', **kwargs) -> Any:
     Example:
         config = load_config_from_yaml('config.yaml', data_mode='test')
     """
-    from config import Config
-    
     # Create Config instance with kwargs
     config = Config(**kwargs)
     
@@ -413,14 +397,8 @@ def save_config_to_yaml(config_obj: Any, yaml_path: str = 'config_generated.yaml
         'weight_decay': getattr(config_obj, 'WEIGHT_DECAY', 0.0),
     }
     
-    # Physics configuration
-    config_dict['physics'] = {
-        'voltage': {
-            'min': getattr(config_obj, 'V_MIN', 0.90),
-            'max': getattr(config_obj, 'V_MAX', 1.10),
-        },
-        'apparent_power_max': getattr(config_obj, 'S_MAX', 1.2),
-    }
+    # Physics configuration (voltage limits are in system_limits, not here)
+    config_dict['physics'] = {}
     
     # Data configuration
     config_dict['data'] = {
@@ -440,13 +418,6 @@ def save_config_to_yaml(config_obj: Any, yaml_path: str = 'config_generated.yaml
             'voltage_deviation': config_obj.MOOPF_WEIGHT_VDEV,
             'carbon': config_obj.MOOPF_WEIGHT_CARBON,
         }
-    }
-    
-    # Contingency configuration
-    config_dict['contingency'] = {
-        'enable': getattr(config_obj, 'ENABLE_CONTINGENCY_ANALYSIS', True),
-        'top_k': getattr(config_obj, 'CONTINGENCY_TOP_K', 10),
-        'method': getattr(config_obj, 'CONTINGENCY_METHOD', 'power_flow'),
     }
     
     # Write to YAML file

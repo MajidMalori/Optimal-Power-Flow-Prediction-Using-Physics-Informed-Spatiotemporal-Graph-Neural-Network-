@@ -115,12 +115,9 @@ class PhysicsInformedRecurrentNet(SpatioTemporalBase):
                 
                 if can_use_residual:
                     h_new = h_processed + residual
-                    if layer_idx < len(self.rnn_cells) - 1:
-                        h_new = self.dropout_layer(h_new)
+                    h_new = self.dropout_layer(h_new)
                 else:
-                    h_new = h_processed
-                    if layer_idx < len(self.rnn_cells) - 1:
-                        h_new = self.dropout_layer(h_new)
+                    h_new = self.dropout_layer(h_processed)
                 
                 h_layers[layer_idx] = h_new
                 h_input = h_new

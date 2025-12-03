@@ -589,7 +589,6 @@ Generated data is saved as NumPy arrays:
 - `ybus_matrices.npy`: [n_samples, n_buses, n_buses] - Complex admittance matrices (per sample, as they may vary with topology)
 - `bus_types.npy`: [n_buses] - Bus type codes (0=PQ, 1=PV, 2=Slack)
 - `renewable_fractions.npy`: [n_samples] - Renewable energy fraction for each sample
-- `energy_coeffs.npy`: [n_samples] - Energy utilization coefficients
 - `carbon_coeffs.npy`: [n_samples] - Carbon intensity coefficients
 
 ### Data Normalization

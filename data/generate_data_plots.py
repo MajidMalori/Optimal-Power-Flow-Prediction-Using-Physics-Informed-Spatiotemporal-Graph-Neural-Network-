@@ -15,6 +15,7 @@ Usage:
 import os
 import sys
 import argparse
+import shutil
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -133,7 +134,6 @@ Examples:
     
     # Clean up old plots unless --no-cleanup is specified
     if not args.no_cleanup and os.path.exists(output_dir):
-        import shutil
         print(f"Cleaning up old plots in {output_dir}...")
         try:
             shutil.rmtree(output_dir)

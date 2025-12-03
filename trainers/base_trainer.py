@@ -2,6 +2,7 @@ import torch
 from abc import ABC, abstractmethod
 import os
 from datetime import datetime
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 class BaseTrainer(ABC):
     """
@@ -37,11 +38,12 @@ class BaseTrainer(ABC):
 
         # Add history tracking
         self.history = {
-            'train_total_loss': [], 'train_mse': [], 
-            'train_physics_loss': [], 'train_safety_loss': [],
-            'val_total_loss': [], 'val_mse': [],
-            'val_physics_loss': [], 'val_safety_loss': [],
-            'train_weights': []
+            'train_total_loss': [], 'train_mse': [], 'train_mae': [],
+            'train_physics_loss': [], 'train_safety_loss': [], 'train_constraint_loss': [],
+            'val_total_loss': [], 'val_mse': [], 'val_mae': [],
+            'val_physics_loss': [], 'val_safety_loss': [], 'val_constraint_loss': [],
+            'train_weights': [], 'train_log_vars': [],
+            'learning_rate': []  # Track learning rate for both physics and non-physics models
         }
 
     @abstractmethod
@@ -126,12 +128,10 @@ class BaseTrainer(ABC):
         use_scheduler = getattr(self.config, 'USE_LEARNING_RATE_SCHEDULER', True)
         
         if use_scheduler:
-            from torch.optim.lr_scheduler import CosineAnnealingLR
-            
             t_max = getattr(self.config, 'COSINEANNEALINGLR_T_MAX', None)
             if t_max is None:
                 t_max = self.config.NUM_EPOCHS  # One full cosine cycle
-            eta_min = getattr(self.config, 'COSINEANNEALINGLR_ETA_MIN', 1e-6)
+            eta_min = getattr(self.config, 'COSINEANNEALINGLR_ETA_MIN', 1e-5)  # Higher min LR (was 1e-6) - prevents premature convergence
             
             self.scheduler = CosineAnnealingLR(
                 self.optimizer,
@@ -158,6 +158,28 @@ class BaseTrainer(ABC):
         # Log config info to file (not terminal - cleaner training output)
         _log(f"[Config] {scheduler_info}")
         
+        # Log detailed training configuration for overfitting analysis
+        _log(f"[Training Config] Batch Size: {self.config.BATCH_SIZE} | Learning Rate: {self.config.LEARNING_RATE} | Epochs: {self.config.NUM_EPOCHS}")
+        _log(f"[Training Config] Early Stopping Patience: {self.config.EARLY_STOPPING_PATIENCE} | Weight Decay: {getattr(self.config, 'WEIGHT_DECAY', 0.0)}")
+        
+        # Get model dropout (check common attributes)
+        model_dropout = 'N/A'
+        if hasattr(self.model, 'dropout'):
+            model_dropout = self.model.dropout
+        elif hasattr(self.model, 'dropout_rate'):
+            model_dropout = self.model.dropout_rate
+        elif hasattr(self.model, 'module') and hasattr(self.model.module, 'dropout'):
+            model_dropout = self.model.module.dropout
+        
+        # Count trainable parameters
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in self.model.parameters())
+        
+        _log(f"[Training Config] Dropout: {model_dropout} | Trainable Params: {trainable_params:,} | Total Params: {total_params:,}")
+        _log(f"[Training Config] Optimizer: {type(self.optimizer).__name__} | Scheduler: {scheduler_info}")
+        _log(f"[Training Config] Gradient Clipping: max_norm=1.0 (enabled)")
+        _log("="*80)
+        
         for epoch in range(1, self.config.NUM_EPOCHS + 1):
             # Check for shutdown flag (set by signal handler)
             try:
@@ -174,20 +196,29 @@ class BaseTrainer(ABC):
 
             self.history['train_total_loss'].append(train_metrics['total_loss'])
             self.history['train_mse'].append(train_metrics['mse'])
+            self.history['train_mae'].append(train_metrics.get('mae', 0.0))
             self.history['train_physics_loss'].append(train_metrics['physics_loss'])
             self.history['train_safety_loss'].append(train_metrics['safety_loss'])
-            # Track Kendall's learned weights
+            self.history['train_constraint_loss'].append(train_metrics.get('constraint_loss', 0.0))
+            # Track Kendall's learned weights and log_vars
             if 'weights' in train_metrics:
                 self.history['train_weights'].append(train_metrics['weights'])
             else:
                 self.history['train_weights'].append(None)
+            # Track log_vars if available (for debugging overfitting)
+            if hasattr(self.criterion, 'log_vars'):
+                self.history['train_log_vars'].append([v.item() for v in self.criterion.log_vars])
+            else:
+                self.history['train_log_vars'].append(None)
             
             val_metrics = self._val_epoch(val_loader)
 
             self.history['val_total_loss'].append(val_metrics['total_loss'])
             self.history['val_mse'].append(val_metrics['mse'])
+            self.history['val_mae'].append(val_metrics.get('mae', 0.0))
             self.history['val_physics_loss'].append(val_metrics['physics_loss'])
             self.history['val_safety_loss'].append(val_metrics['safety_loss'])
+            self.history['val_constraint_loss'].append(val_metrics.get('constraint_loss', 0.0))
             
             # Forensic: Log model weights periodically
             if hasattr(self, 'forensic_logger') and self.forensic_logger and self.forensic_logger.enabled:
@@ -204,29 +235,45 @@ class BaseTrainer(ABC):
             else:
                 current_lr = self.optimizer.param_groups[0]['lr']
             
+            # Track learning rate in history
+            self.history['learning_rate'].append(current_lr)
+            
+            # Calculate overfitting metrics
+            train_mse = train_metrics['mse']
+            val_mse = val_metrics['mse']
+            overfitting_gap = val_mse - train_mse  # Positive = overfitting
+            overfitting_ratio = val_mse / train_mse if train_mse > 0 else float('inf')
+            
+            # Get gradient norm from training metrics (tracked during training)
+            avg_grad_norm = train_metrics.get('grad_norm', 0.0)
+            
+            # Get weight decay value
+            weight_decay = self.optimizer.param_groups[0].get('weight_decay', 0.0)
+            
             # Log complete epoch summary to file (one line per epoch)
             if hasattr(self, 'criterion') and self.criterion.is_physics_informed:
-                # Physics-informed model: include MSE, physics, safety, weights, and LR
-                train_mse = train_metrics['mse']
+                # Physics-informed model: include MSE, physics, safety, constraint, weights, log_vars, and LR
                 train_phys = train_metrics['physics_loss']
                 train_safe = train_metrics['safety_loss']
-                val_mse = val_metrics['mse']
+                train_constraint = train_metrics.get('constraint_loss', 0.0)
                 val_phys = val_metrics['physics_loss']
                 val_safe = val_metrics['safety_loss']
+                val_constraint = val_metrics.get('constraint_loss', 0.0)
                 
                 # Extract Kendall's learned weights
-                if 'weights' in train_metrics:
-                    weights = train_metrics['weights']
-                    weight_str = f"w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f}]"
-                else:
-                    weight_str = "w=N/A"
+                weights = train_metrics['weights']
+                weight_str = f"w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f},{weights[3]:.2f}]"
                 
-                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f} | {weight_str} | LR={current_lr:.6f}")
+                # Extract log_vars for debugging (these are added to total loss and can cause overfitting)
+                log_vars_str = ""
+                if hasattr(self.criterion, 'log_vars'):
+                    log_vars = [v.item() for v in self.criterion.log_vars]
+                    log_vars_str = f" | log_vars=[{log_vars[0]:.3f},{log_vars[1]:.3f},{log_vars[2]:.3f},{log_vars[3]:.3f}]"
+                
+                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f}, Const={train_constraint:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f}, Const={val_constraint:.6f} | {weight_str}{log_vars_str} | LR={current_lr:.6f} | Gap={overfitting_gap:+.6f} | Ratio={overfitting_ratio:.3f} | GradNorm={avg_grad_norm:.4f} | WD={weight_decay:.6f}")
             else:
                 # Non-physics model: only MSE and LR
-                train_mse = train_metrics['mse']
-                val_mse = val_metrics['mse']
-                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f} | Val: MSE={val_mse:.6f} | LR={current_lr:.6f}")
+                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f} | Val: MSE={val_mse:.6f} | LR={current_lr:.6f} | Gap={overfitting_gap:+.6f} | Ratio={overfitting_ratio:.3f} | GradNorm={avg_grad_norm:.4f} | WD={weight_decay:.6f}")
             
             # Forensic: Log epoch summary
             if hasattr(self, 'forensic_logger') and self.forensic_logger and self.forensic_logger.enabled:
@@ -235,18 +282,34 @@ class BaseTrainer(ABC):
             # Early stopping logic: Track best model on ANY improvement (no threshold)
             # Deep learning progress is often incremental - small improvements matter
             if val_loss < self.best_val_loss:
+                improvement = self.best_val_loss - val_loss
                 self.best_val_loss = val_loss
                 self.epochs_no_improve = 0
                 self.best_epoch = epoch  # ALWAYS update the best epoch on ANY improvement
                 self._save_checkpoint('best_model.pth')
+                _log(f"  ✓ Best model updated (improvement: {improvement:.6f}) | Best Val Loss: {self.best_val_loss:.6f}")
             else:
                 self.epochs_no_improve += 1
+                _log(f"  ⚠ No improvement ({self.epochs_no_improve}/{self.config.EARLY_STOPPING_PATIENCE}) | Best: {self.best_val_loss:.6f} at epoch {self.best_epoch}")
             
             # Early stopping: Stop if no improvement for patience epochs
             if self.epochs_no_improve >= self.config.EARLY_STOPPING_PATIENCE:
-                message = f"Early stopping: No improvement for {self.epochs_no_improve} epochs (best at epoch {self.best_epoch})."
+                message = f"Early stopping: No improvement for {self.epochs_no_improve} epochs (best at epoch {self.best_epoch}, val_loss={self.best_val_loss:.6f})."
                 _log(message)
                 break
+        
+        # Final training summary
+        _log("="*80)
+        _log(f"[Training Summary] Completed {self.current_epoch} epochs")
+        _log(f"[Training Summary] Best validation loss: {self.best_val_loss:.6f} at epoch {self.best_epoch}")
+        if self.current_epoch > 1:
+            final_train_mse = train_metrics['mse']
+            final_val_mse = val_metrics['mse']
+            final_gap = final_val_mse - final_train_mse
+            final_ratio = final_val_mse / final_train_mse if final_train_mse > 0 else float('inf')
+            _log(f"[Training Summary] Final Train MSE: {final_train_mse:.6f} | Final Val MSE: {final_val_mse:.6f}")
+            _log(f"[Training Summary] Final Overfitting Gap: {final_gap:+.6f} | Final Ratio: {final_ratio:.3f}")
+        _log("="*80)
         
         # Close log file if it was opened
         # Note: Each training run is a separate trainer instance, so closing is safe.

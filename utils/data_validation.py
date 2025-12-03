@@ -73,7 +73,6 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
                 "targets.npy", 
                 "base_adjacency.npy",  # NEW: Single base adjacency matrix
                 "topology_ids.npy",    # NEW: Topology ID for each timestep
-                "time_energy_coeffs.txt",
                 "time_carbon_coeffs.txt"
                 # Note: Generation components are now included in features/targets matrices
             ]
@@ -602,7 +601,6 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
     clean_existing_data(config, aggressive=True)
     
     # Verify cleanup was successful and synchronize filesystem
-    import glob
     data_dir = config.DATA_DIR
     remaining_patterns = ["*.npy", "*.txt", "*.json"]
     remaining_files = []
@@ -765,13 +763,20 @@ def display_data_generation_summary(config, bus_systems_to_show=None):
                 with open(audit_file, 'r') as f:
                     audit = json.load(f)
                 
-                meta = audit.get('meta', {})
-                intervention = audit.get('intervention_stats', {})
-                
                 case_short = case_name.replace('case', '')
-                success = intervention.get('raw_success_rate', 0)
+                
+                # Extract actual values from audit structure
+                total = audit.get('total_timesteps', 1)
+                successful_count = audit.get('successful', 0)
+                failed_count = audit.get('failed', 0)
+                
+                # Calculate percentages
+                success = 100 * successful_count / total if total > 0 else 0
+                fail = 100 * failed_count / total if total > 0 else 0
+                
+                # Check for curtailment data (might be in intervention_stats or separate)
+                intervention = audit.get('intervention_stats', {})
                 curtail = intervention.get('curtailed_rate', 0)
-                fail = intervention.get('failed_tripped_rate', 0)
                 
                 # Status without emojis
                 status = "OK"

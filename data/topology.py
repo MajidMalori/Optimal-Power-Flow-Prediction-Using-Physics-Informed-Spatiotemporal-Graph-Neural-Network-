@@ -5,7 +5,6 @@ import pandapower as pp
 import pandapower.networks as pn
 import pandapower.topology as top
 import networkx as nx
-from scipy import sparse
 
 def load_network(case_name: str) -> pp.pandapowerNet:
     """Loads a pandapower network based on its name."""
