@@ -286,16 +286,16 @@ def main():
             data_mode_to_use = 'train'
     
     # Pass CLI overrides to Config (CLI args override YAML)
-    # Note: YAML is loaded inside Config.__init__, so we pass None and let Config read from YAML
-    # Only override if CLI argument is provided
+    # Note: YAML is loaded inside Config.__init__, so we pass defaults and let Config read from YAML
+    # YAML values will override these defaults inside Config.__init__
     base_config = Config(
         yaml_config_path=args.config,
         load_yaml=True,
         data_mode=data_mode_to_use,
-        save_results=getattr(Config, 'save_results', True),
+        save_results=True,  # Default, will be overridden by YAML if present
         train_timesteps=args.time_steps,  # None if not provided, Config will read from YAML
         test_timesteps=args.time_steps,   # None if not provided, Config will read from YAML
-        clear_results=getattr(Config, 'clear_results', True),
+        clear_results=False,  # Default, will be overridden by YAML if present
         hours_per_day=24,  # Standard value
         sequence_length=5   # Standard value
     )
@@ -359,9 +359,10 @@ def main():
     device, _ = get_safe_device(force_cpu, min_free_memory_gb=2.0)
     
     # Store Config attributes for later use (replaces args object)
+    # Use instance values (YAML has been loaded by now)
     _config_attrs = {
-        'save_results': getattr(Config, 'save_results', True),
-        'clear_results': getattr(Config, 'clear_results', True),
+        'save_results': base_config.SAVE_RESULTS,
+        'clear_results': getattr(Config, 'clear_results', False),
     }
     clear_gpu_memory()
     
@@ -739,7 +740,23 @@ def main():
 
             # Get the best run and add MoSOA results
             best_run = best_run_df.loc[best_run_df['total_loss'].idxmin()].to_dict()
+            
+            # Extract test_score and val_score from metrics dictionaries
+            test_score = None
+            val_score = None
+            if 'test_metrics' in best_run and best_run['test_metrics'] is not None:
+                test_score = best_run['test_metrics'].get('mse', None)
+            elif 'mse' in best_run:
+                test_score = best_run['mse']
+            
+            if 'val_metrics' in best_run and best_run['val_metrics'] is not None:
+                val_score = best_run['val_metrics'].get('mse', None)
+            elif 'training_mse' in best_run:
+                val_score = best_run['training_mse']
+            
             best_run.update({
+                'test_score': test_score,
+                'val_score': val_score,
                 'convergence_history': history,
                 'mosoa_best_score': best_score,
                 'mosoa_best_params': best_params,
@@ -800,6 +817,11 @@ def main():
                 model_name
             )
             os.makedirs(model_output_dir, exist_ok=True)
+            
+            # Save best model checkpoint to model folder
+            if best_run['model_state'] is not None:
+                best_model_path = os.path.join(model_output_dir, 'best_model.pth')
+                torch.save(model_to_eval.state_dict(), best_model_path)
             
             # ==== CONSOLIDATED EVALUATION ====
             # Removed redundant evaluate_model_mc_dropout and compute_engineering_metrics
@@ -1027,7 +1049,7 @@ def main():
                 except Exception as e:
                     print(f"  Warning: Could not create convergence plots: {e}")
             
-            # Copy best model's uncertainty graphs to bus system level
+            # Copy best model's images to bus system level
             if base_config.DATA_MODE == 'test' and all_results:
                 try:
                     # Find best model for this bus system
@@ -1036,8 +1058,8 @@ def main():
                         best_bus_result = min(bus_results, key=lambda x: x['final_test_score'])
                         best_bus_model_name = best_bus_result['model_name']
                         
-                        # Source: model's uncertainty graphs
-                        model_uncertainty_dir = os.path.join(
+                        # Source: model's output directory
+                        best_model_dir = os.path.join(
                             base_config.CURRENT_RUN_DIR,
                             f"{num_buses}bus",
                             "models",
@@ -1047,19 +1069,33 @@ def main():
                         # Destination: bus system level
                         bus_system_dir = os.path.join(base_config.CURRENT_RUN_DIR, f"{num_buses}bus")
                         
-                        # Copy uncertainty graphs if they exist
+                        # List of all relevant images to copy
+                        images_to_copy = [
+                            f"{best_bus_model_name}_predicted_vs_actual.png",
+                            f"{best_bus_model_name}_error_distributions.png",
+                            "calibration_diagram.png",
+                            "train_hist.png",
+                            "uncertainty_spatial.png",
+                            "uncertainty_temporal.png",
+                            "mosoa_conv.png"
+                        ]
+                        
+                        # Copy all images if they exist
                         import shutil
                         copied_count = 0
-                        for uncertainty_file in ['uncertainty_spatial.png', 'uncertainty_temporal.png']:
-                            src = os.path.join(model_uncertainty_dir, uncertainty_file)
-                            dst = os.path.join(bus_system_dir, uncertainty_file)
+                        for image_file in images_to_copy:
+                            src = os.path.join(best_model_dir, image_file)
+                            dst = os.path.join(bus_system_dir, image_file)
                             if os.path.exists(src):
                                 shutil.copy2(src, dst)
                                 copied_count += 1
+                        
                         if copied_count > 0:
-                            print(f"[Uncertainty] Copied {copied_count} plots from best model ({best_bus_model_name}) to {num_buses}bus folder")
+                            print(f"[Best Model] Copied {copied_count} images from best model ({best_bus_model_name}) to {num_buses}bus folder")
                 except Exception as e:
-                    print(f"  Warning: Could not copy best model's uncertainty graphs: {e}")
+                    print(f"  Warning: Could not copy best model's images: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()

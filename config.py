@@ -631,8 +631,15 @@ class Config:
                 "Set load_yaml=True and ensure config.yaml exists."
             )
         
-        # Set save_results flag (from argument, can be overridden by YAML)
-        self.SAVE_RESULTS = save_results
+        # Set save_results flag - YAML overrides function argument
+        if hasattr(Config, 'save_results'):
+            self.SAVE_RESULTS = Config.save_results
+        else:
+            self.SAVE_RESULTS = save_results
+        
+        # Set clear_results flag - YAML overrides function argument
+        if hasattr(Config, 'clear_results'):
+            clear_results = Config.clear_results
         
         # Clear experimental results folder if requested
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
@@ -777,6 +784,17 @@ class Config:
     def get_model_checkpoint_path(self, num_buses: int, model_name: str) -> str:
         """Returns the checkpoint path for a specific model."""
         return os.path.join(self.get_model_eval_dir(num_buses, model_name), "checkpoint.pth")
+    
+    def get_checkpoint_path(self, filename: str) -> str:
+        """Returns the checkpoint path for a filename (used by trainer)."""
+        # This is called during training, so we need to get num_buses and model_name from context
+        # For now, save to a temporary location - the trainer will handle the actual path
+        # The trainer should use get_model_checkpoint_path instead
+        if not hasattr(self, '_checkpoint_dir'):
+            # Create a temporary checkpoint directory
+            self._checkpoint_dir = os.path.join(self.CURRENT_RUN_DIR, 'checkpoints')
+        os.makedirs(self._checkpoint_dir, exist_ok=True)
+        return os.path.join(self._checkpoint_dir, filename)
 
     def get_moopf_results_path(self, num_buses: int, model_name: str) -> str:
         """Returns the MOOPF results path for a specific model."""
