@@ -866,6 +866,17 @@ def main():
                         model_to_eval, test_loader_best, device, best_config, _normalizer, is_sequential
                     )
                     
+                    # Inject uncertainty into renewable_impact_data for comparative plots
+                    if is_physics_informed and renewable_impact_data is not None and not renewable_impact_data.empty:
+                        if 'uncertainties' in uncertainty_data and uncertainty_data['uncertainties'] is not None:
+                            # Calculate mean uncertainty per sample (scalar)
+                            # uncertainties is [n_samples, n_buses, 10]
+                            unc_mean = np.mean(uncertainty_data['uncertainties'], axis=(1, 2))
+                            if len(unc_mean) == len(renewable_impact_data):
+                                renewable_impact_data['uncertainty'] = unc_mean
+                            else:
+                                print(f"  Warning: Uncertainty length {len(unc_mean)} != Impact length {len(renewable_impact_data)}")
+                    
                     # Build list of all plotting tasks
                     plot_tasks = []
                     

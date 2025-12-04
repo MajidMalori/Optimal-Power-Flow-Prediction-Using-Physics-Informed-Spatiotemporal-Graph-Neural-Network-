@@ -40,7 +40,7 @@ training:
   batch_size: 64
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 20
+  num_epochs: 2
   early_stopping_patience: 5  # Reduced from 10 to catch overfitting earlier
   use_learning_rate_scheduler: true
   cosine_annealing_lr:
@@ -93,7 +93,7 @@ experimental:
   # - non_physics_only: [GCN, adaptiveGCN]
   # - sequential_only: All LSTM/GRU models
   # - all: ALL 7 MODELS
-  test_config: "all"
+  test_config: "core"
   
   # Option 2: Override with specific models (precise control)
   # Examples:
@@ -102,7 +102,7 @@ experimental:
   # models_to_train: "all"  # Use test_config above (default behavior)
   models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
   
-  bus_systems: [33, 57, 118]
+  bus_systems: [33]
   data_mode: "test"
   train_timesteps: 2400  # 30 days
   test_timesteps: 240  # 3 days

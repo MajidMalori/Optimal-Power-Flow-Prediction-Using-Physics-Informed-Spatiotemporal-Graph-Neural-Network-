@@ -419,7 +419,7 @@ def create_comparative_renewable_plots(renewable_data: dict, config: Any, num_bu
         
         # Define metrics to plot
         metrics = [
-            ('carbon_proxy', 'Carbon Emissions (MW)', axes[0, 0]),
+            ('carbon_emissions', 'Carbon Emissions (MW)', axes[0, 0]),
             ('voltage_deviation', 'Voltage Deviation (p.u.)', axes[0, 1]),
             ('power_loss', 'Power Loss (p.u.)', axes[1, 0]),
             ('uncertainty', 'Prediction Uncertainty', axes[1, 1])
