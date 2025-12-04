@@ -3,7 +3,7 @@
 ## 1. Overview
 This repository implements a **Physics-Informed Machine Learning (PIML)** framework for dynamic state estimation and multi-objective optimization in power distribution networks. The system integrates graph neural networks (GNNs) and recurrent neural networks (RNNs) with physical power flow constraints to reconstruct the full system state (voltages, angles, power flows) from sparse, noisy measurements.
 
-The framework is designed to handle high penetrations of renewable energy resources (DERs) and provides uncertainty quantification via Monte Carlo Dropout. It employs a **Multi-Objective Optimal Power Flow (MOOPF)** objective to simultaneously optimize for data accuracy, physical consistency, and operational safety.
+The framework is designed to handle high penetrations of renewable energy resources (DERs) and provides uncertainty quantification via Monte Carlo Dropout. It employs a **Multi-Objective Optimal Power Flow (MOOPF)** objective to simultaneously optimize for data accuracy, physical consistency, and operational safety. **Hyperparameter optimization is performed using a novel Perturbation-Driven Seagull Optimization Algorithm (MoSOA)**, specifically designed for deep learning applications and **accepted for publication in IOSR Journals**.
 
 ## 2. Data Generation Methodology
 The data generation pipeline (`data/main.py`) creates realistic, time-series power system datasets using the `pandapower` library. It simulates dynamic load profiles and weather-dependent renewable generation (solar and wind).
@@ -50,9 +50,9 @@ $$P_{wind}(t) = P_{rated} \times \text{clip}(v_{base}(weather) \times f_{thermal
 ### 2.4. Feature Space
 The model inputs and outputs are defined as follows for each bus $i$:
 
-$$\mathbf{x}_i = [P_{load}, Q_{load}, P_{ext}, Q_{ext}, P_{conv}, Q_{conv}, P_{ren}, Q_{ren}, |V|_{meas}, \theta_{meas}]$$
+$$\mathbf{x}_i = [P_{\text{load}}, Q_{\text{load}}, P_{\text{ext}}, Q_{\text{ext}}, P_{\text{conv}}, Q_{\text{conv}}, P_{\text{ren}}, Q_{\text{ren}}, |V|_{\text{meas}}, \theta_{\text{meas}}]$$
 
-Where $|V|_{meas}$ and $\theta_{meas}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
+Where $|V|_{\text{meas}}$ and $\theta_{\text{meas}}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
 
 ## 3. Model Architectures
 The repository implements several state-of-the-art architectures, all inheriting from a common base class.
@@ -104,11 +104,11 @@ $$\mathcal{L}_{data} = ||\hat{y} - y||^2$$
 
 2.  **Physics Loss ($\mathcal{L}_{phys}$)**: Power balance violation (Kirchhoff's Laws).
 
-$$\mathcal{L}_{phys} = ||P_{net} - \text{Re}(V \cdot (Y_{bus}V)^*)||^2 + ||Q_{net} - \text{Im}(V \cdot (Y_{bus}V)^*)||^2$$
+$$\mathcal{L}_{\text{phys}} = \|P_{\text{net}} - \text{Re}(V \cdot (Y_{\text{bus}}V)^{\ast})\|^2 + \|Q_{\text{net}} - \text{Im}(V \cdot (Y_{\text{bus}}V)^{\ast})\|^2$$
 
 3.  **Safety Loss ($\mathcal{L}_{safe}$)**: Soft penalty for voltage limit violations.
 
-$$\mathcal{L}_{safe} = \text{ReLU}(|V| - V_{max})^2 + \text{ReLU}(V_{min} - |V|)^2$$
+$$\mathcal{L}_{\text{safe}} = \text{ReLU}(|V| - V_{\text{max}})^2 + \text{ReLU}(V_{\text{min}} - |V|)^2$$
 
 4.  **Constraint Loss ($\mathcal{L}_{const}$)**: Penalties for non-physical negative values (e.g., negative generation).
 
