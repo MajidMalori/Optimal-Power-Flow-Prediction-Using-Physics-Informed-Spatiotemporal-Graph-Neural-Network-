@@ -52,7 +52,7 @@ The model inputs and outputs are defined as follows for each bus $i$:
 
 $$\mathbf{x}_i = [P_{\text{load}}, Q_{\text{load}}, P_{\text{ext}}, Q_{\text{ext}}, P_{\text{conv}}, Q_{\text{conv}}, P_{\text{ren}}, Q_{\text{ren}}, |V|_{\text{meas}}, \theta_{\text{meas}}]$$
 
-Where $|V|_{meas}$ and $	heta_{meas}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
+Where $|V|_{meas}$ and $\theta_{meas}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
 
 ## 3. Model Architectures
 The repository implements several state-of-the-art architectures, all inheriting from a common base class.
