@@ -194,10 +194,25 @@ Uncertainty is quantified using **Monte Carlo (MC) Dropout**. During inference, 
 *   **Uncertainty**: Standard deviation of the forward passes: $\sigma = \sqrt{\frac{1}{N}\sum (\hat{y}_i - \mu)^2}$
 
 ### 5.2. MOOPF Metrics
-We evaluate the models based on three conflicting objectives (`utils/metrics.py`):
-1.  **Carbon Intensity**: Ratio of fossil-fuel generation to total generation.
-2.  **Power Loss**: Transmission losses as a percentage of total load.
-3.  **Voltage Stability**: Mean absolute deviation from nominal voltage (1.0 p.u.).
+We evaluate the models based on three conflicting objectives from the Multi-Objective Optimal Power Flow (MOOPF) framework (`utils/metrics.py`):
+
+1. **Carbon Emission Intensity** - Environmental objective measuring fossil fuel dependency:
+
+$$C_{emission} = \frac{\sum_{i \in generators} P_{fossil,i}}{\sum_{i \in generators} P_{total,i}} \times 100\%$$
+
+Lower values indicate higher renewable penetration and reduced environmental impact.
+
+2. **Power Loss** - Economic objective quantifying transmission inefficiency:
+
+$$P_{loss} = \frac{P_{generated} - P_{consumed}}{P_{consumed}} \times 100\%$$
+
+Lower percentage indicates more efficient power delivery and reduced operational costs.
+
+3. **Voltage Deviation** - Operational objective measuring grid stability and power quality:
+
+$$V_{deviation} = \frac{1}{N_{buses}} \sum_{i=1}^{N_{buses}} ||V_i| - 1.0|  \quad \text{(p.u.)}$$
+
+Lower deviation indicates better voltage regulation within acceptable limits (typically ±5% of nominal).
 
 ## 6. Visualization
 The framework generates comprehensive plots (`utils/visualization.py`, `utils/evaluation_plots.py`):
