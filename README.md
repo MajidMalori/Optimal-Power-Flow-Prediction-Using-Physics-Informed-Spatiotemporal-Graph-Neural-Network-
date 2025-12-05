@@ -30,6 +30,7 @@ The system uses sophisticated stochastic models to generate realistic load and g
     *   **Solar**: Modeled as a function of solar angle $\alpha(t)$ and cloud cover factor $C_{weather}$:
         
 $$P_{solar}(t) = P_{rated} \times \max(0, \cos(\alpha(t))) \times C_{weather} \times S_{season}$$
+
     *   **Wind**: Modeled with weather-dependent base speeds and thermal diurnal effects:
         
 $$P_{wind}(t) = P_{rated} \times \mathrm{clip}(v_{base}(weather) \times f_{thermal}(t) \times \mathcal{U}(0.85, 1.15))$$
