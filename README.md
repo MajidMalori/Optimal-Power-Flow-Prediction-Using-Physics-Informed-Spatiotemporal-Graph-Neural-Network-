@@ -30,10 +30,9 @@ The system uses sophisticated stochastic models to generate realistic load and g
     *   **Solar**: Modeled as a function of solar angle $\alpha(t)$ and cloud cover factor $C_{weather}$:
         
 $$P_{solar}(t) = P_{rated} \times \max(0, \cos(\alpha(t))) \times C_{weather} \times S_{season}$$
-
     *   **Wind**: Modeled with weather-dependent base speeds and thermal diurnal effects:
         
-$$P_{wind}(t) = P_{rated} \times \text{clip}(v_{base}(weather) \times f_{thermal}(t) \times \mathcal{U}(0.85, 1.15))$$
+$$P_{wind}(t) = P_{rated} \times \mathrm{clip}(v_{base}(weather) \times f_{thermal}(t) \times \mathcal{U}(0.85, 1.15))$$
 
 *   **Reactive Power Control** (`data/profiles.py`):
     *   Implements **IEEE 1547 Volt-Var Control**. Inverters adjust reactive power $Q$ based on local voltage $V$:
@@ -50,9 +49,9 @@ $$P_{wind}(t) = P_{rated} \times \text{clip}(v_{base}(weather) \times f_{thermal
 ### 2.4. Feature Space
 The model inputs and outputs are defined as follows for each bus $i$:
 
-$$\mathbf{x}_i = [P_{\text{load}}, Q_{\text{load}}, P_{\text{ext}}, Q_{\text{ext}}, P_{\text{conv}}, Q_{\text{conv}}, P_{\text{ren}}, Q_{\text{ren}}, |V|_{\text{meas}}, \theta_{\text{meas}}]$$
+$$\mathbf{x}_i = [P_{\mathrm{load}}, Q_{\mathrm{load}}, P_{\mathrm{ext}}, Q_{\mathrm{ext}}, P_{\mathrm{conv}}, Q_{\mathrm{conv}}, P_{\mathrm{ren}}, Q_{\mathrm{ren}}, |V|_{\mathrm{meas}}, \theta_{\mathrm{meas}}]$$
 
-Where $|V|_{meas}$ and $\theta_{meas}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
+Where $|V|_{\mathrm{meas}}$ and $\theta_{\mathrm{meas}}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
 
 ## 3. Model Architectures
 The repository implements several state-of-the-art architectures, all inheriting from a common base class.
