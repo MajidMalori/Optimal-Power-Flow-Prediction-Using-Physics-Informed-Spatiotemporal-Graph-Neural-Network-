@@ -374,14 +374,24 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     
     return False, f"Data files exist but no metadata found (timestamp: {timestamp}). Regeneration recommended to add metadata."
 
-def monitor_data_generation_progress_per_system(config, stop_event):
+def monitor_data_generation_progress_per_system(config, stop_event, bus_systems=None):
     """
     Monitor data generation progress by checking file creation.
-    Shows one unified tqdm progress bar for all bus systems.
+    Shows one unified tqdm progress bar for the specified bus systems.
+    
+    Args:
+        config: Configuration object
+        stop_event: Threading event to signal when to stop monitoring
+        bus_systems: Optional list of bus systems being generated. If None, uses all from config.
     
     Waits for filesystem synchronization before starting to ensure accurate tracking.
     """
-    bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    # Use provided bus_systems or fall back to all from config
+    if bus_systems is None:
+        bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    elif not isinstance(bus_systems, list):
+        bus_systems = [bus_systems]
+    
     renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     data_dir = config.DATA_DIR  # Use mode-specific directory
     
@@ -389,7 +399,7 @@ def monitor_data_generation_progress_per_system(config, stop_event):
     files_per_scenario = 9
     scenarios_per_bus = len(renewable_fractions)
     files_per_bus = scenarios_per_bus * files_per_scenario  # 54 files per bus system
-    total_expected_files = files_per_bus * len(bus_systems)  # 162 total files
+    total_expected_files = files_per_bus * len(bus_systems)  # Calculate based on actual bus systems being generated
     
     # Find the current timestamp being generated
     def get_current_timestamp():
@@ -834,10 +844,11 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
             print(f"{'─'*80}")
             
             # Start monitoring progress in background thread
+            # Pass the specific bus system being generated for accurate progress tracking
             stop_event = threading.Event()
             monitor_thread = threading.Thread(
                 target=monitor_data_generation_progress_per_system,
-                args=(config, stop_event),
+                args=(config, stop_event, [bus_system]),  # Pass single bus system for accurate progress
                 daemon=True
             )
             monitor_thread.start()

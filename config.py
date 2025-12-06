@@ -481,8 +481,8 @@ class Config:
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 5,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 10,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 5,      # Optimized for quick testing
+                    'max_iterations': 10,    # Optimized for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }

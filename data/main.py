@@ -1190,11 +1190,13 @@ if __name__ == "__main__":
         if existing_metadata and isinstance(existing_metadata, dict):
             # If existing metadata has 'runs' list, append to it
             if 'runs' not in existing_metadata:
+                # Convert single metadata dict to runs list format
                 existing_metadata = {'runs': [existing_metadata]}
-            if 'runs' not in metadata_entry:
-                existing_metadata['runs'].append(metadata_entry)
-            else:
-                existing_metadata['runs'].extend(metadata_entry['runs'])
+            
+            # metadata_entry is always a single dict (never has 'runs' key)
+            # Append it to the runs list
+            existing_metadata['runs'].append(metadata_entry)
+            
             # Also keep a summary
             all_cases = set(existing_metadata.get('test_cases', []))
             all_cases.update(cases_to_run)
