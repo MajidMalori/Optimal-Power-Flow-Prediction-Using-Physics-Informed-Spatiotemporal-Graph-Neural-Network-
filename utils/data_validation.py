@@ -13,7 +13,8 @@ import re
 import json
 import shutil
 import numpy as np
-from typing import List, Tuple
+import hashlib
+from typing import List, Tuple, Dict, Set
 from tqdm import tqdm
 
 def find_latest_timestamp(data_dir: str) -> str:
@@ -539,6 +540,186 @@ def clean_existing_data(config, aggressive=True):
     else:
         print("No existing data files found to clean.\n")
 
+def compute_config_hash(config) -> str:
+    """
+    Compute a hash of key configuration parameters that affect data generation.
+    This allows detecting when data needs regeneration due to config changes.
+    
+    Args:
+        config: Configuration object
+        
+    Returns:
+        Hex string hash of configuration
+    """
+    key_params = {
+        'data_mode': config.DATA_MODE,
+        'timesteps': config.DATA_MODE_TIMESTEPS[config.DATA_MODE],
+        'hours_per_day': getattr(config, 'HOURS_PER_DAY', 24),
+        'contingency_rate': getattr(config, 'CONTINGENCY_RATE', 0.05),
+        'pmu_coverage': getattr(config, 'PMU_COVERAGE', 0.3),
+    }
+    
+    # Create a deterministic string representation
+    param_str = json.dumps(key_params, sort_keys=True)
+    return hashlib.md5(param_str.encode()).hexdigest()
+
+def validate_bus_system_data(config, bus_system: int) -> Tuple[bool, str, Dict]:
+    """
+    Validate data for a specific bus system individually.
+    Returns detailed validation results.
+    
+    Args:
+        config: Configuration object
+        bus_system: Bus system number (e.g., 33, 57, 118)
+        
+    Returns:
+        Tuple of (is_valid: bool, reason: str, details: dict)
+    """
+    case_name = f"case{bus_system}"
+    data_dir = config.DATA_DIR
+    expected_timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
+    
+    details = {
+        'bus_system': bus_system,
+        'case_name': case_name,
+        'files_exist': False,
+        'timesteps_match': False,
+        'mode_match': False,
+        'config_hash_match': False,
+        'actual_timesteps': None,
+        'stored_mode': None,
+        'stored_config_hash': None,
+    }
+    
+    # Check if files exist
+    bus_systems_list = [bus_system]
+    files_exist, missing_files = check_data_files_exist(config, bus_systems_list)
+    details['files_exist'] = files_exist
+    details['missing_files'] = missing_files
+    
+    if not files_exist:
+        return False, f"Missing {len(missing_files)} files for {case_name}", details
+    
+    # Check metadata for configuration consistency
+    metadata_file = os.path.join(data_dir, "data_generation_metadata.json")
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            # Check if metadata has 'runs' array (from parallel execution)
+            if 'runs' in metadata and isinstance(metadata['runs'], list):
+                # Find the run that includes this bus system
+                relevant_run = None
+                for run in metadata['runs']:
+                    if case_name in run.get('test_cases', []):
+                        relevant_run = run
+                        break
+                
+                if relevant_run:
+                    stored_timesteps = relevant_run.get('timesteps', 0)
+                    stored_mode = relevant_run.get('data_mode', 'unknown')
+                    stored_config_hash = relevant_run.get('config_hash', None)
+                else:
+                    # Fallback to first run if this bus system not found
+                    relevant_run = metadata['runs'][0] if metadata['runs'] else {}
+                    stored_timesteps = relevant_run.get('timesteps', 0)
+                    stored_mode = relevant_run.get('data_mode', 'unknown')
+                    stored_config_hash = relevant_run.get('config_hash', None)
+            else:
+                # Single run format
+                stored_timesteps = metadata.get('timesteps', 0)
+                stored_mode = metadata.get('data_mode', 'unknown')
+                stored_config_hash = metadata.get('config_hash', None)
+            
+            details['actual_timesteps'] = stored_timesteps
+            details['stored_mode'] = stored_mode
+            details['stored_config_hash'] = stored_config_hash
+            
+            # Check mode match
+            if stored_mode != config.DATA_MODE:
+                details['mode_match'] = False
+                return False, f"{case_name}: Mode mismatch (stored={stored_mode}, required={config.DATA_MODE})", details
+            details['mode_match'] = True
+            
+            # Check timesteps match
+            if stored_timesteps != expected_timesteps:
+                details['timesteps_match'] = False
+                return False, f"{case_name}: Timesteps mismatch (stored={stored_timesteps}, required={expected_timesteps})", details
+            details['timesteps_match'] = True
+            
+            # Check config hash if available
+            current_config_hash = compute_config_hash(config)
+            if stored_config_hash:
+                if stored_config_hash != current_config_hash:
+                    details['config_hash_match'] = False
+                    return False, f"{case_name}: Configuration changed (config hash mismatch)", details
+                details['config_hash_match'] = True
+            else:
+                # If no hash stored, we can't verify - but timesteps match is good enough
+                details['config_hash_match'] = None
+            
+        except Exception as e:
+            return False, f"{case_name}: Error reading metadata: {e}", details
+    else:
+        # No metadata - check file directly
+        pattern = os.path.join(data_dir, f"{case_name}_features_frac*.npy")
+        feature_files = glob.glob(pattern)
+        if feature_files:
+            try:
+                features = np.load(feature_files[0])
+                actual_timesteps = features.shape[0]
+                details['actual_timesteps'] = actual_timesteps
+                
+                if actual_timesteps != expected_timesteps:
+                    details['timesteps_match'] = False
+                    return False, f"{case_name}: Timesteps mismatch (file={actual_timesteps}, required={expected_timesteps})", details
+                details['timesteps_match'] = True
+            except Exception as e:
+                return False, f"{case_name}: Error reading data file: {e}", details
+        else:
+            return False, f"{case_name}: No data files found", details
+    
+    return True, f"{case_name}: Valid", details
+
+def clean_bus_system_data(config, bus_system: int) -> int:
+    """
+    Clean data files for a specific bus system only.
+    
+    Args:
+        config: Configuration object
+        bus_system: Bus system number to clean
+        
+    Returns:
+        Number of files removed
+    """
+    case_name = f"case{bus_system}"
+    data_dir = config.DATA_DIR
+    files_removed = 0
+    
+    if not os.path.exists(data_dir):
+        return 0
+    
+    # Find all files matching this bus system
+    patterns = [
+        f"{case_name}_*_frac*.npy",
+        f"{case_name}_*_frac*.txt",
+        f"{case_name}_*_frac*.json",
+    ]
+    
+    for pattern in patterns:
+        file_pattern = os.path.join(data_dir, pattern)
+        files_to_remove = glob.glob(file_pattern)
+        
+        for filepath in files_to_remove:
+            try:
+                os.remove(filepath)
+                files_removed += 1
+            except OSError as e:
+                print(f"Warning: Could not remove {filepath}: {e}")
+    
+    return files_removed
+
 def generate_data_if_missing(config, bus_systems=None) -> bool:
     """
     ROBUST data validation and generation system.
@@ -556,74 +737,85 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
     Returns:
         bool: True if data generation was successful, False otherwise
     """
-    print(f"\n{'='*80}\nROBUST DATA VALIDATION - {config.DATA_MODE.upper()} MODE | Timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]} | Dir: {config.DATA_DIR}\n{'='*80}")
-    if bus_systems is not None:
-        bus_list_str = ", ".join([f"case{b}" for b in (bus_systems if isinstance(bus_systems, list) else [bus_systems])])
-        print(f"Validating specific bus systems: {bus_list_str}")
+    print(f"\n{'='*80}\nINTELLIGENT DATA VALIDATION - {config.DATA_MODE.upper()} MODE | Timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]} | Dir: {config.DATA_DIR}\n{'='*80}")
     
-    # STEP 1: Check if files exist (for specified bus systems only)
-    data_exist, missing_files = check_data_files_exist(config, bus_systems)
-    
-    # STEP 2: Check data consistency (even if files exist)
-    needs_regeneration = False
-    regeneration_reason = []
-    
-    if not data_exist:
-        needs_regeneration = True
-        regeneration_reason.append(f"Missing {len(missing_files)} data files")
-        examples = ", ".join(missing_files[:3])
-        more = f", ...{len(missing_files) - 3} more" if len(missing_files) > 3 else ""
-        print(f"Validation failed: {len(missing_files)} files missing ({examples}{more})")
+    # Determine which bus systems to validate
+    if bus_systems is None:
+        bus_systems_to_validate = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
+    elif isinstance(bus_systems, list):
+        bus_systems_to_validate = bus_systems
     else:
-        print("All files present")
-        
-        # Even if files exist, validate consistency
-        is_consistent, consistency_reason = check_data_consistency(config)
-        
-        if not is_consistent:
-            needs_regeneration = True
-            regeneration_reason.append(consistency_reason)
-            print(f"Validation failed: {consistency_reason}")
-        else:
-            print(f"Data consistent: {consistency_reason}")
+        bus_systems_to_validate = [bus_systems]
     
-    # STEP 3: If data is valid, skip generation
-    if not needs_regeneration:
-        print(f"\n{'='*80}\nData validation passed - Using existing data\n{'='*80}")
+    bus_list_str = ", ".join([f"case{b}" for b in bus_systems_to_validate])
+    print(f"Validating bus systems: {bus_list_str}")
+    
+    # STEP 1: Per-bus-system validation (PROFESSIONAL APPROACH)
+    validation_results = {}
+    systems_need_regeneration = []
+    systems_valid = []
+    
+    print(f"\n{'─'*80}")
+    print("Per-Bus-System Validation:")
+    print(f"{'─'*80}")
+    
+    for bus_system in bus_systems_to_validate:
+        is_valid, reason, details = validate_bus_system_data(config, bus_system)
+        validation_results[bus_system] = {'valid': is_valid, 'reason': reason, 'details': details}
+        
+        if is_valid:
+            systems_valid.append(bus_system)
+            print(f"  ✓ {reason}")
+        else:
+            systems_need_regeneration.append(bus_system)
+            print(f"  ✗ {reason}")
+    
+    # STEP 2: Summary and decision
+    print(f"\n{'─'*80}")
+    print("Validation Summary:")
+    print(f"{'─'*80}")
+    print(f"  Valid systems: {len(systems_valid)}/{len(bus_systems_to_validate)}")
+    if systems_valid:
+        print(f"    → {', '.join([f'case{b}' for b in systems_valid])}")
+    print(f"  Systems needing regeneration: {len(systems_need_regeneration)}/{len(bus_systems_to_validate)}")
+    if systems_need_regeneration:
+        print(f"    → {', '.join([f'case{b}' for b in systems_need_regeneration])}")
+        for bus_system in systems_need_regeneration:
+            reason = validation_results[bus_system]['reason']
+            print(f"      • case{bus_system}: {reason}")
+    
+    # STEP 3: If all systems are valid, skip generation
+    if not systems_need_regeneration:
+        print(f"\n{'='*80}\n✓ All data validation passed - Using existing data\n{'='*80}")
         return True
     
-    # STEP 4: Data needs regeneration - perform AGGRESSIVE cleanup
-    reasons_str = " | ".join(regeneration_reason)
-    print(f"\n{'='*80}\nDATA REGENERATION REQUIRED: {reasons_str}\n{'='*80}")
+    # STEP 4: Selective regeneration (only for systems that need it)
+    print(f"\n{'='*80}\nSELECTIVE DATA REGENERATION REQUIRED\n{'='*80}")
+    print(f"\nRegenerating only invalid systems: {', '.join([f'case{b}' for b in systems_need_regeneration])}")
+    print(f"Preserving valid systems: {', '.join([f'case{b}' for b in systems_valid]) if systems_valid else 'None'}")
     
-    # AGGRESSIVE CLEANUP: Remove ALL data in the mode-specific folder
-    print("\nPerforming aggressive cleanup to ensure data integrity...")
-    clean_existing_data(config, aggressive=True)
+    # Selective cleanup: Only remove files for systems that need regeneration
+    print(f"\n{'─'*80}")
+    print("Selective Cleanup (preserving valid data):")
+    print(f"{'─'*80}")
     
-    # Verify cleanup was successful and synchronize filesystem
-    data_dir = config.DATA_DIR
-    remaining_patterns = ["*.npy", "*.txt", "*.json"]
-    remaining_files = []
-    for pattern in remaining_patterns:
-        remaining_files.extend(glob.glob(os.path.join(data_dir, pattern)))
+    total_files_removed = 0
+    for bus_system in systems_need_regeneration:
+        files_removed = clean_bus_system_data(config, bus_system)
+        total_files_removed += files_removed
+        print(f"  Cleaned case{bus_system}: {files_removed} files removed")
     
-    if remaining_files:
-        print(f"\nWarning: {len(remaining_files)} files still remain after cleanup:")
-        for f in remaining_files[:5]:
-            print(f"   - {os.path.basename(f)}")
-        print("   Waiting for filesystem sync...")
-        time.sleep(2)
+    if total_files_removed > 0:
+        print(f"\nTotal files removed: {total_files_removed}")
     else:
-        print("Cleanup verified: All old data removed")
+        print("\nNo files to remove (already clean)")
     
-    # This ensures file deletion is complete and filesystem is ready
-    print("   Synchronizing filesystem (2 seconds)...")
-    time.sleep(2)
-    print("Filesystem synchronized\n")
+    # Small delay for filesystem sync
+    time.sleep(0.5)
     
-    # STEP 5: Generate fresh data with tqdm progress bar
-    print(f"{'='*80}")
-    print("GENERATING FRESH DATA")
+    # STEP 5: Generate data only for systems that need it
+    print(f"\n{'='*80}")
+    print("GENERATING DATA FOR INVALID SYSTEMS")
     print(f"{'='*80}")
     
     try:
@@ -633,79 +825,73 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
             print(f"Error: Data generation script not found: {data_gen_script}")
             return False
         
-        # Run data generation with tqdm progress monitoring
         timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
-        print(f"Mode: {config.DATA_MODE} | Timesteps: {timesteps} | Starting data generation...\n")
         
-        # Start monitoring progress in background thread (with tqdm)
-        stop_event = threading.Event()
-        monitor_thread = threading.Thread(
-            target=monitor_data_generation_progress_per_system,
-            args=(config, stop_event),
-            daemon=True
-        )
-        monitor_thread.start()
+        # Generate data for each system that needs regeneration
+        for bus_system in systems_need_regeneration:
+            print(f"\n{'─'*80}")
+            print(f"Generating data for case{bus_system}...")
+            print(f"{'─'*80}")
+            
+            # Start monitoring progress in background thread
+            stop_event = threading.Event()
+            monitor_thread = threading.Thread(
+                target=monitor_data_generation_progress_per_system,
+                args=(config, stop_event),
+                daemon=True
+            )
+            monitor_thread.start()
+            
+            time.sleep(0.5)
+            
+            # Run data generation for this specific bus system
+            buses_arg = str(bus_system)
+            result = subprocess.run(
+                [sys.executable, data_gen_script, 
+                 "--mode", config.DATA_MODE, 
+                 "--time_steps", str(timesteps),
+                 "--buses", buses_arg,
+                 "--no_progress_bar"],
+                cwd=".",
+                capture_output=True,
+                text=True
+            )
+            
+            # Stop monitoring thread
+            stop_event.set()
+            monitor_thread.join(timeout=5)
+            
+            if result.returncode != 0:
+                print(f"\n✗ Error: Data generation failed for case{bus_system} (exit code {result.returncode})")
+                if result.stderr:
+                    print(f"Error details: {result.stderr[:500]}")
+                return False
+            else:
+                print(f"✓ Successfully generated data for case{bus_system}")
         
-        # Small delay to ensure progress bar is initialized
-        time.sleep(0.5)
-        
-        # Run data generation script (capture output to avoid interfering with tqdm)
-        # Pass --no_progress_bar to prevent nested progress bars
-        result = subprocess.run(
-            [sys.executable, data_gen_script, "--mode", config.DATA_MODE, "--time_steps", str(timesteps), "--no_progress_bar"],
-            cwd=".",
-            capture_output=True,  # Capture to avoid interfering with tqdm progress bar
-            text=True
-        )
-        
-        # Stop monitoring thread
-        stop_event.set()
-        monitor_thread.join(timeout=5)  # Wait for thread to finish
-        
-        # Print captured output after progress bar is done
-        if result.stdout:
-            # Only print non-progress lines to avoid clutter
-            output_lines = result.stdout.split('\n')
-            important_lines = [line for line in output_lines if line.strip() and 
-                             'Progress:' not in line and 'timesteps' not in line.lower()]
-            if important_lines:
-                print("\nData generation output:")
-                for line in important_lines[:10]:  # Show first 10 important lines
-                    print(f"  {line}")
-        
-        if result.stderr:
-            print("\nWarnings/Errors:")
-            print(result.stderr)
-        
-        if result.returncode != 0:
-            print(f"\nError: Data generation failed (exit code {result.returncode})")
-            return False
-        
-        # STEP 6: Verify generation was successful (check only specified bus systems)
+        # STEP 6: Verify all systems are now valid
         print(f"\n{'='*80}")
         print("VERIFYING GENERATED DATA")
         print(f"{'='*80}")
         
-        data_exist_after, remaining_missing = check_data_files_exist(config, bus_systems)
-        
-        if data_exist_after:
-            print("All required files successfully generated")
-            
-            # Double-check consistency
-            is_consistent_after, reason_after = check_data_consistency(config)
-            if is_consistent_after:
-                print(f"Generated data is consistent: {reason_after}")
-                print(f"\n{'='*80}")
-                print("Data generation successful")
-                print(f"{'='*80}\n")
-                return True
+        all_valid = True
+        for bus_system in bus_systems_to_validate:
+            is_valid, reason, details = validate_bus_system_data(config, bus_system)
+            if is_valid:
+                print(f"  ✓ {reason}")
             else:
-                print(f"Generated data has consistency issues: {reason_after}")
-                return False
+                print(f"  ✗ {reason}")
+                all_valid = False
+        
+        if all_valid:
+            print(f"\n{'='*80}")
+            print("✓ All data validation passed - Ready for training")
+            print(f"{'='*80}\n")
+            return True
         else:
-            examples = ", ".join(remaining_missing[:3])
-            more = f", ...{len(remaining_missing) - 3} more" if len(remaining_missing) > 3 else ""
-            print(f"Generation incomplete: {len(remaining_missing)} files still missing ({examples}{more})")
+            print(f"\n{'='*80}")
+            print("✗ Some systems still have validation issues")
+            print(f"{'='*80}\n")
             return False
             
     except Exception as e:

@@ -65,10 +65,11 @@ from config import Config
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Physics-Informed Data Generation')
-    parser.add_argument('--time_steps', '--timesteps', type=int, default=None, help='Number of time steps to generate')
+    parser.add_argument('--time_steps', '--timesteps', type=int, default=None, help='Number of time steps to generate (default: 10008 for train mode, 240 for test mode)')
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated data')
     parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
-    parser.add_argument('--mode', type=str, default=None, choices=['train', 'test'], help='Data generation mode (train/test)')
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Data generation mode (default: train)')
+    parser.add_argument('--buses', type=str, default=None, help='Comma-separated bus system numbers to run (e.g., "33,57,118" or "33"). If not specified, runs all bus systems (33, 57, 118).')
     parser.add_argument('--no_progress_bar', action='store_true', help='Disable progress bar (useful when running from train.py)')
     return parser.parse_known_args()[0]
 
@@ -76,32 +77,35 @@ def parse_arguments():
 args = parse_arguments()
 
 # Initialize Config
-# Priority: CLI args > YAML > Default ('train')
+# Priority: CLI args > YAML > Default ('train' with 10008 timesteps)
 try:
     # First, load YAML to get experimental_data_mode if it exists
     yaml_path = args.config if args.config else 'config.yaml'
     yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(os.path.dirname(__file__), 'config.yaml')
     
-    # Determine data mode with correct priority
-    if args.mode is not None:
-        # CLI argument has highest priority
-        data_mode_to_use = args.mode
+    # Determine data mode: CLI arg (now defaults to 'train') > YAML > Default ('train')
+    data_mode_to_use = args.mode  # Now defaults to 'train' from argparse
+    
+    # Determine timesteps: CLI arg > Default (10008 for train, 240 for test)
+    if args.time_steps is not None:
+        # CLI argument provided - use it
+        train_timesteps = args.time_steps
+        test_timesteps = args.time_steps
     else:
-        # Try to load from YAML
-        try:
-            with open(yaml_full_path, 'r') as f:
-                yaml_config = yaml.safe_load(f)
-                data_mode_to_use = yaml_config.get('experimental', {}).get('data_mode', 'train')
-        except:
-            # If YAML loading fails, use default
-            data_mode_to_use = 'train'
+        # No CLI argument - use defaults based on mode
+        if data_mode_to_use == 'train':
+            train_timesteps = 10008  # Default for train mode
+            test_timesteps = None  # Will use YAML default if needed
+        else:  # test mode
+            train_timesteps = None  # Will use YAML default if needed
+            test_timesteps = 240  # Default for test mode
     
     config_instance = Config(
         yaml_config_path=args.config,
         load_yaml=True,
         data_mode=data_mode_to_use,
-        train_timesteps=args.time_steps, 
-        test_timesteps=args.time_steps,
+        train_timesteps=train_timesteps, 
+        test_timesteps=test_timesteps,
         save_results=True
     )
 except Exception as e:
@@ -1010,50 +1014,77 @@ if __name__ == "__main__":
 
     if cases_to_run is None:
         cases_to_run = CONFIG["test_cases"]
+    
+    # Filter cases based on --buses argument if provided
+    if args.buses is not None:
+        bus_numbers = [int(b.strip()) for b in args.buses.split(',')]
+        filtered_cases = []
+        for bus_num in bus_numbers:
+            case_name = f"case{bus_num}"
+            if case_name in cases_to_run:
+                filtered_cases.append(case_name)
+            else:
+                print(f"Warning: {case_name} not found in test_cases. Available: {cases_to_run}")
+        if filtered_cases:
+            cases_to_run = filtered_cases
+        else:
+            raise ValueError(f"No valid bus systems found. Requested: {bus_numbers}, Available: {cases_to_run}")
         
     # print(f"Cases to run: {cases_to_run}")
     
     if timesteps is None:
-        if data_mode == 'train':
-            timesteps = CONFIG["time_steps"]
-        else:
-            # Respect CLI argument if provided, otherwise default to config or 120
-            timesteps = CONFIG["time_steps"] if CONFIG["time_steps"] is not None else 120
+        # timesteps should already be set from CONFIG["time_steps"] which comes from config_instance
+        # This is just a safety fallback
+        timesteps = CONFIG["time_steps"]
+        if timesteps is None:
+            # Final fallback defaults
+            timesteps = 10008 if data_mode == 'train' else 240
             
-    # print(f"Generating {data_mode} data for {timesteps} timesteps...")
-    
     CONFIG['time_steps'] = timesteps
     
     generation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # print(f"\nStarting data generation [{data_mode.upper()} MODE - {timesteps} timesteps]")
-    # print(f"Timestamp: {generation_timestamp}")
     
-    # Auto-cleanup: Delete old data in the target directory before generating new data
+    # Print summary of what will be generated
+    print(f"\n{'='*80}")
+    print(f"DATA GENERATION CONFIGURATION")
+    print(f"{'='*80}")
+    print(f"Mode: {data_mode.upper()}")
+    print(f"Timesteps: {timesteps}")
+    print(f"Bus Systems: {', '.join(cases_to_run)}")
+    print(f"Output Directory: {CONFIG['output_dir']}")
+    print(f"Timestamp: {generation_timestamp}")
+    print(f"{'='*80}\n")
+    
+    # Auto-cleanup: Delete old data files for SPECIFIC bus systems only (safe for parallel execution)
     output_path = CONFIG['output_dir']
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Only clean files for the bus systems we're about to generate
+    # This allows parallel execution without conflicts
     if os.path.exists(output_path):
         try:
-            print(f"\n[Auto-Cleanup] Deleting old data in {output_path}...")
-            shutil.rmtree(output_path)
+            files_to_delete = []
+            for case in cases_to_run:
+                save_case_name = case.replace('bw', '')
+                # Find all files matching this case name pattern
+                for filename in os.listdir(output_path):
+                    if filename.startswith(save_case_name + '_'):
+                        files_to_delete.append(os.path.join(output_path, filename))
             
-            # Wait for directory to be fully deleted (Windows async deletion issue)
-            max_wait = 10  # seconds
-            wait_time = 0
-            while os.path.exists(output_path) and wait_time < max_wait:
-                time.sleep(0.1)
-                wait_time += 0.1
-            
-            if os.path.exists(output_path):
-                raise RuntimeError(f"Failed to delete directory after {max_wait}s: {output_path}")
-            
-            print(f"[Auto-Cleanup] Successfully cleaned {data_mode} data directory")
+            if files_to_delete:
+                print(f"\n[Auto-Cleanup] Deleting old data files for {cases_to_run} in {output_path}...")
+                for filepath in files_to_delete:
+                    try:
+                        if os.path.isfile(filepath):
+                            os.remove(filepath)
+                        elif os.path.isdir(filepath):
+                            shutil.rmtree(filepath)
+                    except Exception as e:
+                        print(f"Warning: Could not delete {filepath}: {e}")
+                print(f"[Auto-Cleanup] Cleaned {len(files_to_delete)} old files for {cases_to_run}")
         except Exception as e:
-            if "Failed to delete directory" in str(e):
-                raise  # Re-raise deletion timeout errors
-            # If deletion failed for any other reason, this is critical
-            raise RuntimeError(f"Auto-cleanup failed: Could not delete old data: {e}")
-    
-    # Recreate the directory (now guaranteed to be deleted)
-    os.makedirs(output_path, exist_ok=True)
+            print(f"Warning: Auto-cleanup encountered an issue (non-critical): {e}")
+            # Don't fail the entire process if cleanup fails - parallel processes might be writing
     
     for case in cases_to_run:
         try:
@@ -1120,7 +1151,15 @@ if __name__ == "__main__":
         os.makedirs(output_path, exist_ok=True)
         
         # Always time-series mode
-        metadata = {
+        # Create metadata entry for this specific run (supports parallel execution)
+        # Import config hash function for metadata
+        try:
+            from utils.data_validation import compute_config_hash
+            config_hash = compute_config_hash(config_instance)
+        except:
+            config_hash = None
+        
+        metadata_entry = {
             'generation_mode': 'time_series',
             'data_mode': data_mode,
             'timesteps': timesteps,
@@ -1128,15 +1167,78 @@ if __name__ == "__main__":
             'hours_per_day': CONFIG.get('hours_per_day', 24),
             'test_cases': cases_to_run,
             'renewable_fractions': CONFIG["renewable_fractions_to_run"],
-            'generation_date': datetime.now().isoformat()
+            'generation_date': datetime.now().isoformat(),
+            'config_hash': config_hash  # Store config hash for validation
         }
         
+        # Use atomic write for metadata to support parallel execution
+        # Write to a temporary file first, then rename (atomic on most filesystems)
         metadata_file = os.path.join(output_path, "data_generation_metadata.json")
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
+        temp_metadata_file = metadata_file + f".tmp_{os.getpid()}"
+        
+        # Try to load existing metadata if it exists (for merging)
+        existing_metadata = None
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r') as f:
+                    existing_metadata = json.load(f)
+            except Exception:
+                # If we can't read it, another process might be writing - that's okay
+                pass
+        
+        # Merge metadata if it exists (for parallel execution)
+        if existing_metadata and isinstance(existing_metadata, dict):
+            # If existing metadata has 'runs' list, append to it
+            if 'runs' not in existing_metadata:
+                existing_metadata = {'runs': [existing_metadata]}
+            if 'runs' not in metadata_entry:
+                existing_metadata['runs'].append(metadata_entry)
+            else:
+                existing_metadata['runs'].extend(metadata_entry['runs'])
+            # Also keep a summary
+            all_cases = set(existing_metadata.get('test_cases', []))
+            all_cases.update(cases_to_run)
+            existing_metadata['test_cases'] = sorted(list(all_cases))
+            existing_metadata['last_update'] = datetime.now().isoformat()
+            metadata_to_write = existing_metadata
+        else:
+            # First run or couldn't read existing - create new structure
+            metadata_to_write = {
+                'runs': [metadata_entry],
+                'test_cases': cases_to_run,
+                'data_mode': data_mode,
+                'last_update': datetime.now().isoformat()
+            }
+        
+        # Atomic write: write to temp file, then rename
+        with open(temp_metadata_file, 'w') as f:
+            json.dump(metadata_to_write, f, indent=2)
+        
+        # Retry logic for atomic rename (in case another process is also writing)
+        max_retries = 5
+        for retry in range(max_retries):
+            try:
+                if os.path.exists(metadata_file):
+                    # On Windows, we need to remove the old file first
+                    if os.name == 'nt':
+                        os.remove(metadata_file)
+                os.rename(temp_metadata_file, metadata_file)
+                break
+            except (OSError, PermissionError) as e:
+                if retry < max_retries - 1:
+                    time.sleep(0.1 * (retry + 1))  # Exponential backoff
+                else:
+                    # Last retry failed - try to clean up temp file
+                    try:
+                        if os.path.exists(temp_metadata_file):
+                            os.remove(temp_metadata_file)
+                    except:
+                        pass
+                    print(f"Warning: Could not atomically update metadata file (non-critical): {e}")
         
        # print(f"\n[Metadata] Saved generation metadata to: {metadata_file}")
     except Exception as e:
-        raise RuntimeError(f"Could not save metadata file: {e}")
+        # Don't fail the entire process if metadata write fails - it's not critical
+        print(f"Warning: Could not save metadata file (non-critical): {e}")
             
     print("\nAll data generation processes are complete.")
