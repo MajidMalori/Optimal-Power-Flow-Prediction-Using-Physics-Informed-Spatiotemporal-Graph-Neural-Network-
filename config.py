@@ -465,24 +465,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 10,     
-                    'max_iterations': 25,   
+                    'num_seagulls': 5,     
+                    'max_iterations': 10,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 8,      
-                    'max_iterations': 25,   
+                    'num_seagulls': 5,      
+                    'max_iterations': 10,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 4,      # Temporarily set to 4 for quick testing
-                    'max_iterations': 25,    # Temporarily set to 5 for quick testing
+                    'num_seagulls': 5,      # Temporarily set to 4 for quick testing
+                    'max_iterations': 10,    # Temporarily set to 5 for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
