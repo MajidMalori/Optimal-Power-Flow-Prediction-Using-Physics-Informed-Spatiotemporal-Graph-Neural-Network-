@@ -9,6 +9,7 @@ import sys
 import yaml
 import signal
 import gc
+import random
 
 # Global data cache for bus systems (used across multiple functions)
 _file_metadata = None
@@ -350,9 +351,32 @@ def main():
             "Run data generation first: python data/main.py"
         )
     
-    seed = getattr(Config, 'SEED', 42)
+    # Get seed from config (loaded from YAML) for reproducibility
+    seed = getattr(base_config, 'SEED', 42)
+    
+    # IMPORTANT: Set environment variables BEFORE any other operations for full reproducibility
+    # These must be set before PyTorch operations to ensure determinism
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # For CUDA deterministic operations
+    
+    # Set all random seeds for full reproducibility
+    print(f"\nSetting random seed: {seed} (for reproducibility)")
     torch.manual_seed(seed)
     np.random.seed(seed)
+    random.seed(seed)
+    
+    # Enable deterministic mode for PyTorch (slower but fully reproducible)
+    # Note: This may reduce performance but ensures exact reproducibility
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # Enable deterministic algorithms in PyTorch (if available)
+    # This ensures operations like matrix multiplication are deterministic
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except AttributeError:
+        # Older PyTorch versions (<1.8) don't have this function
+        pass
     
     # === DEVICE AND PARALLEL CONFIGURATION ===
     force_cpu = getattr(Config, 'force_cpu', False)
