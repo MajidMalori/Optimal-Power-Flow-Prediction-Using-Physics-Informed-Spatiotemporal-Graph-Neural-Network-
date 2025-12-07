@@ -1067,16 +1067,9 @@ if __name__ == "__main__":
     
     generation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Print summary of what will be generated
-    print(f"\n{'='*80}")
-    print(f"DATA GENERATION CONFIGURATION")
-    print(f"{'='*80}")
-    print(f"Mode: {data_mode.upper()}")
-    print(f"Timesteps: {timesteps}")
-    print(f"Bus Systems: {', '.join(cases_to_run)}")
-    print(f"Output Directory: {CONFIG['output_dir']}")
-    print(f"Timestamp: {generation_timestamp}")
-    print(f"{'='*80}\n")
+    # Print concise summary
+    bus_list = ', '.join([case.replace('case', '') for case in cases_to_run])
+    print(f"\n[Data Generation] {data_mode.upper()} mode | {timesteps} timesteps | Buses: {bus_list}")
     
     # Auto-cleanup: Delete old data files for SPECIFIC bus systems only (safe for parallel execution)
     output_path = CONFIG['output_dir']
@@ -1126,7 +1119,8 @@ if __name__ == "__main__":
                     files_to_delete.append(metadata_file)
             
             if files_to_delete:
-                print(f"\n[Auto-Cleanup] Deleting old data files for {cases_to_run} in {output_path}...")
+                case_list = ', '.join([case.replace('case', '') for case in cases_to_run])
+                print(f"[Cleanup] Removing {len(files_to_delete)} old files for buses: {case_list}")
                 for filepath in files_to_delete:
                     try:
                         if os.path.isfile(filepath):
@@ -1134,8 +1128,8 @@ if __name__ == "__main__":
                         elif os.path.isdir(filepath):
                             shutil.rmtree(filepath)
                     except Exception as e:
-                        print(f"Warning: Could not delete {filepath}: {e}")
-                print(f"[Auto-Cleanup] Cleaned {len(files_to_delete)} old files for {cases_to_run}")
+                        # Silent cleanup - errors are non-critical
+                        pass
         except Exception as e:
             print(f"Warning: Auto-cleanup encountered an issue (non-critical): {e}")
             # Don't fail the entire process if cleanup fails - parallel processes might be writing
@@ -1256,9 +1250,10 @@ if __name__ == "__main__":
             
             # Verify the file was actually written
             if os.path.exists(per_process_metadata_file) and os.path.getsize(per_process_metadata_file) > 0:
-                print(f"\n[Metadata] Successfully saved generation metadata to: {per_process_metadata_file}")
+                # Metadata saved successfully (no verbose message needed)
+                pass
             else:
-                print(f"ERROR: Metadata file was not created or is empty: {per_process_metadata_file}")
+                print(f"[Error] Metadata file was not created or is empty")
         except Exception as e:
             print(f"ERROR: Could not save per-process metadata file: {e}")
             traceback.print_exc()
@@ -1274,10 +1269,6 @@ if __name__ == "__main__":
     # Generate plots for the bus systems that were just generated
     # This respects the same bus systems and mode as data generation
     try:
-        print("\n" + "="*80)
-        print("GENERATING DATA VISUALIZATION PLOTS")
-        print("="*80)
-        
         # Import plotting function
         from data.plot_consolidator import generate_all_data_plots
         
@@ -1287,7 +1278,6 @@ if __name__ == "__main__":
         
         # Clean up old plots for the bus systems being regenerated
         if os.path.exists(plots_dir):
-            print(f"Cleaning up old plots for {cases_to_run} in {plots_dir}...")
             for case in cases_to_run:
                 save_case_name = case.replace('bw', '')
                 # Find and delete old plot files for this case
@@ -1318,8 +1308,8 @@ if __name__ == "__main__":
                     pass
         
         if bus_numbers:
-            print(f"Generating plots for bus systems: {bus_numbers}")
-            print(f"Plots directory: {plots_dir}\n")
+            bus_list_str = ', '.join(map(str, bus_numbers))
+            print(f"\n[Plots] Generating plots for buses: {bus_list_str}")
             
             # Generate plots with progress bar
             plot_paths = generate_all_data_plots(
@@ -1328,18 +1318,11 @@ if __name__ == "__main__":
                 data_plots_dir=plots_dir
             )
             
-            # Print summary
+            # Print concise summary
             total_plots = sum(len([p for p in plots.values() if p]) for plots in plot_paths.values())
-            print(f"\n[Plots] Successfully generated {total_plots} plots")
-            for bus_num, plots in plot_paths.items():
-                successful = len([p for p in plots.values() if p])
-                print(f"  {bus_num}-bus: {successful} plots")
-        else:
-            print("Warning: No valid bus systems found for plotting")
+            successful_counts = [f"{bus_num}({len([p for p in plots.values() if p])})" for bus_num, plots in plot_paths.items()]
+            print(f"[Plots] Generated {total_plots} plots: {', '.join(successful_counts)}")
             
     except Exception as e:
         # Don't fail the entire process if plotting fails - it's not critical
-        print(f"\nWarning: Could not generate plots (non-critical): {e}")
-        traceback.print_exc()
-            
-    print("\nAll data generation processes are complete.")
+        print(f"[Warning] Could not generate plots: {e}")

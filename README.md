@@ -1,4 +1,4 @@
-﻿# Physics-Informed Machine Learning for Power System State Estimation and Optimization
+# Physics-Informed Machine Learning for Power System State Estimation and Optimization
 
 ## 1. Overview
 This repository implements a **Physics-Informed Machine Learning (PIML)** framework for dynamic state estimation and multi-objective optimization in power distribution networks. The system integrates graph neural networks (GNNs) and recurrent neural networks (RNNs) with physical power flow constraints to reconstruct the full system state (voltages, angles, power flows) from sparse, noisy measurements.
@@ -222,7 +222,336 @@ The framework generates comprehensive plots (`utils/visualization.py`, `utils/ev
 *   **Spatial/Temporal Uncertainty**: Heatmaps showing uncertainty distribution across the grid and time.
 *   **Renewable Impact**: Comparative analysis of Carbon, Voltage, and Losses across different renewable penetration levels (0% - 100%).
 
-## 7. References
+## 7. Automation and Usage Guide
+
+This framework includes extensive automation features that handle data validation, selective regeneration, and visualization automatically. This section explains all automation processes and CLI arguments for easy usage.
+
+### 7.1. Automation Features
+
+#### 7.1.1. Intelligent Data Validation (`utils/data_validation.py`)
+
+The system automatically validates data before training and regenerates only what's necessary:
+
+**Key Features:**
+- **Per-Bus-System Validation**: Validates each bus system (33, 57, 118) independently
+- **Selective Regeneration**: Only regenerates invalid bus systems, preserving valid data
+- **Configuration Hash Checking**: Detects configuration changes (timesteps, mode, etc.) and regenerates affected data
+- **Metadata Management**: Uses per-process metadata files to support parallel execution without race conditions
+- **Automatic Cleanup**: Removes old data files for bus systems being regenerated (preserves others)
+
+**What Gets Validated:**
+- File existence (all required data files present)
+- Timestep consistency (matches config requirements)
+- Mode consistency (train vs test)
+- Configuration hash (detects config changes)
+- Data structure integrity (OPF format, file shapes)
+
+**Example Workflow:**
+```
+User runs: python train.py
+→ System validates all bus systems
+→ Finds case33 has wrong timesteps (12 vs required 10)
+→ Automatically deletes only case33 data (preserves case57, case118)
+→ Regenerates case33 with correct timesteps
+→ Generates plots for case33 automatically
+→ Proceeds with training
+```
+
+#### 7.1.2. Automatic Plot Generation
+
+Plots are automatically generated after data generation:
+
+**When Plots Are Generated:**
+- After running `data/main.py` directly
+- After data validation regenerates data
+- Only for bus systems that were generated/regenerated
+
+**What Gets Plotted:**
+- **Data Profile**: Load/generation patterns and data quality
+- **Convergence Story**: Data generation quality metrics across renewable fractions
+- **Physics Health**: Voltage distribution and system health
+
+**Plot Locations:**
+- Train mode: `data/plots_train/`
+- Test mode: `data/plots_test/`
+
+**Automatic Cleanup:**
+- Old plots for regenerated bus systems are automatically deleted
+- Plots for other bus systems are preserved
+
+#### 7.1.3. Parallel Execution Support
+
+The system supports running data generation in parallel for different bus systems:
+
+**How It Works:**
+- Each process writes to its own metadata file: `data_generation_metadata_{process_id}_{timestamp}.json`
+- No race conditions: Each process has a unique filename
+- Metadata files are automatically merged when reading
+- Cleanup is selective: Only affects bus systems being regenerated
+
+**Example:**
+```bash
+# Terminal 1
+python data/main.py --mode train --buses 33
+
+# Terminal 2 (run simultaneously)
+python data/main.py --mode train --buses 57
+
+# Terminal 3 (run simultaneously)
+python data/main.py --mode train --buses 118
+```
+
+All three processes run safely in parallel without conflicts.
+
+### 7.2. Command-Line Interface (CLI)
+
+#### 7.2.1. Data Generation (`data/main.py`)
+
+Generate power system data for training or testing.
+
+**Usage:**
+```bash
+python data/main.py [OPTIONS]
+```
+
+**Arguments:**
+- `--mode {train,test}`: Data generation mode (default: `train`)
+  - `train`: Generates training data (default: 10008 timesteps)
+  - `test`: Generates test data (default: 240 timesteps)
+
+- `--time_steps TIMESTEPS` or `--timesteps TIMESTEPS`: Number of time steps to generate
+  - Overrides default values from config
+  - Example: `--time_steps 1000`
+
+- `--buses BUS_SYSTEMS`: Comma-separated bus system numbers to generate
+  - Examples: `--buses 33`, `--buses 33,57`, `--buses 33,57,118`
+  - If not specified: Generates all bus systems (33, 57, 118)
+
+- `--config PATH`: Path to YAML configuration file (default: `config.yaml`)
+
+- `--output_dir PATH`: Directory to save generated data (default: `data/{mode}/`)
+
+- `--no_progress_bar`: Disable progress bars (useful when running from other scripts)
+
+**Default Behavior:**
+When no arguments are provided:
+- Mode: `train`
+- Timesteps: `10008`
+- Bus systems: All (33, 57, 118)
+
+**Examples:**
+```bash
+# Generate all training data with defaults
+python data/main.py
+
+# Generate test data for 33-bus system only
+python data/main.py --mode test --buses 33
+
+# Generate training data with custom timesteps for specific buses
+python data/main.py --mode train --time_steps 5000 --buses 33,57
+
+# Generate data and disable progress bars
+python data/main.py --no_progress_bar
+```
+
+**What Happens Automatically:**
+1. Validates existing data for specified bus systems
+2. Deletes old data files for bus systems being regenerated
+3. Generates new data with progress bars (one per renewable fraction)
+4. Saves metadata file with generation details
+5. Generates visualization plots automatically
+6. Cleans up old plots for regenerated bus systems
+
+#### 7.2.2. Model Training (`train.py`)
+
+Train physics-informed neural network models with automatic data validation.
+
+**Usage:**
+```bash
+python train.py [OPTIONS]
+```
+
+**Arguments:**
+- `--mode {train,test}`: Data mode to use (default: from `config.yaml`)
+  - Overrides `data_mode` in config.yaml
+  - Example: `--mode test` uses test data
+
+- `--time_steps TIMESTEPS`: Override number of time steps
+  - Overrides `train_timesteps` or `test_timesteps` in config.yaml
+
+- `--output_dir PATH`: Override output directory for results
+
+- `--config PATH`: Path to YAML configuration file (default: `config.yaml`)
+
+**Default Behavior:**
+- Uses settings from `config.yaml`
+- Validates data automatically before training
+- Regenerates missing/invalid data automatically
+- Trains all models specified in `test_config` or `models_to_train`
+
+**Examples:**
+```bash
+# Train with default config.yaml settings
+python train.py
+
+# Train using test data instead of train data
+python train.py --mode test
+
+# Train with custom config file
+python train.py --config my_config.yaml
+```
+
+**What Happens Automatically:**
+1. **Data Validation**: Checks all required data files exist and are valid
+2. **Selective Regeneration**: Regenerates only invalid bus systems
+3. **Plot Generation**: Generates plots for regenerated data
+4. **Model Training**: Trains all specified models with MoSOA optimization
+5. **Evaluation**: Runs MOOPF evaluation and generates comparative plots
+6. **Results Saving**: Saves all results, metrics, and model states
+
+#### 7.2.3. Plot Generation (`data/generate_data_plots.py`)
+
+Standalone script to generate data visualization plots (also runs automatically after data generation).
+
+**Usage:**
+```bash
+python data/generate_data_plots.py [OPTIONS]
+```
+
+**Arguments:**
+- `--mode {train,test}`: Data mode (default: `test`)
+  - Determines which data directory to read from
+
+- `--buses BUS_SYSTEMS`: Bus systems to plot (default: `all`)
+  - Examples: `--buses 33`, `--buses 33,57`, `--buses all`
+
+- `--output PATH`: Output directory for plots (default: `data/plots_{mode}/`)
+
+- `--no-cleanup`: Keep old plots instead of cleaning up
+
+- `--config PATH`: Path to YAML configuration file (default: `config.yaml`)
+
+**Examples:**
+```bash
+# Generate plots for all bus systems in test mode
+python data/generate_data_plots.py
+
+# Generate plots for train data, specific buses
+python data/generate_data_plots.py --mode train --buses 33,57
+
+# Generate plots without cleaning up old ones
+python data/generate_data_plots.py --no-cleanup
+```
+
+**Note:** This script is typically not needed manually, as plots are generated automatically after data generation.
+
+### 7.3. Common Workflows
+
+#### 7.3.1. First-Time Setup
+
+```bash
+# 1. Generate all training data (default: train mode, 10008 timesteps, all buses)
+python data/main.py
+
+# 2. Train models (automatically validates data first)
+python train.py
+```
+
+#### 7.3.2. Regenerating Specific Bus System
+
+```bash
+# Regenerate only 33-bus system with new timesteps
+python data/main.py --mode train --time_steps 5000 --buses 33
+
+# Training will automatically use the new data
+python train.py
+```
+
+#### 7.3.3. Parallel Data Generation
+
+```bash
+# Terminal 1
+python data/main.py --mode train --buses 33
+
+# Terminal 2 (run simultaneously)
+python data/main.py --mode train --buses 57
+
+# Terminal 3 (run simultaneously)
+python data/main.py --mode train --buses 118
+```
+
+All processes run safely in parallel. Metadata files are automatically merged.
+
+#### 7.3.4. Testing with Different Configurations
+
+```bash
+# Generate test data
+python data/main.py --mode test --buses 33,57,118
+
+# Train using test data
+python train.py --mode test
+```
+
+#### 7.3.5. Selective Regeneration via Training
+
+```bash
+# If data validation detects mismatches, it automatically:
+# 1. Identifies which bus systems need regeneration
+# 2. Deletes only those bus systems' data
+# 3. Regenerates them with correct parameters
+# 4. Generates plots automatically
+# 5. Proceeds with training
+
+python train.py  # Everything happens automatically!
+```
+
+### 7.4. Configuration Priority
+
+The system uses a hierarchical configuration priority:
+
+1. **CLI Arguments** (Highest Priority)
+   - Overrides everything else
+   - Example: `--mode test` overrides config.yaml
+
+2. **config.yaml**
+   - Default settings for all parameters
+   - Example: `data_mode: train`, `train_timesteps: 10008`
+
+3. **Hardcoded Defaults** (Lowest Priority)
+   - Fallback values if nothing else is specified
+   - Example: Default mode is `train` if not in config
+
+### 7.5. File Organization
+
+**Data Files:**
+- Train data: `data/train/`
+- Test data: `data/test/`
+- Metadata: `data/{mode}/data_generation_metadata_*.json`
+
+**Plot Files:**
+- Train plots: `data/plots_train/`
+- Test plots: `data/plots_test/`
+
+**Model Results:**
+- Results: `results/{run_id}/`
+- Model states: `results/{run_id}/{model_name}/`
+- Plots: `results/{run_id}/{model_name}/plots/`
+
+### 7.6. Troubleshooting
+
+**Issue: Data validation fails**
+- **Solution**: Run `python data/main.py` to regenerate data
+
+**Issue: Plots not generated**
+- **Solution**: Plots are generated automatically after data generation. If missing, run `python data/generate_data_plots.py`
+
+**Issue: Wrong timesteps in data**
+- **Solution**: The system automatically detects and regenerates. Just run `python train.py` and it will fix it.
+
+**Issue: Parallel execution conflicts**
+- **Solution**: The system handles this automatically. Each process uses unique metadata files.
+
+## 8. References
 1.  **GCN**: Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification with Graph Convolutional Networks. *ICLR*.
 2.  **Physics-Informed NN**: Raissi, M., Perdikaris, P., & Karniadakis, G. E. (2019). Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. *Journal of Computational Physics*.
 3.  **Uncertainty Weighting**: Kendall, A., & Gal, Y. (2018). Multi-Task Learning Using Uncertainty to Weigh Losses for Scene Geometry and Semantics. *CVPR*.

@@ -862,8 +862,6 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
     Returns:
         bool: True if data generation was successful, False otherwise
     """
-    print(f"\n{'='*80}\nINTELLIGENT DATA VALIDATION - {config.DATA_MODE.upper()} MODE | Timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]} | Dir: {config.DATA_DIR}\n{'='*80}")
-    
     # Determine which bus systems to validate
     if bus_systems is None:
         bus_systems_to_validate = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
@@ -873,16 +871,12 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
         bus_systems_to_validate = [bus_systems]
     
     bus_list_str = ", ".join([f"case{b}" for b in bus_systems_to_validate])
-    print(f"Validating bus systems: {bus_list_str}")
+    print(f"\n[Data Validation] {config.DATA_MODE.upper()} mode | Timesteps: {config.DATA_MODE_TIMESTEPS[config.DATA_MODE]} | Validating: {bus_list_str}")
     
-    # STEP 1: Per-bus-system validation (PROFESSIONAL APPROACH)
+    # STEP 1: Per-bus-system validation
     validation_results = {}
     systems_need_regeneration = []
     systems_valid = []
-    
-    print(f"\n{'─'*80}")
-    print("Per-Bus-System Validation:")
-    print(f"{'─'*80}")
     
     for bus_system in bus_systems_to_validate:
         is_valid, reason, details = validate_bus_system_data(config, bus_system)
@@ -890,58 +884,50 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
         
         if is_valid:
             systems_valid.append(bus_system)
-            print(f"  ✓ {reason}")
+            print(f"  ✓ case{bus_system}: Valid")
         else:
             systems_need_regeneration.append(bus_system)
-            print(f"  ✗ {reason}")
+            print(f"  ✗ case{bus_system}: {reason.split(':')[-1].strip() if ':' in reason else reason}")
     
     # STEP 2: Summary and decision
-    print(f"\n{'─'*80}")
-    print("Validation Summary:")
-    print(f"{'─'*80}")
-    print(f"  Valid systems: {len(systems_valid)}/{len(bus_systems_to_validate)}")
     if systems_valid:
-        print(f"    → {', '.join([f'case{b}' for b in systems_valid])}")
-    print(f"  Systems needing regeneration: {len(systems_need_regeneration)}/{len(bus_systems_to_validate)}")
+        valid_str = ', '.join([f'case{b}' for b in systems_valid])
+    else:
+        valid_str = 'None'
+    
     if systems_need_regeneration:
-        print(f"    → {', '.join([f'case{b}' for b in systems_need_regeneration])}")
-        for bus_system in systems_need_regeneration:
-            reason = validation_results[bus_system]['reason']
-            print(f"      • case{bus_system}: {reason}")
+        invalid_str = ', '.join([f'case{b}' for b in systems_need_regeneration])
+        print(f"\n[Summary] Valid: {len(systems_valid)}/{len(bus_systems_to_validate)} ({valid_str}) | Need regeneration: {len(systems_need_regeneration)}/{len(bus_systems_to_validate)} ({invalid_str})")
+    else:
+        print(f"\n[Summary] All systems valid ({valid_str})")
     
     # STEP 3: If all systems are valid, skip generation
     if not systems_need_regeneration:
-        print(f"\n{'='*80}\n✓ All data validation passed - Using existing data\n{'='*80}")
+        print(f"✓ All data validation passed - Using existing data")
         return True
     
     # STEP 4: Selective regeneration (only for systems that need it)
-    print(f"\n{'='*80}\nSELECTIVE DATA REGENERATION REQUIRED\n{'='*80}")
-    print(f"\nRegenerating only invalid systems: {', '.join([f'case{b}' for b in systems_need_regeneration])}")
-    print(f"Preserving valid systems: {', '.join([f'case{b}' for b in systems_valid]) if systems_valid else 'None'}")
+    invalid_str = ', '.join([f'case{b}' for b in systems_need_regeneration])
+    valid_str = ', '.join([f'case{b}' for b in systems_valid]) if systems_valid else 'None'
+    print(f"\n[Regeneration] Regenerating: {invalid_str} | Preserving: {valid_str}")
     
     # Selective cleanup: Only remove files for systems that need regeneration
-    print(f"\n{'─'*80}")
-    print("Selective Cleanup (preserving valid data):")
-    print(f"{'─'*80}")
-    
     total_files_removed = 0
+    cleanup_details = []
     for bus_system in systems_need_regeneration:
         files_removed = clean_bus_system_data(config, bus_system)
         total_files_removed += files_removed
-        print(f"  Cleaned case{bus_system}: {files_removed} files removed")
+        cleanup_details.append(f"case{bus_system}({files_removed})")
     
     if total_files_removed > 0:
-        print(f"\nTotal files removed: {total_files_removed}")
+        print(f"[Cleanup] Removed {total_files_removed} files: {', '.join(cleanup_details)}")
     else:
-        print("\nNo files to remove (already clean)")
+        print("[Cleanup] No files to remove")
     
-    # Small delay for filesystem sync
-    time.sleep(0.5)
+    # No delay needed - subprocess will handle its own timing
     
     # STEP 5: Generate data only for systems that need it
-    print(f"\n{'='*80}")
-    print("GENERATING DATA FOR INVALID SYSTEMS")
-    print(f"{'='*80}")
+    print(f"\n[Data Generation] Starting generation for: {', '.join([f'case{b}' for b in systems_need_regeneration])}")
     
     try:
         data_gen_script = os.path.join("data", "main.py")
@@ -954,130 +940,50 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
         
         # Generate data for each system that needs regeneration
         for bus_system in systems_need_regeneration:
-            print(f"\n{'─'*80}")
-            print(f"Generating data for case{bus_system}...")
-            print(f"{'─'*80}")
-            
-            # Start monitoring progress in background thread
-            # Pass the specific bus system being generated for accurate progress tracking
-            stop_event = threading.Event()
-            monitor_thread = threading.Thread(
-                target=monitor_data_generation_progress_per_system,
-                args=(config, stop_event, [bus_system]),  # Pass single bus system for accurate progress
-                daemon=True
-            )
-            monitor_thread.start()
-            
-            time.sleep(0.5)
+            print(f"\n[Generating] case{bus_system}...")
             
             # Run data generation for this specific bus system
+            # SOLUTION: Let the subprocess show its own progress bars (one per fraction)
+            # This provides perfect synchronization - each fraction shows its own timestep progress
+            # Just like when running main.py directly, you'll see:
+            #   Generating case33 (0%): 100%|████| 12/12 [00:09<00:00, 1.22step/s]
+            #   Generating case33 (20%): 100%|████| 12/12 [00:01<00:00, 9.15step/s]
+            #   etc.
             buses_arg = str(bus_system)
             result = subprocess.run(
                 [sys.executable, data_gen_script, 
                  "--mode", config.DATA_MODE, 
                  "--time_steps", str(timesteps),
-                 "--buses", buses_arg,
-                 "--no_progress_bar"],
-                cwd=".",
-                capture_output=True,
-                text=True
+                 "--buses", buses_arg],
+                # No --no_progress_bar: Show individual fraction progress bars
+                # No capture_output: Show real-time progress in terminal
+                cwd="."
             )
             
-            # Stop monitoring thread and wait for it to finish
-            stop_event.set()
-            # Give it more time to complete the progress bar update
-            monitor_thread.join(timeout=10)
-            
-            # Small delay to ensure progress bar is fully updated
-            time.sleep(0.3)
-            
             if result.returncode != 0:
-                print(f"\n✗ Error: Data generation failed for case{bus_system} (exit code {result.returncode})")
-                if result.stderr:
-                    print(f"Error details: {result.stderr[:500]}")
+                print(f"✗ Error: Data generation failed for case{bus_system} (exit code {result.returncode})")
                 return False
             else:
                 print(f"✓ Successfully generated data for case{bus_system}")
         
         # STEP 6: Verify all systems are now valid
-        print(f"\n{'='*80}")
-        print("VERIFYING GENERATED DATA")
-        print(f"{'='*80}")
+        print(f"\n[Verification] Checking all systems...")
         
         all_valid = True
         for bus_system in bus_systems_to_validate:
             is_valid, reason, details = validate_bus_system_data(config, bus_system)
             if is_valid:
-                print(f"  ✓ {reason}")
+                print(f"  ✓ case{bus_system}: Valid")
             else:
-                print(f"  ✗ {reason}")
+                print(f"  ✗ case{bus_system}: {reason.split(':')[-1].strip() if ':' in reason else reason}")
                 all_valid = False
         
         if all_valid:
-            print(f"\n{'='*80}")
-            print("✓ All data validation passed - Ready for training")
-            print(f"{'='*80}\n")
-            
-            # Generate plots for the regenerated bus systems
-            try:
-                print(f"\n{'='*80}")
-                print("GENERATING DATA VISUALIZATION PLOTS")
-                print(f"{'='*80}")
-                
-                from data.plot_consolidator import generate_all_data_plots
-                
-                # Determine plots directory based on mode
-                data_dir = config.DATA_DIR
-                data_root = os.path.dirname(data_dir)  # e.g., 'data' folder
-                plots_dir = os.path.join(data_root, f'plots_{config.DATA_MODE}')
-                
-                # Clean up old plots for the bus systems that were regenerated
-                if os.path.exists(plots_dir):
-                    print(f"Cleaning up old plots for regenerated systems in {plots_dir}...")
-                    for bus_system in systems_need_regeneration:
-                        case_name = f"case{bus_system}"
-                        # Find and delete old plot files for this case
-                        plot_patterns = [
-                            f'data_profile_*{bus_system}bus.png',
-                            f'convergence_*{bus_system}bus.png',
-                            f'physics_health_*{bus_system}bus.png',
-                        ]
-                        for pattern in plot_patterns:
-                            for old_plot in glob.glob(os.path.join(plots_dir, pattern)):
-                                try:
-                                    os.remove(old_plot)
-                                except Exception:
-                                    pass
-                
-                os.makedirs(plots_dir, exist_ok=True)
-                
-                if systems_need_regeneration:
-                    print(f"Generating plots for bus systems: {systems_need_regeneration}")
-                    print(f"Plots directory: {plots_dir}\n")
-                    
-                    # Generate plots with progress bar
-                    plot_paths = generate_all_data_plots(
-                        config=config,
-                        bus_systems=systems_need_regeneration,
-                        data_plots_dir=plots_dir
-                    )
-                    
-                    # Print summary
-                    total_plots = sum(len([p for p in plots.values() if p]) for plots in plot_paths.values())
-                    print(f"\n[Plots] Successfully generated {total_plots} plots")
-                    for bus_num, plots in plot_paths.items():
-                        successful = len([p for p in plots.values() if p])
-                        print(f"  {bus_num}-bus: {successful} plots")
-                
-            except Exception as e:
-                # Don't fail if plotting fails - it's not critical
-                print(f"\nWarning: Could not generate plots (non-critical): {e}")
-            
+            print(f"✓ All data validation passed - Ready for training")
+            # Note: Plotting is handled by data/main.py after data generation completes
             return True
         else:
-            print(f"\n{'='*80}")
-            print("✗ Some systems still have validation issues")
-            print(f"{'='*80}\n")
+            print(f"✗ Some systems still have validation issues")
             return False
             
     except Exception as e:
@@ -1201,33 +1107,21 @@ def force_clean_all_data(config) -> bool:
         # Run the script with per-system progress bars
         print("Starting fresh data generation...\n")
         
-        # Start monitoring progress in background thread
-        stop_event = threading.Event()
-        monitor_thread = threading.Thread(
-            target=monitor_data_generation_progress_per_system, 
-            args=(config, stop_event)
-        )
-        monitor_thread.start()
-        
-        # Run data generation script
+        # Run data generation script - let it show its own progress bars
         result = subprocess.run(
-            [sys.executable, data_gen_script],
-            cwd=".",
-            capture_output=True,
-            text=True
+            [sys.executable, data_gen_script,
+             "--mode", config.DATA_MODE],
+            # No --no_progress_bar: Show individual fraction progress bars
+            # No capture_output: Show real-time progress in terminal
+            cwd="."
         )
-        
-        # Stop monitoring thread
-        stop_event.set()
-        monitor_thread.join(timeout=2)
         
         if result.returncode == 0:
             print("Fresh data generation completed successfully!")
             return True
         else:
             print(f"ERROR: Data generation failed with return code {result.returncode}")
-            if result.stderr:
-                print(f"Error details: {result.stderr}")
+            print("Check the terminal output above for error details.")
             return False
             
     except Exception as e:
@@ -1245,9 +1139,7 @@ def validate_data_before_training(config, bus_systems_to_test=None) -> bool:
     Returns:
         bool: True if data is ready for training, False otherwise
     """
-    print("\n" + "="*80)
-    print("DATA VALIDATION")
-    print("="*80)
+    # Data validation header removed - validation output is now concise
     
     # Pass bus_systems to generation function
     success = generate_data_if_missing(config, bus_systems_to_test)
@@ -1259,9 +1151,8 @@ def validate_data_before_training(config, bus_systems_to_test=None) -> bool:
         except Exception as e:
             print(f"Warning: Could not display data generation summary: {e}")
         
-        print("\nReady for training!")
+        # Ready for training (message removed - validation output is concise)
     else:
-        print("\nData validation failed!")
+        print("[Error] Data validation failed!")
     
-    print("="*80)
     return success

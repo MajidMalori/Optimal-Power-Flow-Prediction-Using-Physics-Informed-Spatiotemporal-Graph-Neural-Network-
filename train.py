@@ -363,7 +363,7 @@ def main():
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # For CUDA deterministic operations
     
     # Set all random seeds for full reproducibility
-    print(f"\nSetting random seed: {seed} (for reproducibility)")
+    print(f"[Seed] {seed} (for reproducibility)")
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -397,10 +397,10 @@ def main():
     data_workers_config = getattr(Config, 'data_workers', 'auto')
     if data_workers_config == 'auto':
         base_config.NUM_WORKERS = _auto_detect_num_workers(device)
-        print(f"Auto-detected data workers: {base_config.NUM_WORKERS} (based on system specs)")
+        print(f"[Workers] Auto-detected: {base_config.NUM_WORKERS}")
     else:
         base_config.NUM_WORKERS = int(data_workers_config)
-        print(f"Using configured data workers: {base_config.NUM_WORKERS}")
+        print(f"[Workers] Configured: {base_config.NUM_WORKERS}")
     
     # Ensure parallel_data_loading setting is respected
     parallel_data_loading = getattr(Config, 'parallel_data_loading', True)
@@ -436,11 +436,11 @@ def main():
             models_to_test = models_to_train
         else:
             models_to_test = [models_to_train]
-        print(f"Using explicit model selection (overriding test_config): {models_to_test}")
+        print(f"[Models] Explicit selection: {models_to_test}")
     else:
         # Use test_config presets
         models_to_test = base_config.get_models_to_test(test_config)
-        print(f"Using test_config '{test_config}': {models_to_test}")
+        print(f"[Models] test_config '{test_config}': {models_to_test}")
     
     if not models_to_test:
         raise ValueError(
@@ -453,7 +453,7 @@ def main():
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
-        print(f"{'='*80}\n{num_buses}-BUS | MoSOA: {mosoa_params['num_seagulls']} seagulls x {mosoa_params['max_iterations']} iters ({mosoa_params['strategy']})\n{'='*80}")
+        print(f"\n[{num_buses}-BUS] MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iters ({mosoa_params['strategy']})")
         
         # Initialize data collectors for comparative plots
         bus_renewable_data = {}  # model_name -> renewable_impact_dataframe
@@ -492,12 +492,11 @@ def main():
             
             bus_models_to_test = models_to_test.copy()
         except FileNotFoundError as e:
-            print(f"WARNING: Skipping {num_buses}-bus system - data not found: {e}")
-            print(f"  Run data generation for this system: python data/main.py")
+            print(f"WARNING: Skipping {num_buses}-bus - data not found. Run: python data/main.py")
             continue
 
         for model_name in bus_models_to_test:
-            print(f"\n{'='*60}\n{model_name} on {num_buses}-bus\n{'='*60}")
+            print(f"\n[{model_name}] {num_buses}-bus system")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
@@ -724,7 +723,7 @@ def main():
 
             # Always use MoSOA for hyperparameter optimization
             if True:  # MoSOA always enabled
-                print(f"Optimizing with MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
+                print(f"[MoSOA] Optimizing: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
                 
                 # Wrap objective function to track iteration and run numbers
                 def objective_with_tracking(params_array):
@@ -752,9 +751,8 @@ def main():
             # Process best parameters
             best_params = process_optimization_params(param_keys, best_position)
 
-            score_label = "Validation Total Loss" if is_physics_informed else "Validation MSE"
-            print(f"\nBest: {format_params_concise(best_params)} | {score_label}: {best_score:.6g}")
-            print("="*80)  # Add clear separator after MoSOA completion
+            score_label = "Val Loss" if is_physics_informed else "Val MSE"
+            print(f"Best: {format_params_concise(best_params)} | {score_label}: {best_score:.6g}")
 
             if not model_specific_results: 
                 print(f"WARNING: No successful runs for {model_name} - skipping to next model.")
@@ -856,7 +854,7 @@ def main():
             
             if is_physics_informed:
                 # Evaluate MOOPF objectives (single pass through test data)
-                print(f"\n[{model_name}] Running MOOPF evaluation...")
+                print(f"[{model_name}] MOOPF evaluation...")
                 moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
                     model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
                 )
