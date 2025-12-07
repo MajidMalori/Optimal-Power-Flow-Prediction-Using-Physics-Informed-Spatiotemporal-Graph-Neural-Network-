@@ -414,8 +414,10 @@ def load_power_system_data(config, case_name):
         raw_base_adjacency = _convert_edge_index_to_adj(edge_index, num_buses)
         base_adjacency_matrix = raw_base_adjacency
     except Exception as e:
-        print(f"\nError: Failed during adjacency matrix loading: {e}")
-        raise
+        raise RuntimeError(
+            f"Failed during adjacency matrix loading: {e}\n"
+            f"This is a critical error - cannot proceed without adjacency matrix data."
+        ) from e
     
     file_metadata = []
     global_timestep = 0

@@ -933,8 +933,10 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
         data_gen_script = os.path.join("data", "main.py")
         
         if not os.path.exists(data_gen_script):
-            print(f"Error: Data generation script not found: {data_gen_script}")
-            return False
+            raise FileNotFoundError(
+                f"Data generation script not found: {data_gen_script}\n"
+                f"This is a critical error - cannot proceed without the data generation script."
+            )
         
         timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
         
@@ -961,8 +963,11 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
             )
             
             if result.returncode != 0:
-                print(f"✗ Error: Data generation failed for case{bus_system} (exit code {result.returncode})")
-                return False
+                raise RuntimeError(
+                    f"Data generation failed for case{bus_system} (exit code {result.returncode})\n"
+                    f"This is a critical error - invalid data would corrupt training results.\n"
+                    f"Check the terminal output above for error details."
+                )
             else:
                 print(f"✓ Successfully generated data for case{bus_system}")
         
@@ -983,14 +988,21 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
             # Note: Plotting is handled by data/main.py after data generation completes
             return True
         else:
-            print(f"✗ Some systems still have validation issues")
-            return False
+            invalid_systems = [f"case{b}" for b, is_valid in [(bus, validation_results[bus]['valid']) for bus in bus_systems_to_validate] if not is_valid]
+            raise RuntimeError(
+                f"Some systems still have validation issues after regeneration: {', '.join(invalid_systems)}\n"
+                f"This is a critical error - cannot proceed with training without valid data.\n"
+                f"Please investigate and fix the validation issues."
+            )
             
+    except (FileNotFoundError, RuntimeError) as e:
+        # Re-raise critical errors
+        raise
     except Exception as e:
-        print(f"\nError: Exception during data generation: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        raise RuntimeError(
+            f"Unexpected error during data generation: {e}\n"
+            f"This is a critical error - data generation must succeed for training to proceed."
+        ) from e
 
 def display_data_generation_summary(config, bus_systems_to_show=None):
     """
@@ -1101,8 +1113,10 @@ def force_clean_all_data(config) -> bool:
         data_gen_script = os.path.join("data", "main.py")
         
         if not os.path.exists(data_gen_script):
-            print(f"ERROR: Data generation script not found: {data_gen_script}")
-            return False
+            raise FileNotFoundError(
+                f"Data generation script not found: {data_gen_script}\n"
+                f"This is a critical error - cannot proceed without the data generation script."
+            )
         
         # Run the script with per-system progress bars
         print("Starting fresh data generation...\n")
@@ -1120,13 +1134,20 @@ def force_clean_all_data(config) -> bool:
             print("Fresh data generation completed successfully!")
             return True
         else:
-            print(f"ERROR: Data generation failed with return code {result.returncode}")
-            print("Check the terminal output above for error details.")
-            return False
+            raise RuntimeError(
+                f"Data generation failed with return code {result.returncode}\n"
+                f"This is a critical error - invalid data would corrupt training results.\n"
+                f"Check the terminal output above for error details."
+            )
             
+    except (FileNotFoundError, RuntimeError) as e:
+        # Re-raise critical errors
+        raise
     except Exception as e:
-        print(f"ERROR: Error running data generation: {e}")
-        return False
+        raise RuntimeError(
+            f"Unexpected error running data generation: {e}\n"
+            f"This is a critical error - data generation must succeed for training to proceed."
+        ) from e
 
 def validate_data_before_training(config, bus_systems_to_test=None) -> bool:
     """
@@ -1152,7 +1173,10 @@ def validate_data_before_training(config, bus_systems_to_test=None) -> bool:
             print(f"Warning: Could not display data generation summary: {e}")
         
         # Ready for training (message removed - validation output is concise)
+        return True
     else:
-        print("[Error] Data validation failed!")
-    
-    return success
+        raise RuntimeError(
+            "Data validation failed!\n"
+            "This is a critical error - cannot proceed with training without valid data.\n"
+            "Please regenerate data or fix the validation issues."
+        )

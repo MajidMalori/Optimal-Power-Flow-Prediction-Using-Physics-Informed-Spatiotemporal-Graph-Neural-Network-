@@ -109,8 +109,10 @@ try:
         test_timesteps=test_timesteps,
     )
 except Exception as e:
-    print(f"Error loading configuration: {e}")
-    sys.exit(1)
+    raise RuntimeError(
+        f"Error loading configuration: {e}\n"
+        f"This is a critical error - cannot proceed without valid configuration."
+    ) from e
 
 # Create CONFIG dictionary for compatibility with existing code
 # Prioritize CLI args > Config object > Defaults
@@ -1253,15 +1255,21 @@ if __name__ == "__main__":
                 # Metadata saved successfully (no verbose message needed)
                 pass
             else:
-                print(f"[Error] Metadata file was not created or is empty")
+                raise RuntimeError(
+                    f"Metadata file was not created or is empty: {per_process_metadata_file}\n"
+                    f"This is a critical error - metadata is required for data integrity and validation."
+                )
         except Exception as e:
-            print(f"ERROR: Could not save per-process metadata file: {e}")
-            traceback.print_exc()
+            raise RuntimeError(
+                f"Could not save per-process metadata file: {e}\n"
+                f"This is a critical error - metadata is required for data integrity and validation."
+            ) from e
         
     except Exception as e:
-        # Don't fail the entire process if metadata write fails - it's not critical
-        print(f"ERROR: Could not save metadata file: {e}")
-        traceback.print_exc()
+        raise RuntimeError(
+            f"Could not save metadata file: {e}\n"
+            f"This is a critical error - metadata is required for data integrity and validation."
+        ) from e
     
     # ============================================================================
     # AUTOMATIC PLOT GENERATION

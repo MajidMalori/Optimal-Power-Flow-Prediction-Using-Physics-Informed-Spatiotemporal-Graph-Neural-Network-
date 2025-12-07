@@ -339,22 +339,23 @@ class Config:
             Returns ranges with minimum width to allow optimization exploration.
             """
             # Capacity presets for each bus system
-            # Single values are converted to ranges with ±10% tolerance for optimization
+            # Research-backed: Power systems GCNs use 64-256 units (Aalto University study)
+            # Optimal: 128 in first layer, 64 in second layer
             capacity_settings = {
                 33: {
-                    'normal': (32, 64),    # Reduced: 32-64 (was 32-96) - capped at 64
-                    'medium': (48, 96),    # Reduced: 48-96 (was 64-128)
-                    'large': (64, 128)     # Reduced: 64-128 (was 96-160) - capped at 128
+                    'normal': (64, 128),   # Research-backed: Conservative range
+                    'medium': (96, 192),   # Research-backed: Balanced range
+                    'large': (64, 256)     # Research-backed: Full range (64-256)
                 },
                 57: {
-                    'normal': (32, 64),    # Reduced: 32-64 (was 32-96) - capped at 64
-                    'medium': (48, 96),    # Reduced: 48-96 (was 64-128)
-                    'large': (64, 128)     # Reduced: 64-128 (was 96-160) - capped at 128
+                    'normal': (64, 128),   # Research-backed: Conservative range
+                    'medium': (96, 192),   # Research-backed: Balanced range
+                    'large': (64, 256)     # Research-backed: Full range (64-256)
                 },
                 118: {
-                    'normal': (64, 128),   # Kept: 64-128 (capped at 128 as requested)
-                    'medium': (96, 160),   # Kept: 96-160
-                    'large': (128, 256)    # Kept: 128-256
+                    'normal': (64, 128),   # Research-backed: Conservative range
+                    'medium': (96, 192),   # Research-backed: Balanced range
+                    'large': (64, 256)     # Research-backed: Full range (64-256)
                 }
             }
             
@@ -379,21 +380,23 @@ class Config:
             Get GC layers range based on system size and capacity setting.
             Returns ranges with minimum width to allow optimization exploration.
             """
+            # Research-backed: Optimal GCN depth is 2-3 layers (PMC, Aalto University)
+            # Beyond 3 layers causes over-smoothing (node representations become indistinguishable)
             capacity_settings = {
                 33: {
-                    'normal': (1, 3),     # Reduced
-                    'medium': (2, 4),     # Reduced
-                    'large': (3, 5)       # Reduced
+                    'normal': (1, 2),     # Research-backed: Minimal (1-2 layers)
+                    'medium': (2, 3),     # Research-backed: Optimal (2-3 layers)
+                    'large': (2, 3)       # Research-backed: Optimal (2-3 layers)
                 },
                 57: {
-                    'normal': (1, 3),     # Reduced
-                    'medium': (2, 4),     # Reduced
-                    'large': (3, 5)       # Reduced
+                    'normal': (1, 2),     # Research-backed: Minimal (1-2 layers)
+                    'medium': (2, 3),     # Research-backed: Optimal (2-3 layers)
+                    'large': (2, 3)       # Research-backed: Optimal (2-3 layers)
                 },
                 118: {
-                    'normal': (2, 4),     # Reduced significantly (was 2-6)
-                    'medium': (3, 5),     # Reduced significantly (was 4-9)
-                    'large': (4, 6)       # Reduced significantly (was 6-12)
+                    'normal': (1, 2),     # Research-backed: Minimal (1-2 layers)
+                    'medium': (2, 3),     # Research-backed: Optimal (2-3 layers)
+                    'large': (2, 3)       # Research-backed: Optimal (2-3 layers)
                 }
             }
             
@@ -417,21 +420,23 @@ class Config:
             Get embedding dimension range based on system size and capacity setting.
             Returns ranges with minimum width to allow optimization exploration.
             """
+            # Research-backed: Typical embedding dimensions are 100-300 (Neo4j, GraphSAGE)
+            # Common choices: 128 (node2vec, GraphSAGE), 200-450 for complex datasets
             capacity_settings = {
                 33: {
-                    'normal': (8, 24),    # Reduced: 8-24 (was 8-48)
-                    'medium': (24, 48),   # Reduced: 24-48 (was 32-64)
-                    'large': (32, 64)     # Reduced: 32-64 (was 48-96) - capped at 64
+                    'normal': (64, 150),  # Research-backed: Conservative range
+                    'medium': (100, 200), # Research-backed: Typical range
+                    'large': (100, 300)   # Research-backed: Full range (100-300)
                 },
                 57: {
-                    'normal': (8, 24),    # Reduced: 8-24 (was 8-48)
-                    'medium': (24, 48),   # Reduced: 24-48 (was 32-64)
-                    'large': (32, 64)     # Reduced: 32-64 (was 48-96) - capped at 64
+                    'normal': (64, 150),  # Research-backed: Conservative range
+                    'medium': (100, 200), # Research-backed: Typical range
+                    'large': (100, 300)   # Research-backed: Full range (100-300)
                 },
                 118: {
-                    'normal': (16, 48),   # Reduced: 16-48 (was 16-64)
-                    'medium': (48, 96),   # Kept: 48-96
-                    'large': (64, 128)    # Kept: 64-128
+                    'normal': (64, 150),  # Research-backed: Conservative range
+                    'medium': (100, 200), # Research-backed: Typical range
+                    'large': (100, 300)   # Research-backed: Full range (100-300)
                 }
             }
             
@@ -929,9 +934,6 @@ class Config:
             if not file_exists:
                 writer.writeheader()
             writer.writerow(log_entry)
-        
-        print(f"Run finalized: {self.CURRENT_RUN_DIR}")
-        print(f"Experiment logged to: {experiment_log}")
     
     def get_run_info(self):
         """Get information about the current run."""

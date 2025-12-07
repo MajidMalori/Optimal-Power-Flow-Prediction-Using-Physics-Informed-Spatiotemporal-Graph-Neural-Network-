@@ -363,7 +363,7 @@ def main():
     os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # For CUDA deterministic operations
     
     # Set all random seeds for full reproducibility
-    print(f"[Seed] {seed} (for reproducibility)")
+    print(f"\n[Seed] {seed} (for reproducibility)")
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -453,7 +453,6 @@ def main():
     for num_buses in bus_systems_to_test:
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
-        print(f"\n[{num_buses}-BUS] MoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iters ({mosoa_params['strategy']})")
         
         # Initialize data collectors for comparative plots
         bus_renewable_data = {}  # model_name -> renewable_impact_dataframe
@@ -461,6 +460,7 @@ def main():
         all_tested_models = []  # Track all models tested (including non-physics)
         
         case_name = f"case{num_buses}"
+        
         # Set case name in config to enable system-specific base power determination
         base_config.CASE_NAME = case_name
         
@@ -496,11 +496,13 @@ def main():
             continue
 
         for model_name in bus_models_to_test:
-            print(f"\n[{model_name}] {num_buses}-bus system")
+            print(f"\n{'='*80}")
+            print(f"  {model_name} - {num_buses}-bus system")
+            print(f"{'='*80}\n")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
-
+            
             # Get model characteristics from config
             is_sequential = base_config.is_sequential_model(model_name)
             is_physics_informed = base_config.is_physics_informed(model_name)
@@ -649,9 +651,12 @@ def main():
                     else:
                         iter_info = f" [MoSOA {mosoa_iter[0]}/{mosoa_max_iter}]"
                     print(f"  Config: {config_str}{iter_info}")
+                    print()  # Space before epochs
                     
                     # Train the model 
                     trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses, config_params=config_params)
+                    
+                    print()  # Space after epochs (before next config)
 
                     # Get training history with validation total loss (includes physics)
                     training_history = trainer.get_training_history()
@@ -723,7 +728,7 @@ def main():
 
             # Always use MoSOA for hyperparameter optimization
             if True:  # MoSOA always enabled
-                print(f"[MoSOA] Optimizing: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations")
+                print(f"\nMoSOA: {mosoa_params['num_seagulls']} seagulls × {mosoa_params['max_iterations']} iterations ({mosoa_params['strategy']})\n")
                 
                 # Wrap objective function to track iteration and run numbers
                 def objective_with_tracking(params_array):
@@ -1064,74 +1069,71 @@ def main():
             
             clear_gpu_memory()
         
-        if True: # Always save results
-            print(f"\n Generating plots for {num_buses}-bus...")
-            
-            # Import comparative visualization functions
-            from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
-            
-            # Create comparative renewable impact plots for all tested models
-            # Always create plots if any models were tested, regardless of physics type
-            if all_tested_models:
-                try:
-                    create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
-                except Exception as e:
-                    print(f"  Warning: Could not create renewable impact plots: {e}")
-            
-            # Create comparative convergence plot
-            if bus_convergence_data:
-                try:
-                    create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
-                except Exception as e:
-                    print(f"  Warning: Could not create convergence plots: {e}")
-            
-            # Copy best model's images to bus system level
-            if base_config.DATA_MODE == 'test' and all_results:
-                try:
-                    # Find best model for this bus system
-                    bus_results = [r for r in all_results if r['num_buses'] == num_buses and r['final_test_score'] != float('inf')]
-                    if bus_results:
-                        best_bus_result = min(bus_results, key=lambda x: x['final_test_score'])
-                        best_bus_model_name = best_bus_result['model_name']
-                        
-                        # Source: model's output directory
-                        best_model_dir = os.path.join(
-                            base_config.CURRENT_RUN_DIR,
-                            f"{num_buses}bus",
-                            "models",
-                            best_bus_model_name
-                        )
-                        
-                        # Destination: bus system level
-                        bus_system_dir = os.path.join(base_config.CURRENT_RUN_DIR, f"{num_buses}bus")
-                        
-                        # List of all relevant images to copy
-                        images_to_copy = [
-                            f"{best_bus_model_name}_predicted_vs_actual.png",
-                            f"{best_bus_model_name}_error_distributions.png",
-                            "calibration_diagram.png",
-                            "train_hist.png",
-                            "uncertainty_spatial.png",
-                            "uncertainty_temporal.png",
-                            "mosoa_conv.png"
-                        ]
-                        
-                        # Copy all images if they exist
-                        import shutil
-                        copied_count = 0
-                        for image_file in images_to_copy:
-                            src = os.path.join(best_model_dir, image_file)
-                            dst = os.path.join(bus_system_dir, image_file)
-                            if os.path.exists(src):
-                                shutil.copy2(src, dst)
-                                copied_count += 1
-                        
-                        if copied_count > 0:
-                            print(f"[Best Model] Copied {copied_count} images from best model ({best_bus_model_name}) to {num_buses}bus folder")
-                except Exception as e:
-                    print(f"  Warning: Could not copy best model's images: {e}")
-                    import traceback
-                    traceback.print_exc()
+        # Import comparative visualization functions
+        from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
+        
+        # Create comparative renewable impact plots for all tested models
+        # Always create plots if any models were tested, regardless of physics type
+        if all_tested_models:
+            try:
+                create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
+            except Exception as e:
+                print(f"  Warning: Could not create renewable impact plots: {e}")
+        
+        # Create comparative convergence plot
+        if bus_convergence_data:
+            try:
+                create_comparative_convergence_plot(bus_convergence_data, base_config, num_buses)
+            except Exception as e:
+                print(f"  Warning: Could not create convergence plots: {e}")
+        
+        # Copy best model's images to bus system level (for both train and test modes)
+        if all_results:
+            try:
+                # Find best model for this bus system
+                bus_results = [r for r in all_results if r['num_buses'] == num_buses and r['final_test_score'] != float('inf')]
+                if bus_results:
+                    best_bus_result = min(bus_results, key=lambda x: x['final_test_score'])
+                    best_bus_model_name = best_bus_result['model_name']
+                    
+                    # Source: model's output directory
+                    best_model_dir = os.path.join(
+                        base_config.CURRENT_RUN_DIR,
+                        f"{num_buses}bus",
+                        "models",
+                        best_bus_model_name
+                    )
+                    
+                    # Destination: bus system level
+                    bus_system_dir = os.path.join(base_config.CURRENT_RUN_DIR, f"{num_buses}bus")
+                    
+                    # List of all relevant images to copy
+                    images_to_copy = [
+                        f"{best_bus_model_name}_predicted_vs_actual.png",
+                        f"{best_bus_model_name}_error_distributions.png",
+                        "calibration_diagram.png",
+                        "train_hist.png",
+                        "uncertainty_spatial.png",
+                        "uncertainty_temporal.png",
+                        "mosoa_conv.png"
+                    ]
+                    
+                    # Copy all images if they exist
+                    import shutil
+                    copied_count = 0
+                    for image_file in images_to_copy:
+                        src = os.path.join(best_model_dir, image_file)
+                        dst = os.path.join(bus_system_dir, image_file)
+                        if os.path.exists(src):
+                            shutil.copy2(src, dst)
+                            copied_count += 1
+                    
+                    if copied_count > 0:
+                        print(f"\n[Best Model] Copied {copied_count} images from best model ({best_bus_model_name}) to {num_buses}bus folder")
+            except Exception as e:
+                print(f"  Warning: Could not copy best model's images: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Final GPU cache clear after completing all models for this bus system
         clear_gpu_memory()
@@ -1202,6 +1204,6 @@ if __name__ == '__main__':
         gc.collect()  # OK at final exit
         if torch.cuda.is_available():
             torch.cuda.empty_cache()  # OK at final exit
-        print("\nTraining script completed")
+        print("\nTraining script completed\n")
         close_logger() # Close forensic logger
         sys.exit(0)
