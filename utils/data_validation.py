@@ -14,12 +14,90 @@ import json
 import shutil
 import numpy as np
 import hashlib
+from datetime import datetime
 from typing import List, Tuple, Dict, Set
 from tqdm import tqdm
 
-def find_latest_timestamp(data_dir: str) -> str:
+def merge_metadata_files(data_dir: str) -> dict:
+    """
+    Merge all per-process metadata files into a single metadata structure.
+    This supports lock-free parallel execution - each process writes its own file,
+    and we merge on read.
+    
+    Args:
+        data_dir: Directory containing metadata files
+        
+    Returns:
+        Merged metadata dictionary with all runs from all processes, or None if no metadata found
+    """
+    if not os.path.exists(data_dir):
+        return None
+    
+    # Find all per-process metadata files
+    per_process_pattern = os.path.join(data_dir, "data_generation_metadata_*.json")
+    per_process_files = glob.glob(per_process_pattern)
+    
+    if not per_process_files:
+        return None
+    
+    all_runs = []
+    all_test_cases = set()
+    data_modes = set()
+    
+    # Read per-process metadata files
+    for metadata_file in per_process_files:
+        try:
+            with open(metadata_file, 'r') as f:
+                process_metadata = json.load(f)
+            
+            # Extract runs from this process
+            if 'runs' in process_metadata and isinstance(process_metadata['runs'], list):
+                all_runs.extend(process_metadata['runs'])
+            else:
+                # Should not happen with new format, but handle gracefully
+                continue
+            
+            # Collect test cases from runs
+            for run in process_metadata.get('runs', []):
+                if isinstance(run, dict) and 'test_cases' in run:
+                    if isinstance(run['test_cases'], list):
+                        all_test_cases.update(run['test_cases'])
+                    else:
+                        all_test_cases.add(run['test_cases'])
+            
+            # Also check top-level test_cases (summary)
+            if 'test_cases' in process_metadata:
+                if isinstance(process_metadata['test_cases'], list):
+                    all_test_cases.update(process_metadata['test_cases'])
+            
+            # Collect data modes
+            if 'data_mode' in process_metadata:
+                data_modes.add(process_metadata['data_mode'])
+                
+        except Exception:
+            # Skip corrupted files
+            continue
+    
+    # Build merged metadata
+    if all_runs:
+        merged_metadata = {
+            'runs': all_runs,
+            'test_cases': sorted(list(all_test_cases)),
+            'data_mode': list(data_modes)[0] if len(data_modes) == 1 else 'mixed',
+            'last_update': datetime.now().isoformat(),
+            'num_processes': len(per_process_files)
+        }
+        return merged_metadata
+    else:
+        return None
+
+def find_latest_timestamp(data_dir: str, case_name: str = None) -> str:
     """
     Find the latest timestamp from existing data files.
+    
+    Args:
+        data_dir: Directory to search for data files
+        case_name: Optional case name filter (e.g., "case33") to find timestamp for specific bus system
     
     Returns:
         Latest timestamp string found in filenames, or None if no timestamped files exist
@@ -33,7 +111,11 @@ def find_latest_timestamp(data_dir: str) -> str:
     timestamps = set()
     
     for file in os.listdir(data_dir):
-        if file.endswith(('.npy', '.txt')):
+        if file.endswith(('.npy', '.txt', '.json')):
+            # Filter by case name if provided (for per-bus-system timestamp detection)
+            if case_name and not file.startswith(case_name):
+                continue
+                
             match = re.search(timestamp_pattern, file)
             if match:
                 timestamps.add(match.group(1))
@@ -61,26 +143,28 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
     missing_files = []
     data_dir = config.DATA_DIR  # Use mode-specific directory from config
     
-    # First, try to find the latest timestamp from existing files
-    latest_timestamp = find_latest_timestamp(data_dir)
+    # Check for per-process metadata files
+    per_process_pattern = os.path.join(data_dir, "data_generation_metadata_*.json")
+    has_metadata = len(glob.glob(per_process_pattern)) > 0
+    if not has_metadata:
+        missing_files.append("data_generation_metadata_*.json")
     
     for num_buses in bus_systems:
         case_name = f"case{num_buses}"
+        
+        # Find the latest timestamp for THIS specific bus system
+        # This allows each bus system to have its own timestamp (generated at different times)
+        latest_timestamp = find_latest_timestamp(data_dir, case_name)
+        
         for frac in renewable_fractions:
             # NEW FORMAT: Topology caching system requires base_adjacency and topology_ids
-            # OLD FORMAT: adjacency.npy (no longer generated, but checked for backward compatibility)
             required_file_types = [
                 "features.npy",
                 "targets.npy", 
                 "base_adjacency.npy",  # NEW: Single base adjacency matrix
                 "topology_ids.npy",    # NEW: Topology ID for each timestep
-                "time_carbon_coeffs.txt"
-                # Note: Generation components are now included in features/targets matrices
-            ]
-            
-            # Legacy format check (for backward compatibility detection)
-            legacy_file_types = [
-                "adjacency.npy"  # Old format - if this exists but new format doesn't, trigger regeneration
+                "time_carbon_coeffs.txt",
+                "detailed_metrics.csv"
             ]
             
             # Add Ybus files - check for sparse format
@@ -88,7 +172,7 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
                 "ybus_base.npy",
                 "ybus_contingency_timesteps.npy",
                 "ybus_contingency_matrices.npy",
-                "data_quality_audit.json"  # New professional format (legacy convergence_report.json also accepted)
+                "data_quality_audit.json"
             ]
             
             # OPF: Check for bus_types file (new structure)
@@ -96,10 +180,7 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
                 "bus_types.npy"  # OPF: bus type codes [0=PQ, 1=PV, 2=Slack]
             ]
             
-            # Try sparse format first
-            dense_ybus_type = "ybus_matrices.npy"
-            
-            # Check common files (features, targets, etc.) - NEW FORMAT REQUIRED
+            # Check common files (features, targets, etc.)
             for file_type in required_file_types:
                 found = False
                 
@@ -122,41 +203,7 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
                 if not found:
                     missing_files.append(f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}.{file_type.split('.')[1]}")
             
-            # Check for legacy adjacency format - if it exists but new format doesn't, trigger regeneration
-            legacy_adjacency_found = False
-            for file_type in legacy_file_types:
-                if latest_timestamp:
-                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
-                    filename = base_name + '.' + file_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        legacy_adjacency_found = True
-                        break
-                
-                if not legacy_adjacency_found:
-                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}"
-                    filename = base_name + '.' + file_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        legacy_adjacency_found = True
-                        break
-            
-            # If legacy format exists but new format is missing, mark as missing (triggers regeneration)
-            if legacy_adjacency_found:
-                new_format_exists = False
-                # Check if base_adjacency exists
-                if latest_timestamp:
-                    base_adj_path = os.path.join(data_dir, f"{case_name}_base_adjacency_frac{frac:.1f}_{latest_timestamp}.npy")
-                    if os.path.exists(base_adj_path):
-                        new_format_exists = True
-                if not new_format_exists:
-                    base_adj_path = os.path.join(data_dir, f"{case_name}_base_adjacency_frac{frac:.1f}.npy")
-                    if os.path.exists(base_adj_path):
-                        new_format_exists = True
-                
-                if not new_format_exists:
-                    missing_files.append(f"{case_name}_base_adjacency_frac{frac:.1f}.npy (LEGACY FORMAT DETECTED - regeneration required)")
-                    missing_files.append(f"{case_name}_topology_ids_frac{frac:.1f}.npy (LEGACY FORMAT DETECTED - regeneration required)")
+
             
             # Check OPF files (bus_types) - required for new OPF structure
             for file_type in opf_files:
@@ -185,53 +232,20 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
             for ybus_type in sparse_ybus_types:
                 found = False
                 
-                # Special handling for data_quality_audit.json - also accept legacy convergence_report.json
-                if ybus_type == "data_quality_audit.json":
-                    # Try new format first
-                    if latest_timestamp:
-                        base_name = f"{case_name}_data_quality_audit_frac{frac:.1f}_{latest_timestamp}"
-                        filename = base_name + '.json'
-                        filepath = os.path.join(data_dir, filename)
-                        if os.path.exists(filepath):
-                            found = True
-                    
-                    if not found:
-                        base_name = f"{case_name}_data_quality_audit_frac{frac:.1f}"
-                        filename = base_name + '.json'
-                        filepath = os.path.join(data_dir, filename)
-                        if os.path.exists(filepath):
-                            found = True
-                    
-                    # Fallback to legacy convergence_report.json
-                    if not found:
-                        if latest_timestamp:
-                            base_name = f"{case_name}_convergence_report_frac{frac:.1f}_{latest_timestamp}"
-                            filename = base_name + '.json'
-                            filepath = os.path.join(data_dir, filename)
-                            if os.path.exists(filepath):
-                                found = True
-                        
-                        if not found:
-                            base_name = f"{case_name}_convergence_report_frac{frac:.1f}"
-                            filename = base_name + '.json'
-                            filepath = os.path.join(data_dir, filename)
-                            if os.path.exists(filepath):
-                                found = True
-                else:
-                    # Normal file checking
-                    if latest_timestamp:
-                        base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
-                        filename = base_name + '.' + ybus_type.split('.')[1]
-                        filepath = os.path.join(data_dir, filename)
-                        if os.path.exists(filepath):
-                            found = True
-                    
-                    if not found:
-                        base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}"
-                        filename = base_name + '.' + ybus_type.split('.')[1]
-                        filepath = os.path.join(data_dir, filename)
-                        if os.path.exists(filepath):
-                            found = True
+                # Normal file checking
+                if latest_timestamp:
+                    base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
+                    filename = base_name + '.' + ybus_type.split('.')[1]
+                    filepath = os.path.join(data_dir, filename)
+                    if os.path.exists(filepath):
+                        found = True
+                
+                if not found:
+                    base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}"
+                    filename = base_name + '.' + ybus_type.split('.')[1]
+                    filepath = os.path.join(data_dir, filename)
+                    if os.path.exists(filepath):
+                        found = True
                 
                 if not found:
                     # Sparse file missing - add to missing list
@@ -259,32 +273,38 @@ def check_data_consistency(config) -> Tuple[bool, str]:
     if not os.path.exists(data_dir):
         return True, "Data directory does not exist yet"
     
-    # Check for metadata file (new system)
-    metadata_file = os.path.join(data_dir, "data_generation_metadata.json")
-    if os.path.exists(metadata_file):
+    # Check for metadata files (new per-process system or legacy single file)
+    # Merge all per-process metadata files for parallel execution support
+    metadata = merge_metadata_files(data_dir)
+    
+    if metadata:
         try:
-            with open(metadata_file, 'r') as f:
-                metadata = json.load(f)
+            
+            # Check if metadata has 'runs' array (from parallel execution)
+            if 'runs' in metadata and isinstance(metadata['runs'], list) and len(metadata['runs']) > 0:
+                # Use the first run for basic validation (all runs should have same mode/timesteps)
+                first_run = metadata['runs'][0]
+                stored_mode = first_run.get('generation_mode', 'time_series')
+                stored_data_mode = first_run.get('data_mode', 'unknown')
+                stored_timesteps = first_run.get('timesteps', 0)
+            else:
+                # Legacy format
+                stored_mode = metadata.get('generation_mode', 'time_series')
+                stored_data_mode = metadata.get('data_mode', 'unknown')
+                stored_timesteps = metadata.get('timesteps', 0)
             
             # Check generation mode (should always be time-series)
-            stored_mode = metadata.get('generation_mode', 'time_series')
-            
             if stored_mode != 'time_series':
                 return False, f"Data generation mode mismatch: existing={stored_mode}, expected=time_series. Regeneration needed."
             
             # Check data mode (train vs test)
-            stored_data_mode = metadata.get('data_mode', 'unknown')
             if stored_data_mode != config.DATA_MODE:
                 return False, f"Data mode mismatch: existing={stored_data_mode}, config={config.DATA_MODE}. Regeneration needed."
             
             # Check timesteps
             expected_timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
-            stored_timesteps = metadata.get('timesteps', 0)
             if stored_timesteps != expected_timesteps:
                 return False, f"Data generated with {stored_timesteps} timesteps, but config requires {expected_timesteps}. Regeneration needed."
-            
-            # Check timestamp
-            timestamp = metadata.get('timestamp', 'unknown')
             
             return True, f"Data consistent ({stored_mode} mode, {stored_timesteps} timesteps, {stored_data_mode})"
             
@@ -401,33 +421,41 @@ def monitor_data_generation_progress_per_system(config, stop_event, bus_systems=
     files_per_bus = scenarios_per_bus * files_per_scenario  # 54 files per bus system
     total_expected_files = files_per_bus * len(bus_systems)  # Calculate based on actual bus systems being generated
     
-    # Find the current timestamp being generated
+    # Build case name patterns for the bus systems we're tracking
+    case_patterns = [f"case{bus}" for bus in bus_systems]
+    
+    # Find the current timestamp being generated (only for our bus systems)
     def get_current_timestamp():
-        """Get the most recent timestamp from existing files"""
+        """Get the most recent timestamp from existing files for tracked bus systems"""
         if not os.path.exists(data_dir):
             return None
         timestamp_pattern = r"_(\d{8}_\d{6})"
         timestamps = set()
         try:
             for file in os.listdir(data_dir):
-                if file.endswith(('.npy', '.txt', '.json')):
-                    match = re.search(timestamp_pattern, file)
-                    if match:
-                        timestamps.add(match.group(1))
+                # Only check files for the bus systems we're tracking
+                if any(file.startswith(case_pattern + '_') for case_pattern in case_patterns):
+                    if file.endswith(('.npy', '.txt', '.json', '.csv')):
+                        match = re.search(timestamp_pattern, file)
+                        if match:
+                            timestamps.add(match.group(1))
             return max(timestamps) if timestamps else None
         except (OSError, PermissionError):
             return None
     
     current_timestamp = None
     last_count = 0
+    last_file_sizes = {}  # Track file sizes to detect when files are being written
     max_wait_for_first_file = 30  # Maximum 30 seconds to wait for first file
     wait_elapsed = 0
+    no_progress_count = 0  # Count consecutive checks with no progress
     
     # Create tqdm progress bar
+    bus_desc = f"case{','.join(map(str, bus_systems))}" if len(bus_systems) <= 2 else f"{len(bus_systems)} systems"
     pbar = tqdm(
         initial=0,
         total=total_expected_files,
-        desc="Generating data",
+        desc=f"Generating data ({bus_desc})",
         bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} files",
         leave=True,
         unit="file",
@@ -443,22 +471,54 @@ def monitor_data_generation_progress_per_system(config, stop_event, bus_systems=
                     # Still waiting for first file
                     wait_elapsed += 0.5
                     if wait_elapsed > max_wait_for_first_file:
-                        pbar.set_description("Waiting for data generation to start...")
+                        pbar.set_description(f"Waiting for data generation to start ({bus_desc})...")
                         time.sleep(0.5)
                         continue
                     time.sleep(0.5)
                     continue
                 else:
                     # Found timestamp - start tracking
-                    pbar.set_description(f"Generating data (timestamp: {current_timestamp[:8]})")
+                    pbar.set_description(f"Generating data ({bus_desc}, timestamp: {current_timestamp[:8]})")
             
-            # Count all files from current timestamp
+            # Count files ONLY for the bus systems we're tracking
+            # Use a more robust method: list directory and filter, rather than glob
             try:
-                pattern = os.path.join(data_dir, f"case*_*_{current_timestamp}.*")
-                existing_files = glob.glob(pattern)
-                current_count = len(existing_files)
-            except (OSError, PermissionError):
-                # Filesystem still syncing - wait a bit
+                current_count = 0
+                if os.path.exists(data_dir):
+                    # List all files in directory and filter manually for better reliability
+                    try:
+                        all_files = os.listdir(data_dir)
+                    except (OSError, PermissionError):
+                        time.sleep(0.2)
+                        continue
+                    
+                    # Filter files that match our patterns
+                    # Use a set to track which files we've seen to avoid double-counting
+                    seen_files = set()
+                    for filename in all_files:
+                        # Check if file belongs to one of our tracked bus systems
+                        if not any(filename.startswith(case_pattern + '_') for case_pattern in case_patterns):
+                            continue
+                        
+                        # Check if file has the current timestamp
+                        if current_timestamp and current_timestamp in filename:
+                            # Check if it's a data file (not metadata)
+                            if filename.endswith(('.npy', '.txt', '.json', '.csv')):
+                                # Exclude metadata files
+                                if 'data_generation_metadata' not in filename:
+                                    # Verify file exists and has content
+                                    filepath = os.path.join(data_dir, filename)
+                                    try:
+                                        if os.path.isfile(filepath) and os.path.getsize(filepath) > 0:
+                                            # Count each file only once
+                                            if filename not in seen_files:
+                                                current_count += 1
+                                                seen_files.add(filename)
+                                    except (OSError, PermissionError):
+                                        # File might be locked or being written - skip for now
+                                        pass
+            except Exception as e:
+                # Any other error - wait a bit and continue
                 time.sleep(0.2)
                 continue
             
@@ -467,24 +527,79 @@ def monitor_data_generation_progress_per_system(config, stop_event, bus_systems=
                 delta = current_count - last_count
                 pbar.update(delta)
                 last_count = current_count
+                no_progress_count = 0  # Reset no-progress counter
                 pbar.refresh()  # Force refresh display
+            elif current_count == last_count and current_count < total_expected_files:
+                # No new files, but we're not done
+                no_progress_count += 1
+                # After 5 seconds of no progress, show a hint that computation is happening
+                if no_progress_count == 50:  # 50 checks * 0.1s = 5 seconds
+                    pbar.set_description(f"Generating data ({bus_desc}, computing...)")
+                    pbar.refresh()
             
             # Check if we're done
             if current_count >= total_expected_files:
                 pbar.update(total_expected_files - pbar.n)  # Complete the bar
-                pbar.set_description("Data generation complete")
+                pbar.set_description(f"Data generation complete ({bus_desc})")
                 pbar.close()
                 return
             
-            time.sleep(0.2)  # Check every 0.2 seconds
+            time.sleep(0.1)  # Check more frequently (every 0.1 seconds) for smoother updates
+        
+        # If we exit the loop (stop_event was set), do a final check
+        # The subprocess may have completed but files might still be flushing
+        if stop_event.is_set() and current_timestamp:
+            # Do more thorough final checks to catch any remaining files
+            for final_check in range(10):  # Check 10 more times (1 second total)
+                time.sleep(0.1)
+                try:
+                    final_count = 0
+                    if os.path.exists(data_dir):
+                        try:
+                            all_files = os.listdir(data_dir)
+                        except (OSError, PermissionError):
+                            continue
+                        
+                        for filename in all_files:
+                            if not any(filename.startswith(case_pattern + '_') for case_pattern in case_patterns):
+                                continue
+                            if current_timestamp in filename:
+                                if filename.endswith(('.npy', '.txt', '.json', '.csv')):
+                                    if 'data_generation_metadata' not in filename:
+                                        filepath = os.path.join(data_dir, filename)
+                                        try:
+                                            if os.path.isfile(filepath) and os.path.getsize(filepath) > 0:
+                                                final_count += 1
+                                        except (OSError, PermissionError):
+                                            pass
+                    
+                    if final_count > current_count:
+                        delta = final_count - current_count
+                        pbar.update(delta)
+                        current_count = final_count
+                        pbar.refresh()
+                    
+                    if final_count >= total_expected_files:
+                        break
+                except Exception:
+                    continue
+            
+            # Final update to ensure bar is complete
+            if current_count < total_expected_files:
+                # Update to actual count (might be less if generation failed, or more if we miscounted)
+                pbar.update(max(0, total_expected_files - pbar.n))
             
     except KeyboardInterrupt:
         pbar.set_description("Interrupted")
         pbar.close()
         raise
     finally:
-        # Ensure progress bar is closed
+        # Ensure progress bar is closed and completed
         if pbar is not None and not pbar.disable:
+            # Update to 100% if not already there
+            if pbar.n < total_expected_files:
+                pbar.update(total_expected_files - pbar.n)
+            pbar.set_description(f"Data generation complete ({bus_desc})")
             pbar.close()
 
 def clean_existing_data(config, aggressive=True):
@@ -611,17 +726,17 @@ def validate_bus_system_data(config, bus_system: int) -> Tuple[bool, str, Dict]:
         return False, f"Missing {len(missing_files)} files for {case_name}", details
     
     # Check metadata for configuration consistency
-    metadata_file = os.path.join(data_dir, "data_generation_metadata.json")
-    if os.path.exists(metadata_file):
+    # Merge all per-process metadata files for parallel execution support
+    metadata = merge_metadata_files(data_dir)
+    
+    if metadata:
         try:
-            with open(metadata_file, 'r') as f:
-                metadata = json.load(f)
             
             # Check if metadata has 'runs' array (from parallel execution)
             if 'runs' in metadata and isinstance(metadata['runs'], list):
-                # Find the run that includes this bus system
+                # Find the run that includes this bus system (search in reverse to find latest)
                 relevant_run = None
-                for run in metadata['runs']:
+                for run in reversed(metadata['runs']):
                     if case_name in run.get('test_cases', []):
                         relevant_run = run
                         break
@@ -868,9 +983,13 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
                 text=True
             )
             
-            # Stop monitoring thread
+            # Stop monitoring thread and wait for it to finish
             stop_event.set()
-            monitor_thread.join(timeout=5)
+            # Give it more time to complete the progress bar update
+            monitor_thread.join(timeout=10)
+            
+            # Small delay to ensure progress bar is fully updated
+            time.sleep(0.3)
             
             if result.returncode != 0:
                 print(f"\n✗ Error: Data generation failed for case{bus_system} (exit code {result.returncode})")
@@ -898,6 +1017,62 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
             print(f"\n{'='*80}")
             print("✓ All data validation passed - Ready for training")
             print(f"{'='*80}\n")
+            
+            # Generate plots for the regenerated bus systems
+            try:
+                print(f"\n{'='*80}")
+                print("GENERATING DATA VISUALIZATION PLOTS")
+                print(f"{'='*80}")
+                
+                from data.plot_consolidator import generate_all_data_plots
+                
+                # Determine plots directory based on mode
+                data_dir = config.DATA_DIR
+                data_root = os.path.dirname(data_dir)  # e.g., 'data' folder
+                plots_dir = os.path.join(data_root, f'plots_{config.DATA_MODE}')
+                
+                # Clean up old plots for the bus systems that were regenerated
+                if os.path.exists(plots_dir):
+                    print(f"Cleaning up old plots for regenerated systems in {plots_dir}...")
+                    for bus_system in systems_need_regeneration:
+                        case_name = f"case{bus_system}"
+                        # Find and delete old plot files for this case
+                        plot_patterns = [
+                            f'data_profile_*{bus_system}bus.png',
+                            f'convergence_*{bus_system}bus.png',
+                            f'physics_health_*{bus_system}bus.png',
+                        ]
+                        for pattern in plot_patterns:
+                            for old_plot in glob.glob(os.path.join(plots_dir, pattern)):
+                                try:
+                                    os.remove(old_plot)
+                                except Exception:
+                                    pass
+                
+                os.makedirs(plots_dir, exist_ok=True)
+                
+                if systems_need_regeneration:
+                    print(f"Generating plots for bus systems: {systems_need_regeneration}")
+                    print(f"Plots directory: {plots_dir}\n")
+                    
+                    # Generate plots with progress bar
+                    plot_paths = generate_all_data_plots(
+                        config=config,
+                        bus_systems=systems_need_regeneration,
+                        data_plots_dir=plots_dir
+                    )
+                    
+                    # Print summary
+                    total_plots = sum(len([p for p in plots.values() if p]) for plots in plot_paths.values())
+                    print(f"\n[Plots] Successfully generated {total_plots} plots")
+                    for bus_num, plots in plot_paths.items():
+                        successful = len([p for p in plots.values() if p])
+                        print(f"  {bus_num}-bus: {successful} plots")
+                
+            except Exception as e:
+                # Don't fail if plotting fails - it's not critical
+                print(f"\nWarning: Could not generate plots (non-critical): {e}")
+            
             return True
         else:
             print(f"\n{'='*80}")
@@ -941,6 +1116,14 @@ def display_data_generation_summary(config, bus_systems_to_show=None):
     
     for num_buses in bus_systems:
         case_name = f"case{num_buses}"
+        
+        # Find latest timestamp specifically for THIS bus system
+        latest_timestamp = find_latest_timestamp(data_dir, case_name)
+        
+        if not latest_timestamp:
+            # If no timestamp found for this case, skip silently (or print warning?)
+            continue
+            
         renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
         
         for frac in renewable_fractions:

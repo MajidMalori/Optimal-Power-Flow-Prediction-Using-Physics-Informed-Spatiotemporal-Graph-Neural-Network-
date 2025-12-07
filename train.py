@@ -293,13 +293,16 @@ def main():
         yaml_config_path=args.config,
         load_yaml=True,
         data_mode=data_mode_to_use,
-        save_results=True,  # Default, will be overridden by YAML if present
         train_timesteps=args.time_steps,  # None if not provided, Config will read from YAML
         test_timesteps=args.time_steps,   # None if not provided, Config will read from YAML
         clear_results=False,  # Default, will be overridden by YAML if present
         hours_per_day=24,  # Standard value
         sequence_length=5   # Standard value
     )
+    
+    # Explicitly create run directories for training
+    base_config.create_run_directories()
+    
     _config_instance = base_config  # Store for signal handler
     
     # Parse bus systems to test (from Config, not Args)
@@ -385,7 +388,7 @@ def main():
     # Store Config attributes for later use (replaces args object)
     # Use instance values (YAML has been loaded by now)
     _config_attrs = {
-        'save_results': base_config.SAVE_RESULTS,
+
         'clear_results': getattr(Config, 'clear_results', False),
     }
     clear_gpu_memory()
@@ -865,16 +868,16 @@ def main():
                     mse_df.to_csv(mse_detailed_path, index=False)
                 
                 # Save comprehensive results
-                if base_config.SAVE_RESULTS:
-                    try:
-                        save_results(
-                            metrics=moopf_results,
-                            results_df=renewable_impact_data,
-                            config=base_config,
-                            output_dir=model_output_dir
-                        )
-                    except Exception as e:
-                        print(f"[{model_name}] Warning: Could not save results: {e}")
+                # Save comprehensive results
+                try:
+                    save_results(
+                        metrics=moopf_results,
+                        results_df=renewable_impact_data,
+                        config=base_config,
+                        output_dir=model_output_dir
+                    )
+                except Exception as e:
+                    print(f"[{model_name}] Warning: Could not save results: {e}")
                 print()  # Add space between MOOPF bar and plot generation bar
             else:
                 # Non-physics models: skip MOOPF evaluation
@@ -883,7 +886,7 @@ def main():
                 print(f"[{model_name}] Non-physics model - skipping MOOPF evaluation")
             
             # Generate all plots with single progress bar (for all models)
-            if base_config.SAVE_RESULTS:
+            if True: # Always save results
                 try:
                     # Get predictions with uncertainty data for visualization
                     _, uncertainty_data = evaluate_model_with_uncertainty(
@@ -1063,7 +1066,7 @@ def main():
             
             clear_gpu_memory()
         
-        if base_config.SAVE_RESULTS:
+        if True: # Always save results
             print(f"\n Generating plots for {num_buses}-bus...")
             
             # Import comparative visualization functions

@@ -104,12 +104,12 @@ experimental:
   
   bus_systems: [33, 57, 118]
   data_mode: "train"
-  train_timesteps: 10008  # 417 days
-  test_timesteps: 240  # 10 days
+  train_timesteps: 10  # 417 days
+  test_timesteps: 12 
   force_cpu: false
   parallel_data_loading: true
   data_workers: "auto"  # Data loading workers: Auto-detect based on system (CPU cores, RAM, GPU, OS). Set to integer to override. This is the ONLY worker configuration (system.num_workers is deprecated).
-  save_results: true
+
   clear_results: false
 
 # --- Debug Configuration ---

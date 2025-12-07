@@ -9,6 +9,7 @@ import time
 import shutil
 import tempfile
 import random
+import glob
 import argparse
 import yaml
 from datetime import datetime
@@ -106,7 +107,6 @@ try:
         data_mode=data_mode_to_use,
         train_timesteps=train_timesteps, 
         test_timesteps=test_timesteps,
-        save_results=True
     )
 except Exception as e:
     print(f"Error loading configuration: {e}")
@@ -349,7 +349,25 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         
     iterator = range(time_steps)
     if not disable_pbar:
-        iterator = tqdm(range(time_steps), desc=f"Generating {case_name} ({renewable_fraction*100:.0f}%)", unit="step")
+        # Initialize progress bar with immediate updates
+        # miniters=1: update after every iteration (no batching)
+        # mininterval=0.1: update at least every 0.1 seconds for smooth display
+        # smoothing=0: disable exponential smoothing for more responsive updates
+        iterator = tqdm(
+            range(time_steps), 
+            desc=f"Generating {case_name} ({renewable_fraction*100:.0f}%)", 
+            unit="step",
+            miniters=1,
+            mininterval=0.1,
+            smoothing=0,
+            initial=0
+        )
+        # Force an immediate display update to show the bar is active
+        # This ensures the bar appears even before the first iteration completes
+        iterator.refresh()
+        # Small update to show initialization is happening
+        iterator.set_postfix_str("Initializing...")
+        iterator.refresh()
     
     # ============================================================================
     # MAIN TIME-SERIES SIMULATION LOOP
@@ -363,6 +381,11 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
     # ============================================================================
     
     for t in iterator:
+        # Clear initialization message once we start processing
+        if t == 0 and not disable_pbar:
+            iterator.set_postfix_str("")
+            iterator.refresh()
+        
         restore_contingency(net, dropped_line_idx)
         dropped_line_idx = None
         has_contingency = False
@@ -1071,6 +1094,37 @@ if __name__ == "__main__":
                     if filename.startswith(save_case_name + '_'):
                         files_to_delete.append(os.path.join(output_path, filename))
             
+            # Also clean up old per-process metadata files for these bus systems
+            # We'll regenerate metadata, so old ones should be removed
+            metadata_pattern = os.path.join(output_path, "data_generation_metadata_*.json")
+            for metadata_file in glob.glob(metadata_pattern):
+                try:
+                    # Read metadata to check if it's for the bus systems we're regenerating
+                    with open(metadata_file, 'r') as f:
+                        metadata = json.load(f)
+                    
+                    # Check if this metadata file contains any of the cases we're regenerating
+                    metadata_cases = set()
+                    if 'runs' in metadata and isinstance(metadata['runs'], list):
+                        for run in metadata['runs']:
+                            if 'test_cases' in run:
+                                if isinstance(run['test_cases'], list):
+                                    metadata_cases.update(run['test_cases'])
+                                else:
+                                    metadata_cases.add(run['test_cases'])
+                    elif 'test_cases' in metadata:
+                        if isinstance(metadata['test_cases'], list):
+                            metadata_cases.update(metadata['test_cases'])
+                        else:
+                            metadata_cases.add(metadata['test_cases'])
+                    
+                    # If this metadata file is for any case we're regenerating, delete it
+                    if any(case in metadata_cases for case in cases_to_run):
+                        files_to_delete.append(metadata_file)
+                except Exception:
+                    # If we can't read it, delete it anyway (corrupted or old format)
+                    files_to_delete.append(metadata_file)
+            
             if files_to_delete:
                 print(f"\n[Auto-Cleanup] Deleting old data files for {cases_to_run} in {output_path}...")
                 for filepath in files_to_delete:
@@ -1144,10 +1198,12 @@ if __name__ == "__main__":
             print(f"\nSkipping to the next test case.")
             continue
     
+    # Save metadata after all data generation is complete
     try:
         # Use the configured output directory (respects CLI args and mode)
         output_path = CONFIG['output_dir']
         
+        # Ensure output directory exists
         os.makedirs(output_path, exist_ok=True)
         
         # Always time-series mode
@@ -1156,7 +1212,8 @@ if __name__ == "__main__":
         try:
             from utils.data_validation import compute_config_hash
             config_hash = compute_config_hash(config_instance)
-        except:
+        except Exception as e:
+            print(f"Warning: Could not compute config hash: {e}")
             config_hash = None
         
         metadata_entry = {
@@ -1171,76 +1228,118 @@ if __name__ == "__main__":
             'config_hash': config_hash  # Store config hash for validation
         }
         
-        # Use atomic write for metadata to support parallel execution
-        # Write to a temporary file first, then rename (atomic on most filesystems)
-        metadata_file = os.path.join(output_path, "data_generation_metadata.json")
-        temp_metadata_file = metadata_file + f".tmp_{os.getpid()}"
+        # PER-PROCESS METADATA APPROACH (Lock-free, race-condition free)
+        # Each process writes to its own metadata file, eliminating race conditions
+        # Files are merged on read by validation code
+        process_id = os.getpid()
+        per_process_metadata_file = os.path.join(output_path, f"data_generation_metadata_{process_id}_{generation_timestamp}.json")
         
-        # Try to load existing metadata if it exists (for merging)
-        existing_metadata = None
-        if os.path.exists(metadata_file):
-            try:
-                with open(metadata_file, 'r') as f:
-                    existing_metadata = json.load(f)
-            except Exception:
-                # If we can't read it, another process might be writing - that's okay
-                pass
+        # # Debug: Print metadata file path
+        # print(f"\n[Metadata] Preparing to save metadata to: {per_process_metadata_file}")
+        # print(f"[Metadata] Output directory exists: {os.path.exists(output_path)}")
+        # print(f"[Metadata] Output directory: {output_path}")
         
-        # Merge metadata if it exists (for parallel execution)
-        if existing_metadata and isinstance(existing_metadata, dict):
-            # If existing metadata has 'runs' list, append to it
-            if 'runs' not in existing_metadata:
-                # Convert single metadata dict to runs list format
-                existing_metadata = {'runs': [existing_metadata]}
+        # Create metadata entry for this process
+        metadata_to_write = {
+            'runs': [metadata_entry],
+            'test_cases': cases_to_run,
+            'data_mode': data_mode,
+            'process_id': process_id,
+            'timestamp': generation_timestamp,
+            'last_update': datetime.now().isoformat()
+        }
+        
+        # Write per-process metadata file (no race condition - each process has unique filename)
+        try:
+            with open(per_process_metadata_file, 'w') as f:
+                json.dump(metadata_to_write, f, indent=2)
             
-            # metadata_entry is always a single dict (never has 'runs' key)
-            # Append it to the runs list
-            existing_metadata['runs'].append(metadata_entry)
-            
-            # Also keep a summary
-            all_cases = set(existing_metadata.get('test_cases', []))
-            all_cases.update(cases_to_run)
-            existing_metadata['test_cases'] = sorted(list(all_cases))
-            existing_metadata['last_update'] = datetime.now().isoformat()
-            metadata_to_write = existing_metadata
-        else:
-            # First run or couldn't read existing - create new structure
-            metadata_to_write = {
-                'runs': [metadata_entry],
-                'test_cases': cases_to_run,
-                'data_mode': data_mode,
-                'last_update': datetime.now().isoformat()
-            }
+            # Verify the file was actually written
+            if os.path.exists(per_process_metadata_file) and os.path.getsize(per_process_metadata_file) > 0:
+                print(f"\n[Metadata] Successfully saved generation metadata to: {per_process_metadata_file}")
+            else:
+                print(f"ERROR: Metadata file was not created or is empty: {per_process_metadata_file}")
+        except Exception as e:
+            print(f"ERROR: Could not save per-process metadata file: {e}")
+            traceback.print_exc()
         
-        # Atomic write: write to temp file, then rename
-        with open(temp_metadata_file, 'w') as f:
-            json.dump(metadata_to_write, f, indent=2)
-        
-        # Retry logic for atomic rename (in case another process is also writing)
-        max_retries = 5
-        for retry in range(max_retries):
-            try:
-                if os.path.exists(metadata_file):
-                    # On Windows, we need to remove the old file first
-                    if os.name == 'nt':
-                        os.remove(metadata_file)
-                os.rename(temp_metadata_file, metadata_file)
-                break
-            except (OSError, PermissionError) as e:
-                if retry < max_retries - 1:
-                    time.sleep(0.1 * (retry + 1))  # Exponential backoff
-                else:
-                    # Last retry failed - try to clean up temp file
-                    try:
-                        if os.path.exists(temp_metadata_file):
-                            os.remove(temp_metadata_file)
-                    except:
-                        pass
-                    print(f"Warning: Could not atomically update metadata file (non-critical): {e}")
-        
-       # print(f"\n[Metadata] Saved generation metadata to: {metadata_file}")
     except Exception as e:
         # Don't fail the entire process if metadata write fails - it's not critical
-        print(f"Warning: Could not save metadata file (non-critical): {e}")
+        print(f"ERROR: Could not save metadata file: {e}")
+        traceback.print_exc()
+    
+    # ============================================================================
+    # AUTOMATIC PLOT GENERATION
+    # ============================================================================
+    # Generate plots for the bus systems that were just generated
+    # This respects the same bus systems and mode as data generation
+    try:
+        print("\n" + "="*80)
+        print("GENERATING DATA VISUALIZATION PLOTS")
+        print("="*80)
+        
+        # Import plotting function
+        from data.plot_consolidator import generate_all_data_plots
+        
+        # Determine plots directory based on mode
+        data_root = os.path.dirname(output_path)  # e.g., 'data' folder
+        plots_dir = os.path.join(data_root, f'plots_{data_mode}')
+        
+        # Clean up old plots for the bus systems being regenerated
+        if os.path.exists(plots_dir):
+            print(f"Cleaning up old plots for {cases_to_run} in {plots_dir}...")
+            for case in cases_to_run:
+                save_case_name = case.replace('bw', '')
+                # Find and delete old plot files for this case
+                plot_patterns = [
+                    f'data_profile_*{save_case_name.replace("case", "")}bus.png',
+                    f'convergence_*{save_case_name.replace("case", "")}bus.png',
+                    f'physics_health_*{save_case_name.replace("case", "")}bus.png',
+                ]
+                for pattern in plot_patterns:
+                    for old_plot in glob.glob(os.path.join(plots_dir, pattern)):
+                        try:
+                            os.remove(old_plot)
+                        except Exception:
+                            pass
+        
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Extract bus numbers from case names (e.g., "case33" -> 33)
+        bus_numbers = []
+        for case in cases_to_run:
+            save_case_name = case.replace('bw', '')
+            # Extract number from "case33" -> 33
+            if save_case_name.startswith('case'):
+                try:
+                    bus_num = int(save_case_name.replace('case', ''))
+                    bus_numbers.append(bus_num)
+                except ValueError:
+                    pass
+        
+        if bus_numbers:
+            print(f"Generating plots for bus systems: {bus_numbers}")
+            print(f"Plots directory: {plots_dir}\n")
+            
+            # Generate plots with progress bar
+            plot_paths = generate_all_data_plots(
+                config=config_instance,
+                bus_systems=bus_numbers,
+                data_plots_dir=plots_dir
+            )
+            
+            # Print summary
+            total_plots = sum(len([p for p in plots.values() if p]) for plots in plot_paths.values())
+            print(f"\n[Plots] Successfully generated {total_plots} plots")
+            for bus_num, plots in plot_paths.items():
+                successful = len([p for p in plots.values() if p])
+                print(f"  {bus_num}-bus: {successful} plots")
+        else:
+            print("Warning: No valid bus systems found for plotting")
+            
+    except Exception as e:
+        # Don't fail the entire process if plotting fails - it's not critical
+        print(f"\nWarning: Could not generate plots (non-critical): {e}")
+        traceback.print_exc()
             
     print("\nAll data generation processes are complete.")

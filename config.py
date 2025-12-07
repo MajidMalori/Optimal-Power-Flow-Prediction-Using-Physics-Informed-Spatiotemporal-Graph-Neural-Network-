@@ -3,9 +3,12 @@ import torch
 import yaml
 import csv
 import json
+import inspect
+import shutil
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
+
 
 # FIXED: Args class has been REMOVED.
 # All experimental settings are now part of Config class and loaded from YAML.
@@ -111,7 +114,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_force_cpu': 'EXPERIMENTAL_FORCE_CPU',
         'experimental_parallel_data_loading': 'EXPERIMENTAL_PARALLEL_DATA_LOADING',
         'experimental_data_workers': 'EXPERIMENTAL_DATA_WORKERS',
-        'experimental_save_results': 'EXPERIMENTAL_SAVE_RESULTS',
         'experimental_clear_results': 'EXPERIMENTAL_CLEAR_RESULTS',
         
         # Debug configuration
@@ -156,7 +158,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_force_cpu': 'force_cpu',
         'experimental_parallel_data_loading': 'parallel_data_loading',
         'experimental_data_workers': 'data_workers',
-        'experimental_save_results': 'save_results',
         'experimental_clear_results': 'clear_results',
     }
     
@@ -581,17 +582,16 @@ class Config:
             'ResnetPIGCLSTM': self.ResnetPIGCLSTMConfig
         }
     
-    def __init__(self, data_mode='train', save_results=True, train_timesteps=None, test_timesteps=None, clear_results=False, 
+    def __init__(self, data_mode='train', train_timesteps=None, test_timesteps=None, clear_results=False, 
                  hours_per_day=24, sequence_length=5, yaml_config_path=None, load_yaml=True):
         """
-        Initializes directories and sets up experimental run structure.
+        Initializes configuration.
         
         YAML CONFIGURATION IS REQUIRED - No fallback defaults.
         If config.yaml is missing, this will raise an exception immediately.
         
         Args:
             data_mode: 'train' or 'test'
-            save_results: Whether to save results to files
             train_timesteps: Number of timesteps for train mode
             test_timesteps: Number of timesteps for test mode
             clear_results: Whether to clear experimental_results folder before running
@@ -631,19 +631,12 @@ class Config:
                 "Set load_yaml=True and ensure config.yaml exists."
             )
         
-        # Set save_results flag - YAML overrides function argument
-        if hasattr(Config, 'save_results'):
-            self.SAVE_RESULTS = Config.save_results
-        else:
-            self.SAVE_RESULTS = save_results
-        
         # Set clear_results flag - YAML overrides function argument
         if hasattr(Config, 'clear_results'):
             clear_results = Config.clear_results
         
         # Clear experimental results folder if requested
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
-            import shutil
             try:
                 # print(f"\n[Clear Results] Deleting experimental_results folder...")
                 shutil.rmtree(self.EXPERIMENTAL_RESULTS_DIR)
@@ -682,7 +675,6 @@ class Config:
         
         # Detect if we're in a test environment
         # Check if the calling script is in tests/ directory or if pytest is running
-        import inspect
         frame = inspect.currentframe()
         test_mode = False
         try:
@@ -699,25 +691,28 @@ class Config:
         # Initialize timestamp only when actually starting a run (not in test mode)
         if not test_mode:
             self._initialize_run_timestamp()
-        
-        # Only create directories if saving results AND not in test mode
-        if self.SAVE_RESULTS and not test_mode:
-            # Create base directories
-            for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
-                os.makedirs(dir_path, exist_ok=True)
-            
-            # Create current run directory
-            os.makedirs(self.CURRENT_RUN_DIR, exist_ok=True)
-            
-            # Update latest run (copy current run info)
-            self._update_latest_run_link()
-            
-            # Create run metadata
-            self._create_run_metadata()
         elif test_mode:
             # In test mode, set a dummy timestamp to avoid errors
             if not hasattr(self, '_CURRENT_RUN_TIMESTAMP') or self._CURRENT_RUN_TIMESTAMP is None:
                 self._CURRENT_RUN_TIMESTAMP = 'test_mode'
+
+    def create_run_directories(self):
+        """
+        Explicitly create run directories and metadata.
+        Should ONLY be called by training scripts, not data generation.
+        """
+        # Create base directories
+        for dir_path in [self.DATA_DIR, self.EXPERIMENTAL_RESULTS_DIR]:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # Create current run directory
+        os.makedirs(self.CURRENT_RUN_DIR, exist_ok=True)
+        
+        # Update latest run (copy current run info)
+        self._update_latest_run_link()
+        
+        # Create run metadata
+        self._create_run_metadata()
     
     @staticmethod
     def get_model_class_map():
@@ -867,7 +862,6 @@ class Config:
     
     def _create_run_metadata(self):
         """Create metadata for the current run."""
-        import json
         
         metadata = {
             'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}',
@@ -898,11 +892,7 @@ class Config:
     def finalize_run(self, run_summary: dict = None):
         """Finalize the current run by updating latest_run and logging."""
         # Skip if saving is disabled
-        if not self.SAVE_RESULTS:
-            return
         
-        import json
-        import csv
         
         # No duplication - the pointer file (latest_run_info.txt) already tracks latest run
         
