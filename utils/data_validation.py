@@ -975,22 +975,25 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
         print(f"\n[Verification] Checking all systems...")
         
         all_valid = True
+        invalid_systems_list = []  # Track invalid systems from fresh validation
         for bus_system in bus_systems_to_validate:
             is_valid, reason, details = validate_bus_system_data(config, bus_system)
+            # Update validation_results with fresh validation results
+            validation_results[bus_system] = {'valid': is_valid, 'reason': reason, 'details': details}
             if is_valid:
                 print(f"  ✓ case{bus_system}: Valid")
             else:
                 print(f"  ✗ case{bus_system}: {reason.split(':')[-1].strip() if ':' in reason else reason}")
                 all_valid = False
+                invalid_systems_list.append(f"case{bus_system}")
         
         if all_valid:
             print(f"✓ All data validation passed - Ready for training")
             # Note: Plotting is handled by data/main.py after data generation completes
             return True
         else:
-            invalid_systems = [f"case{b}" for b, is_valid in [(bus, validation_results[bus]['valid']) for bus in bus_systems_to_validate] if not is_valid]
             raise RuntimeError(
-                f"Some systems still have validation issues after regeneration: {', '.join(invalid_systems)}\n"
+                f"Some systems still have validation issues after regeneration: {', '.join(invalid_systems_list)}\n"
                 f"This is a critical error - cannot proceed with training without valid data.\n"
                 f"Please investigate and fix the validation issues."
             )
