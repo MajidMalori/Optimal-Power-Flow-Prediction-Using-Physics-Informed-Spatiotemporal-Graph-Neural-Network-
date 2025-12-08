@@ -40,7 +40,7 @@ training:
   batch_size: 256
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 1
+  num_epochs: 50
   early_stopping_patience: 5
   use_learning_rate_scheduler: true
   cosine_annealing_lr:
@@ -99,7 +99,7 @@ experimental:
   # - non_physics_only: [GCN, adaptiveGCN]
   # - sequential_only: All LSTM/GRU models
   # - all: ALL 7 MODELS
-  test_config: "core"
+  test_config: "all"
   
   # Option 2: Override with specific models (precise control)
   # Examples:
@@ -108,14 +108,14 @@ experimental:
   # models_to_train: "all"  # Use test_config above (default behavior)
   models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
   
-  bus_systems: [33]
+  bus_systems: [33,57,118]
   data_mode: "train"
-  train_timesteps: 10  # 417 days
+  train_timesteps: 10008  # 417 days
   test_timesteps: 24 
   force_cpu: false
   parallel_data_loading: true
   data_workers: "auto"  # Data loading workers: Auto-detect based on system (CPU cores, RAM, GPU, OS). Set to integer to override. This is the ONLY worker configuration (system.num_workers is deprecated).
-  clear_results: true
+  clear_results: false
 
 # --- Debug Configuration ---
 debug:
