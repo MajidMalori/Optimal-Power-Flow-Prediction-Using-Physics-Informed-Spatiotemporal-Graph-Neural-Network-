@@ -451,6 +451,12 @@ def main():
 
     # === MAIN TRAINING EXECUTION ===
     for num_buses in bus_systems_to_test:
+        # Check for shutdown flag before starting each bus system
+        from utils.shutdown_flag import get_shutdown
+        if get_shutdown():
+            print("\nShutdown signal received - exiting training")
+            raise KeyboardInterrupt("Training interrupted by user")
+        
         # Get adaptive MoSOA parameters for this system size
         mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
         
@@ -496,6 +502,12 @@ def main():
             continue
 
         for model_name in bus_models_to_test:
+            # Check for shutdown flag before starting each model
+            from utils.shutdown_flag import get_shutdown
+            if get_shutdown():
+                print("\nShutdown signal received - exiting training")
+                raise KeyboardInterrupt("Training interrupted by user")
+            
             print(f"\n{'='*80}")
             print(f"  {model_name} - {num_buses}-bus system")
             print(f"{'='*80}\n")
@@ -526,6 +538,12 @@ def main():
             mosoa_runs_per_iter = mosoa_params['num_seagulls']
 
             def objective_function(params_array):
+                # Check for shutdown flag before starting each training run
+                from utils.shutdown_flag import get_shutdown
+                if get_shutdown():
+                    print("\nShutdown signal received - exiting training")
+                    raise KeyboardInterrupt("Training interrupted by user")
+                
                 params = process_optimization_params(param_keys, params_array)
 
                 run_config = copy.deepcopy(base_config)
@@ -720,6 +738,9 @@ def main():
 
                     return total_loss
                     
+                except KeyboardInterrupt:
+                    # Re-raise KeyboardInterrupt to allow proper shutdown
+                    raise
                 except Exception as e:
                     # Sanitize error message for Windows encoding compatibility
                     error_msg = str(e).replace('η', 'eta').replace('δ', 'delta').replace('σ', 'sigma').replace('λ', 'lambda')
@@ -744,6 +765,11 @@ def main():
                     objective_function._max_iter = mosoa_max_iter
                     objective_function._runs_per_iter = mosoa_runs_per_iter
                     return objective_function(params_array)
+                
+                # Check for shutdown flag before starting MoSOA
+                if get_shutdown():
+                    print("\nShutdown signal received - exiting training")
+                    raise KeyboardInterrupt("Training interrupted by user")
                 
                 best_score, best_position, history, iteration_details = mosoa_optimizer(
                     mosoa_params['num_seagulls'], 

@@ -79,12 +79,29 @@ def mosoa_optimizer(num_agents: int, max_iterations: int, lower_bound: np.ndarra
     
     # --- 2. Main Optimization Loop ---
     for l in range(max_iterations):
+        # Check for shutdown flag at the start of each iteration
+        try:
+            from utils.shutdown_flag import get_shutdown
+            if get_shutdown():
+                print("\nShutdown signal received during MoSOA optimization - exiting")
+                raise KeyboardInterrupt("Training interrupted by user")
+        except (ImportError, AttributeError):
+            pass  # If shutdown module not available, continue
+        
         # Add space before each iteration (except first) to separate from epoch progress bars
         if l > 0:
             print()
         # --- 2a. Fitness Evaluation and Global Best Update ---
         fitness_all = np.full(num_agents, np.inf)
         for i in range(num_agents):
+            # Check for shutdown flag during seagull evaluation
+            try:
+                from utils.shutdown_flag import get_shutdown
+                if get_shutdown():
+                    print("\nShutdown signal received during MoSOA optimization - exiting")
+                    raise KeyboardInterrupt("Training interrupted by user")
+            except (ImportError, AttributeError):
+                pass  # If shutdown module not available, continue
             original_pos = positions[i, :].copy()
             positions[i, :] = np.clip(positions[i, :], lower_bound, upper_bound)
             was_clipped = not np.allclose(original_pos, positions[i, :])

@@ -840,6 +840,9 @@ class Config:
         """Update the latest_run_info.txt pointer file to track current run."""
         import shutil
         
+        # Ensure EXPERIMENTAL_RESULTS_DIR exists (important when clear_results=True deleted it)
+        os.makedirs(self.EXPERIMENTAL_RESULTS_DIR, exist_ok=True)
+        
         # Clean up old duplicate directories if they exist (migration from old system)
         if os.path.exists(self.EXPERIMENTAL_RESULTS_DIR):
             try:
@@ -862,8 +865,9 @@ class Config:
                 f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\n")
                 f.write(f"Directory: {self.CURRENT_RUN_DIR}\n")
                 f.write(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        except (OSError, PermissionError):
-            pass
+        except (OSError, PermissionError) as e:
+            # Log error instead of silently failing
+            print(f"Warning: Could not create latest_run_info.txt: {e}")
     
     def _create_run_metadata(self):
         """Create metadata for the current run."""
