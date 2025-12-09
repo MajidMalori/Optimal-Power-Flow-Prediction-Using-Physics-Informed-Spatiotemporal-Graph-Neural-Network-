@@ -508,9 +508,9 @@ def main():
                 print("\nShutdown signal received - exiting training")
                 raise KeyboardInterrupt("Training interrupted by user")
             
-            print(f"\n{'='*80}")
+            print(f"\n\n{'='*80}")
             print(f"  {model_name} - {num_buses}-bus system")
-            print(f"{'='*80}\n")
+            print(f"{'='*80}")
             
             model_specific_results = []
             model_config = model_config_map[model_name]
