@@ -251,7 +251,7 @@ class PowerSystemLazyDataset(Dataset):
                 else:
                     raise IndexError(f"Contingency index {cont_local_idx} out of bounds")
             else:
-                ybus_for_item = self.ybus_base
+                ybus_for_item = self.ybus_base.clone()
         else:
             raise RuntimeError("Ybus base matrix not available")
         
@@ -288,7 +288,7 @@ class PowerSystemLazyDataset(Dataset):
         if topology_id not in self.topology_cache:
             raise KeyError(f"Topology ID {topology_id} not found in cache.")
         
-        adjacency_for_item = self.topology_cache[topology_id]
+        adjacency_for_item = self.topology_cache[topology_id].clone()
         
         return {
             'features': features_tensor,
@@ -493,39 +493,23 @@ def load_power_system_data(config, case_name):
     )
     
     return (file_metadata, base_adjacency_matrix, ybus_metadata, normalizer, topology_cache, topology_ids_array)
-def _collate_static(batch):
-    static_adj_matrix = batch[0]['adjacency']
-    batch_size = len(batch)
-    
-    if static_adj_matrix.dim() == 2:
-        static_adj_batch = static_adj_matrix.unsqueeze(0).expand(batch_size, -1, -1)
-    elif static_adj_matrix.dim() == 3:
-        static_adj_batch = static_adj_matrix[0].unsqueeze(0).expand(batch_size, -1, -1)
-    else:
-        static_adj_batch = static_adj_matrix
-    
-    other_items_batch = [{k: v for k, v in item.items() if k != 'adjacency'} for item in batch]
-    collated_batch = default_collate(other_items_batch)
-    collated_batch['adjacency'] = static_adj_batch
-    return collated_batch
+
 
 def _collate_sequential_padded(batch):
-    static_adj_matrix = batch[0]['adjacency']
-    batch_size = len(batch)
-    
-    if static_adj_matrix.dim() == 2:
-        static_adj_batch = static_adj_matrix.unsqueeze(0).expand(batch_size, -1, -1)
-    elif static_adj_matrix.dim() == 3:
-        static_adj_batch = static_adj_matrix[0].unsqueeze(0).expand(batch_size, -1, -1)
-    else:
-        static_adj_batch = static_adj_matrix
-    
+    # Remove 'features', 'targets', 'adjacency' from default collation
+    # We handle them manually
     other_items_batch = [{k: v for k, v in item.items() if k not in ['features', 'targets', 'adjacency']} for item in batch]
     collated_batch = default_collate(other_items_batch)
-    collated_batch['adjacency'] = static_adj_batch
     
+    # 1. Stack Adjacencies (Correctly handling dynamic topologies)
+    # This preserves the unique matrix for each sample
+    collated_batch['adjacency'] = torch.stack([item['adjacency'] for item in batch])
+    
+    # 2. Pad Features (Time-series)
     features_list = [item['features'] for item in batch]
     collated_batch['features'] = pad_sequence(features_list, batch_first=True, padding_value=0.0)
+    
+    # 3. Stack Targets
     collated_batch['targets'] = default_collate([item['targets'] for item in batch])
     
     return collated_batch
@@ -597,7 +581,7 @@ def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, con
     test_dataset = torch.utils.data.Subset(dataset, test_indices)
     
     shuffle_train = is_static
-    collate_fn_to_use = _collate_static if is_static else _collate_sequential_padded
+    collate_fn_to_use = default_collate if is_static else _collate_sequential_padded
     
     is_windows = sys.platform == 'win32'
     use_cuda = torch.cuda.is_available()
