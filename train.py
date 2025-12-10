@@ -10,6 +10,7 @@ import yaml
 import signal
 import gc
 import random
+import torch.multiprocessing
 
 # Global data cache for bus systems (used across multiple functions)
 _file_metadata = None
@@ -18,6 +19,9 @@ _ybus_metadata = None
 _normalizer = None
 _topology_cache = None
 _topology_ids = None
+
+
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def check_gpu_memory():
     """Check available GPU memory and return status"""
