@@ -80,6 +80,8 @@ class PowerSystemLoss(nn.Module):
         # S = V * conj(Y * V)
         # Ybus is in p.u.
         ybus_complex = ybus_batch if ybus_batch.is_complex() else ybus_batch.to(torch.complex64)
+        
+        
         I_inj = torch.einsum('bij,bj->bi', ybus_complex, V)
         S_flow_pu = V * torch.conj(I_inj)
         P_flow_pu = S_flow_pu.real

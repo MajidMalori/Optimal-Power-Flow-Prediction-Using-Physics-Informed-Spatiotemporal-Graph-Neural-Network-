@@ -111,11 +111,11 @@ experimental:
   bus_systems: [33,57,118]
   data_mode: "train"
   train_timesteps: 10008  # 417 days
-  test_timesteps: 24 
+  test_timesteps: 24 # 1 day
   force_cpu: false
   parallel_data_loading: true
   data_workers: 16  # Data loading workers: Auto-detect based on system (CPU cores, RAM, GPU, OS). Set to integer to override.
-  clear_results: false
+  clear_results: true
 
 # --- Debug Configuration ---
 debug:

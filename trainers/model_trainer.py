@@ -12,7 +12,8 @@ class PowerSystemTrainer(BaseTrainer):
         self.is_physics_informed = is_physics_informed
         self.forensic_logger = get_logger()
         self.use_cuda = device.type == 'cuda'
-        self.scaler = torch.amp.GradScaler('cuda') if self.use_cuda else None
+        self.use_cuda = device.type == 'cuda'
+        # Mixed precision removed as per user request (RTX 5090)
 
     def _train_epoch(self, train_loader):
         self.model.train()
@@ -47,35 +48,24 @@ class PowerSystemTrainer(BaseTrainer):
             ybus = batch['ybus_matrix'].to(self.device, non_blocking=True)
             adj = batch['adjacency'].to(self.device, non_blocking=True)
             
-            device_type = 'cuda' if self.use_cuda else 'cpu'
-            
-            with torch.amp.autocast(device_type=device_type):
-                outputs = self.model(features, adj)
-                loss_dict = self.criterion(
-                    outputs_norm=outputs,
-                    targets_norm=targets,
-                    measurements_norm=features,
-                    ybus_batch=ybus,
-                    return_components=True,
-                    epoch=self.current_epoch
-                )
-                loss = loss_dict['total_loss']
+            # Standard Full Precision Training
+            outputs = self.model(features, adj)
+            loss_dict = self.criterion(
+                outputs_norm=outputs,
+                targets_norm=targets,
+                measurements_norm=features,
+                ybus_batch=ybus,
+                return_components=True,
+                epoch=self.current_epoch
+            )
+            loss = loss_dict['total_loss']
             
             # Backward & Step
-            if self.scaler:
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                # Calculate gradient norm before clipping (for logging)
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                epoch_metrics['grad_norm'] += grad_norm.item()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                # Calculate gradient norm before clipping (for logging)
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                epoch_metrics['grad_norm'] += grad_norm.item()
-                self.optimizer.step()
+            loss.backward()
+            # Calculate gradient norm before clipping (for logging)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            epoch_metrics['grad_norm'] += grad_norm.item()
+            self.optimizer.step()
             
             # Update Metrics (vectorized dict comprehension)
             epoch_metrics.update({k: epoch_metrics[k] + loss_dict[k] for k in epoch_metrics if k in loss_dict and k != 'grad_norm'})
