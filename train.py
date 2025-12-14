@@ -21,7 +21,7 @@ _topology_cache = None
 _topology_ids = None
 
 
-torch.multiprocessing.set_sharing_strategy('file_system')
+# torch.multiprocessing.set_sharing_strategy('file_system')  # Removed to fix OSError: Too many open files
 
 def check_gpu_memory():
     """Check available GPU memory and return status"""
@@ -750,6 +750,23 @@ def main():
                     error_msg = str(e).replace('η', 'eta').replace('δ', 'delta').replace('σ', 'sigma').replace('λ', 'lambda')
                     logging.error(f"Run {run_name} failed: {error_msg}", exc_info=True)
                     return float('inf')
+                finally:
+                    # Delete DataLoaders to kill worker processes immediately
+                    if 'loaders' in locals(): del loaders
+                    if 'train_loader' in locals(): del train_loader
+                    if 'val_loader' in locals(): del val_loader
+                    if 'test_loader' in locals(): del test_loader
+                    
+                    # Delete model and trainer to free GPU memory
+                    if 'model' in locals(): del model
+                    if 'trainer' in locals(): del trainer
+                    if 'optimizer' in locals(): del optimizer
+                    if 'criterion' in locals(): del criterion
+                    
+                    # Force garbage collection
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
             # Always use MoSOA for hyperparameter optimization
             if True:  # MoSOA always enabled
