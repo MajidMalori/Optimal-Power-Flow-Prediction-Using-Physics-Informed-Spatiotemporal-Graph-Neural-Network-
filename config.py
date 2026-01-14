@@ -83,6 +83,7 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'training_max_grad_norm': 'MAX_GRAD_NORM',
         'training_num_epochs': 'NUM_EPOCHS',
         'training_early_stopping_patience': 'EARLY_STOPPING_PATIENCE',
+        'training_gradient_accumulation_steps': 'GRADIENT_ACCUMULATION_STEPS',
         'training_use_learning_rate_scheduler': 'USE_LEARNING_RATE_SCHEDULER',
         'training_cosine_annealing_lr_t_max': 'COSINEANNEALINGLR_T_MAX',
         'training_cosine_annealing_lr_eta_min': 'COSINEANNEALINGLR_ETA_MIN',
@@ -471,24 +472,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 5,     
-                    'max_iterations': 10,   
+                    'num_seagulls': 1,     
+                    'max_iterations': 2,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 5,      
-                    'max_iterations': 10,   
+                    'num_seagulls': 1,      
+                    'max_iterations': 2,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 5,      # Optimized for quick testing
-                    'max_iterations': 10,    # Optimized for quick testing
+                    'num_seagulls': 1,      # Optimized for quick testing
+                    'max_iterations': 2,    # Optimized for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }

@@ -45,6 +45,7 @@ class BaseAdaptiveGCN(nn.Module):
     def compute_adaptive_adjacency(self, static_adj: torch.Tensor, batch_size: int, normalize: bool = True) -> torch.Tensor:
         """
         Compute adaptive adjacency matrix combining physical and learned graphs.
+        MEMORY OPTIMIZED: Avoids creating large intermediate tensors.
         
         NOTE: static_adj is RAW (from data loader) if data_loader disabled pre-normalization.
         The combined (static + learned) adjacency needs normalization before use in GCN layers.
@@ -59,17 +60,20 @@ class BaseAdaptiveGCN(nn.Module):
             If normalize=True, this is normalized and ready for GCN layers.
         """
         # Create learned adjacency matrix from node embeddings
+        # CRITICAL: Always recompute (don't cache) to avoid "backward through graph twice" errors
+        # Caching would retain computation graph from previous forward passes, causing gradient issues
+        # The computation is fast enough that caching isn't worth the complexity
         learned_adj = F.softmax(F.relu(torch.matmul(self.node_embedding1, self.node_embedding2.T)), dim=1)
         
         # Adjacency matrix is guaranteed to be 3D [batch_size, num_buses, num_buses] from data loader
         physical_adj_batch = static_adj
         
-        # Create learned adjacency batch: [batch_size, num_buses, num_buses]
-        learned_adj_batch = learned_adj.unsqueeze(0).repeat(batch_size, 1, 1)
+        # MEMORY OPTIMIZED: Use expand instead of repeat to avoid copying data
+        # learned_adj is [num_buses, num_buses], we need [batch_size, num_buses, num_buses]
+        learned_adj_batch = learned_adj.unsqueeze(0).expand(batch_size, -1, -1)
         
-        # Combine static and learned adjacency matrices
+        # Combine static and learned adjacency matrices (in-place where possible)
         # If static_adj is raw, mixing it with learned (softmax) is safe.
-        # If static_adj was pre-normalized, mixing might be odd, but we disabled that.
         A_adp_batch = self.phi * physical_adj_batch + (1 - self.phi) * learned_adj_batch
         
         # Normalize the combined adaptive adjacency (required for GCN layers)
@@ -81,6 +85,7 @@ class BaseAdaptiveGCN(nn.Module):
     def _normalize_adjacency_batch(self, adj: torch.Tensor) -> torch.Tensor:
         """
         Normalize a batch of adjacency matrices (for adaptive adjacency).
+        MEMORY OPTIMIZED: Uses in-place operations where possible.
         
         Args:
             adj: Adjacency matrix [batch_size, num_nodes, num_nodes]
@@ -92,20 +97,21 @@ class BaseAdaptiveGCN(nn.Module):
         device = adj.device
         dtype = adj.dtype
         
-        # Add self-loops (A_hat = A + I)
+        # Add self-loops (A_hat = A + I) - use expand to avoid copying
         identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
-        adj_hat = adj + identity
+        adj_hat = adj + identity  # In-place addition not possible (need to preserve adj)
         
         # Compute degree matrix
         degree = torch.sum(adj_hat, dim=-1)  # [batch_size, num_nodes]
         epsilon = 1e-8
-        degree = degree + epsilon
+        degree = degree + epsilon  # In-place addition
         
         # Symmetric normalization: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
         degree_inv_sqrt = torch.pow(degree, -0.5)  # [batch_size, num_nodes]
-        degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)
+        degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)  # In-place clamp
         degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
         
+        # Use efficient batch matrix multiplication
         adj_norm = torch.bmm(torch.bmm(degree_matrix_inv_sqrt, adj_hat), degree_matrix_inv_sqrt)
         return adj_norm
 

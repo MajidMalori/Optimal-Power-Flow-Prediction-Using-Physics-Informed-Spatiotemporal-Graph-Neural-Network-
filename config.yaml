@@ -40,8 +40,9 @@ training:
   batch_size: 256
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 50
+  num_epochs: 5
   early_stopping_patience: 5
+  gradient_accumulation_steps: 1  # Memory optimization: accumulate gradients over N batches before updating weights (reduces effective batch size memory)
   use_learning_rate_scheduler: true
   cosine_annealing_lr:
     t_max: null  # Auto-set to num_epochs if null
@@ -109,12 +110,14 @@ experimental:
   models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
   
   bus_systems: [33,57,118]
-  data_mode: "train"
+  data_mode: "test"
   train_timesteps: 10008  # 417 days
-  test_timesteps: 24 # 1 day
+  test_timesteps: 240 # 1 day
   force_cpu: false
   parallel_data_loading: true
-  data_workers: 16  # Data loading workers: Auto-detect based on system (CPU cores, RAM, GPU, OS). Set to integer to override.
+  data_workers: "auto"  # Data loading workers: "auto" (recommended) or integer (0-4). 
+                        # IMPORTANT: For GPU training, 0-1 workers is optimal (overhead > benefit).
+                        # For CPU training, 2-4 workers helps. Auto-detection handles this correctly.
   clear_results: true
 
 # --- Debug Configuration ---

@@ -6,8 +6,10 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # Use non-interactive backend for faster plotting
 import matplotlib.pyplot as plt
+# Optimize matplotlib for performance
+plt.ioff()  # Turn off interactive mode (faster)
 from matplotlib.patches import Patch
 from typing import Dict, Any
 import warnings
@@ -40,7 +42,8 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
         plt.clf()
         plt.close('all')
         
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        # Reduced figure size for faster rendering
+        fig, axes = plt.subplots(2, 3, figsize=(14, 8))  # Reduced from 18x10
         fig.suptitle(f'Training History - {model_name}', fontsize=16, fontweight='bold')
         
         # Helper function to convert tensor to float
@@ -237,7 +240,7 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
         
         save_path = config.get_training_history_path(num_buses, model_name)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300)
+        plt.savefig(save_path, dpi=150, facecolor='white')
         plt.close('all')
         
     except Exception as e:
@@ -261,7 +264,7 @@ def plot_convergence(history: list, model_name: str, config: Any, num_buses: int
         
         save_path = config.get_convergence_plot_path(num_buses, model_name)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=300)
+        plt.savefig(save_path, dpi=150, facecolor='white')
         plt.close('all')
         
     except Exception as e:
@@ -284,7 +287,8 @@ def plot_all_renewable_impacts(renewable_impact_data: pd.DataFrame, config: Any,
             'power_loss': 'Power Loss'
         }
         
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        # Reduced figure size for faster rendering
+        fig, axes = plt.subplots(1, 3, figsize=(14, 5))  # Reduced from 18x6
         fig.suptitle(f'Renewable Impact Analysis - {model_name}', fontsize=16, fontweight='bold')
         
         unique_fracs = sorted(renewable_impact_data['renewable_fraction'].unique())
@@ -326,7 +330,8 @@ def create_model_comparison_plot(all_results: list, save_path: str = None):
             return
         
         # Create figure with 2 subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        # Reduced figure size for faster rendering
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))  # Reduced from 16x6
         fig.suptitle('Model Performance Comparison', fontsize=16, fontweight='bold')
         
         # Extract data
@@ -379,7 +384,7 @@ def create_model_comparison_plot(all_results: list, save_path: str = None):
         
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
             print(f"Model comparison plot saved: {save_path}")
         
         plt.close('all')
@@ -480,7 +485,7 @@ def create_comparative_renewable_plots(renewable_data: dict, config: Any, num_bu
         output_dir = os.path.join(base_dir, f"{num_buses}bus")
         os.makedirs(output_dir, exist_ok=True)
         save_path = os.path.join(output_dir, 'comparative_renewable_impacts.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close('all')
         
     except Exception as e:
@@ -496,7 +501,8 @@ def create_comparative_convergence_plot(convergence_data: dict, config: Any, num
         plt.clf()
         plt.close('all')
         
-        fig, ax = plt.subplots(figsize=(12, 7))
+        # Reduced figure size for faster rendering
+        fig, ax = plt.subplots(figsize=(10, 6))  # Reduced from 12x7
         
         for model_name, history in convergence_data.items():
             if history:
@@ -521,7 +527,7 @@ def create_comparative_convergence_plot(convergence_data: dict, config: Any, num
         output_dir = os.path.join(base_dir, f"{num_buses}bus")
         os.makedirs(output_dir, exist_ok=True)
         save_path = os.path.join(output_dir, 'convergence_comparison.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close('all')
         
     except Exception as e:

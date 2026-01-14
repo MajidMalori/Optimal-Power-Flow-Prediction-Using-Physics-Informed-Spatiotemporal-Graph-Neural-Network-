@@ -85,18 +85,30 @@ def _auto_detect_num_workers(device):
     """
     Automatically determine optimal number of data loading workers based on system specs.
     
+    CRITICAL INSIGHT: For GPU training, FEWER workers are better (0-1 optimal).
+    For CPU training, MORE workers help (2-4 optimal).
+    
+    Why GPU training is faster with 0-1 workers:
+    1. GPU computation is fast - data loading is rarely the bottleneck
+    2. Multiple workers add overhead (process creation, IPC, memory copying)
+    3. Main process can load data while GPU computes (overlap with 0-1 workers)
+    4. Multiple workers compete for CPU resources and slow things down
+    
+    Why CPU training benefits from more workers:
+    1. CPU computation is slower - parallel data loading helps
+    2. Multiple workers keep CPU busy while one worker's batch is being processed
+    
     Factors considered:
     - Windows: Must use 0 (multiprocessing issues)
-    - RAM: Low RAM (< 16GB) = fewer workers to avoid memory pressure
-    - GPU: GPU available = can use more workers (GPU handles computation)
-    - CPU cores: More cores = can support more workers
-    - Best practices: Balance between parallelism and overhead
+    - GPU training: Prefer 0-1 workers (overhead > benefit)
+    - CPU training: Use 2-4 workers (parallel loading helps)
+    - RAM: Low RAM = fewer workers to avoid memory pressure
     
     Args:
         device: torch.device (cpu or cuda)
         
     Returns:
-        int: Optimal number of workers (0-8)
+        int: Optimal number of workers (0-4)
     """
     import sys
     
@@ -105,10 +117,20 @@ def _auto_detect_num_workers(device):
         return 0
     
     try:
-        # Get CPU cores
-        cpu_cores = os.cpu_count() or 4  # Fallback to 4 if None
+        # Check GPU availability
+        has_gpu = device.type == 'cuda' and torch.cuda.is_available()
         
-        # Try to get RAM (optional dependency)
+        # CRITICAL: GPU training performs better with 0-1 workers
+        # The overhead of multiple workers (process creation, IPC, memory copying)
+        # outweighs the benefits when GPU is fast enough
+        if has_gpu:
+            # GPU training: Use 0-1 workers (0 is often fastest)
+            # 0 = main process loads data (simple, fast, no overhead)
+            # 1 = one worker process (slight overlap, minimal overhead)
+            # More than 1 = overhead dominates, slower training
+            return 0  # Default to 0 for GPU (user can override to 1 if needed)
+        
+        # CPU training: Multiple workers help (CPU is slower, parallel loading helps)
         try:
             import psutil
             ram_gb = psutil.virtual_memory().total / (1024**3)
@@ -116,43 +138,31 @@ def _auto_detect_num_workers(device):
             # Fallback: Assume moderate RAM if psutil not available
             ram_gb = 16.0
         
-        # Check GPU availability
-        has_gpu = device.type == 'cuda' and torch.cuda.is_available()
+        cpu_cores = os.cpu_count() or 4  # Fallback to 4 if None
         
-        # Decision logic:
-        # 1. Low RAM (< 8GB): Conservative (2 workers max)
-        # 2. Moderate RAM (8-16GB): Moderate (2-4 workers)
-        # 3. High RAM (> 16GB): Can use more workers
-        
+        # CPU-only training: Use 2-4 workers depending on RAM and cores
         if ram_gb < 8.0:
             # Very low RAM: Use minimal workers
             num_workers = min(2, cpu_cores // 4)
         elif ram_gb < 16.0:
-            # Low-moderate RAM (like user's 8GB system)
-            if has_gpu:
-                # GPU available: Can use moderate workers (GPU handles computation)
-                num_workers = min(4, cpu_cores // 2)
-            else:
-                # CPU-only: Use fewer workers to avoid memory pressure
-                num_workers = min(2, cpu_cores // 4)
+            # Low-moderate RAM: Use 2 workers
+            num_workers = min(2, cpu_cores // 2)
         else:
-            # High RAM: Can use more workers
-            if has_gpu:
-                # GPU available: Use more workers (GPU handles computation, RAM available)
-                num_workers = min(8, cpu_cores // 2)
-            else:
-                # CPU-only: Moderate workers (more RAM but CPU handles computation)
-                num_workers = min(4, cpu_cores // 2)
+            # High RAM: Can use more workers (2-4)
+            num_workers = min(4, cpu_cores // 2)
         
-        # Ensure at least 1 worker if we have resources (unless Windows)
+        # Ensure at least 1 worker for CPU training (unless very limited resources)
         num_workers = max(1, num_workers) if cpu_cores >= 2 else 0
         
         return num_workers
         
     except Exception as e:
         # Fallback: Conservative default
-        print(f"Warning: Could not auto-detect num_workers: {e}. Using default: 2")
-        return 2
+        # GPU: 0 workers, CPU: 2 workers
+        has_gpu = device.type == 'cuda' and torch.cuda.is_available()
+        default = 0 if has_gpu else 2
+        print(f"Warning: Could not auto-detect num_workers: {e}. Using default: {default}")
+        return default
 
 def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
     """Get a safe device for training, with automatic fallback to CPU if GPU memory is insufficient"""
@@ -233,12 +243,33 @@ def signal_handler(signum, _):
 
 def setup_professional_logging():
     """Setup professional logging with memory tracking"""
+    import sys
+    from tqdm import tqdm
+    
+    # Custom StreamHandler that uses tqdm.write() to avoid breaking progress bars
+    class TqdmLoggingHandler(logging.StreamHandler):
+        """Logging handler that uses tqdm.write() to avoid breaking progress bars"""
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                # Filter out noisy pandapower messages that break progress bars
+                if "dtypes could not be corrected" in msg:
+                    return  # Suppress this specific noisy message
+                # Use tqdm.write() to properly handle output during progress bar display
+                tqdm.write(msg, file=sys.stderr)
+                self.flush()
+            except Exception:
+                self.handleError(record)
     
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler()]
+        handlers=[TqdmLoggingHandler()]
     )
+    
+    # Suppress noisy pandapower INFO messages that interfere with progress bars
+    logging.getLogger('pandapower').setLevel(logging.WARNING)
+    
     return logging.getLogger(__name__)
 
 def main():
@@ -1032,12 +1063,43 @@ def main():
                         )))
                     
                     # Execute all plotting tasks with single progress bar
+                    # Configure tqdm to handle logging output properly
+                    import sys
                     if plot_tasks:
-                        for task_name, task_func in tqdm(plot_tasks, desc=f"Generating plots ({model_name})", unit="plot"):
+                        # Use file=sys.stdout (default) for progress bar
+                        # The TqdmLoggingHandler will route logging to stderr via tqdm.write()
+                        # This keeps progress bar on stdout and logging on stderr (proper separation)
+                        plot_pbar = tqdm(
+                            plot_tasks, 
+                            desc=f"Generating plots ({model_name})", 
+                            unit="plot",
+                            file=sys.stdout,  # Progress bar on stdout
+                            dynamic_ncols=True,
+                            mininterval=0.1,  # Update frequently for responsive display
+                            leave=True,  # Keep bar when done for visibility
+                            ncols=None,  # Auto-detect terminal width
+                            disable=False  # Ensure it's enabled
+                        )
+                        # Force immediate display
+                        plot_pbar.refresh()
+                        
+                        for task_name, task_func in plot_pbar:
                             try:
+                                # Update description to show current task
+                                plot_pbar.set_description(f"Generating plots ({model_name}): {task_name}")
+                                plot_pbar.refresh()  # Force immediate update before task
                                 task_func()
+                                # Refresh after task completes
+                                plot_pbar.refresh()
                             except Exception as e:
-                                print(f"  Warning: {task_name} failed: {e}")
+                                # Use tqdm.write() to avoid breaking progress bar
+                                tqdm.write(f"  Warning: {task_name} failed: {e}", file=sys.stderr)
+                                plot_pbar.refresh()  # Refresh after error message
+                        
+                        # Final update
+                        plot_pbar.set_description(f"Generating plots ({model_name}): Complete")
+                        plot_pbar.refresh()
+                        plot_pbar.close()
                     
                     # Note: Contingency analysis is done during data generation (N-1 scenarios)
                     # The model is already trained on contingency data, no need to re-evaluate

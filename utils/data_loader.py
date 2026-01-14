@@ -171,9 +171,12 @@ class PowerSystemLazyDataset(Dataset):
         self.sequence_length = sequence_length
         self.hours_per_day = hours_per_day
         
-        # Load base Ybus matrix (REQUIRED)
+        # Load base Ybus matrix (REQUIRED) - Use mmap for memory efficiency
         if ybus_metadata and 'base_path' in ybus_metadata and os.path.exists(ybus_metadata['base_path']):
-            self.ybus_base = torch.from_numpy(np.load(ybus_metadata['base_path'], mmap_mode='r').copy()).cfloat()
+            ybus_data = np.load(ybus_metadata['base_path'], mmap_mode='r')
+            # Only copy if necessary (mmap is read-only, need writable tensor)
+            self.ybus_base = torch.from_numpy(np.array(ybus_data, copy=True)).cfloat()
+            del ybus_data  # Free mmap reference
         else:
             raise RuntimeError(f"Ybus base matrix not found. Required for physics-informed training.")
             
@@ -198,13 +201,17 @@ class PowerSystemLazyDataset(Dataset):
         target_idx_in_file = target_meta['index_in_file']
         
         if self.is_static:
-            # Load features
-            features = np.load(target_meta['features_path'], mmap_mode='r')[target_idx_in_file].copy()
+            # Load features - use array() to create writable copy only when needed
+            features_mmap = np.load(target_meta['features_path'], mmap_mode='r')
+            features = np.array(features_mmap[target_idx_in_file], copy=True)  # Copy only this slice
             features_tensor = torch.from_numpy(features).float()
+            del features, features_mmap  # Free memory immediately
             
             # Load targets (Full Clean State 10-dim)
-            targets = np.load(target_meta['targets_path'], mmap_mode='r')[target_idx_in_file].copy()
+            targets_mmap = np.load(target_meta['targets_path'], mmap_mode='r')
+            targets = np.array(targets_mmap[target_idx_in_file], copy=True)  # Copy only this slice
             target_tensor = torch.from_numpy(targets).float()
+            del targets, targets_mmap  # Free memory immediately
             
             # Normalize on-the-fly
             features_tensor = self.normalizer.normalize(features_tensor.unsqueeze(0)).squeeze(0)
@@ -216,30 +223,35 @@ class PowerSystemLazyDataset(Dataset):
             end_idx = idx + self.sequence_length
             target_idx = end_idx
             
-            # Load features sequence
+            # Load features sequence - optimize memory usage
             features_list = []
             for i in range(start_idx, end_idx):
                 if i < len(self.file_metadata):
                     meta = self.file_metadata[i]
-                    features = np.load(meta['features_path'], mmap_mode='r')[meta['index_in_file']].copy()
+                    features_mmap = np.load(meta['features_path'], mmap_mode='r')
+                    features = np.array(features_mmap[meta['index_in_file']], copy=True)  # Copy only slice
                     features_list.append(features)
+                    del features_mmap  # Free mmap reference
             
             # Load target (next timestep)
             if target_idx < len(self.file_metadata):
                 target_meta = self.file_metadata[target_idx]
-                targets = np.load(target_meta['targets_path'], mmap_mode='r')[target_meta['index_in_file']].copy()
+                targets_mmap = np.load(target_meta['targets_path'], mmap_mode='r')
+                targets = np.array(targets_mmap[target_meta['index_in_file']], copy=True)  # Copy only slice
                 target_tensor = torch.from_numpy(targets).float()
+                del targets, targets_mmap  # Free memory
             else:
                 raise IndexError(f"Target index {target_idx} out of bounds")
             
             features_array = np.stack(features_list, axis=0)
             features_tensor = torch.from_numpy(features_array).float()
+            del features_list, features_array  # Free memory
             
             # Normalize
             features_tensor = self.normalizer.normalize(features_tensor)
             target_tensor = self.normalizer.normalize(target_tensor.unsqueeze(0)).squeeze(0)
         
-        # Get Ybus matrix
+        # Get Ybus matrix - optimize memory usage
         if self.ybus_base is not None:
             file_contingency_path = target_meta.get('ybus_contingency_matrices_path', None)
             cont_local_idx = target_meta.get('ybus_contingency_local_idx', None)
@@ -247,10 +259,14 @@ class PowerSystemLazyDataset(Dataset):
             if file_contingency_path and cont_local_idx is not None and os.path.exists(file_contingency_path):
                 contingency_matrices = np.load(file_contingency_path, mmap_mode='r')
                 if 0 <= cont_local_idx < contingency_matrices.shape[0]:
-                    ybus_for_item = torch.from_numpy(contingency_matrices[cont_local_idx].copy()).cfloat()
+                    # Copy only the needed slice
+                    ybus_slice = np.array(contingency_matrices[cont_local_idx], copy=True)
+                    ybus_for_item = torch.from_numpy(ybus_slice).cfloat()
+                    del ybus_slice, contingency_matrices  # Free memory
                 else:
                     raise IndexError(f"Contingency index {cont_local_idx} out of bounds")
             else:
+                # Use clone() for base Ybus (needed for gradient computation)
                 ybus_for_item = self.ybus_base.clone()
         else:
             raise RuntimeError("Ybus base matrix not available")
@@ -261,14 +277,19 @@ class PowerSystemLazyDataset(Dataset):
         
         renewable_fraction = target_meta['renewable_fraction']
         
-        # Load bus types
+        # Load bus types - optimize memory
         bus_types_tensor = None
         if target_meta.get('bus_types_path') and os.path.exists(target_meta['bus_types_path']):
-            bus_types = np.load(target_meta['bus_types_path'], mmap_mode='r')
-            if bus_types.ndim == 2:
-                bus_types_tensor = torch.from_numpy(bus_types[target_meta['index_in_file']].copy()).long()
+            bus_types_mmap = np.load(target_meta['bus_types_path'], mmap_mode='r')
+            if bus_types_mmap.ndim == 2:
+                bus_types_slice = np.array(bus_types_mmap[target_meta['index_in_file']], copy=True)
+                bus_types_tensor = torch.from_numpy(bus_types_slice).long()
+                del bus_types_slice
             else:
-                bus_types_tensor = torch.from_numpy(bus_types.copy()).long()
+                bus_types_array = np.array(bus_types_mmap, copy=True)
+                bus_types_tensor = torch.from_numpy(bus_types_array).long()
+                del bus_types_array
+            del bus_types_mmap  # Free mmap reference
         
         # Extract generation components (from FEATURES, which are noisy measurements)
         if features_tensor.dim() == 3:
@@ -280,7 +301,7 @@ class PowerSystemLazyDataset(Dataset):
         conventional_gen = features_last[:, FeatureIndices.P_CONV:FeatureIndices.Q_CONV+1]
         renewable_gen = features_last[:, FeatureIndices.P_REN:FeatureIndices.Q_REN+1]
         
-        # Topology cache
+        # Topology cache - clone() is necessary for gradient computation
         if self.topology_cache is None or self.topology_ids is None:
             raise RuntimeError("Topology cache not initialized.")
         
@@ -288,6 +309,7 @@ class PowerSystemLazyDataset(Dataset):
         if topology_id not in self.topology_cache:
             raise KeyError(f"Topology ID {topology_id} not found in cache.")
         
+        # Clone is necessary here for gradient computation (each sample needs its own tensor)
         adjacency_for_item = self.topology_cache[topology_id].clone()
         
         return {
@@ -547,6 +569,15 @@ def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, con
             n_train = int(config.TRAIN_SPLIT * n_frac)
             n_val = int(config.VAL_SPLIT * n_frac)
             n_test = n_frac - n_train - n_val
+            
+            # Ensure at least one test sample if we have enough data
+            # If n_test is 0 but we have > 2 samples, steal one from train or val
+            if n_test == 0 and n_frac > 2:
+                if n_train > n_val:
+                    n_train -= 1
+                else:
+                    n_val -= 1
+                n_test += 1
             
             frac_train_indices = valid_frac_indices[:n_train]
             frac_val_indices = valid_frac_indices[n_train:n_train + n_val]

@@ -7,7 +7,11 @@ NOTE: Updated for Full State Reconstruction (10 outputs) with MC Dropout uncerta
 
 import os
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for faster plotting
 import matplotlib.pyplot as plt
+# Optimize matplotlib for performance
+plt.ioff()  # Turn off interactive mode (faster)
 import matplotlib.patches as mpatches
 from matplotlib.gridspec import GridSpec
 import networkx as nx
@@ -17,9 +21,13 @@ from typing import Dict, Tuple, List
 import torch
 
 
+# Cache for network topology (loaded once, reused for all plots)
+_network_topology_cache = {}
+
 def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, Dict]:
     """
     Load network topology and extract bus positions for visualization.
+    PERFORMANCE OPTIMIZED: Caches topology to avoid reloading for each plot.
     
     Args:
         case_name: Name of the test case (e.g., "case33", "case57", "case118")
@@ -29,6 +37,10 @@ def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, D
         G: NetworkX graph
         pos: Dictionary of bus positions {bus_id: (x, y)}
     """
+    # Check cache first (major performance improvement)
+    if case_name in _network_topology_cache:
+        return _network_topology_cache[case_name]
+    
     # Load the appropriate network
     if case_name == "case33":
         net = pn.case33bw()
@@ -50,13 +62,20 @@ def load_network_topology(case_name: str) -> Tuple[pp.pandapowerNet, nx.Graph, D
     for _, line in net.line.iterrows():
         G.add_edge(line.from_bus, line.to_bus)
     
-    # Generate positions using spring layout (will look similar to typical power system layouts)
+    # OPTIMIZED: Reduce iterations for faster layout computation
+    # Spring layout is expensive - use fewer iterations (still looks good)
     if case_name == "case33":
-        # For case33, use a hierarchical layout (it's a radial feeder)
-        pos = nx.spring_layout(G, seed=42, k=2, iterations=50)
+        # For case33, use fewer iterations (small system, fast)
+        pos = nx.spring_layout(G, seed=42, k=2, iterations=30)  # Reduced from 50
+    elif case_name == "case57":
+        # For case57, moderate iterations
+        pos = nx.spring_layout(G, seed=42, k=1, iterations=40)  # Reduced from 100
     else:
-        # For larger systems, use spring layout with more iterations
-        pos = nx.spring_layout(G, seed=42, k=1, iterations=100)
+        # For case118, use fewer iterations (large system, slow)
+        pos = nx.spring_layout(G, seed=42, k=1, iterations=50)  # Reduced from 100
+    
+    # Cache the result
+    _network_topology_cache[case_name] = (net, G, pos)
     
     return net, G, pos
 
@@ -210,8 +229,8 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
     # Load network topology
     net, G, pos = load_network_topology(case_name)
     
-    # Create figure with 2x3 grid
-    fig = plt.figure(figsize=(18, 12))
+    # Create figure with 2x3 grid (reduced size for faster rendering)
+    fig = plt.figure(figsize=(14, 9))  # Reduced from 18x12 for faster rendering
     gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
     
     expected_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
@@ -234,23 +253,25 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
             # Data available - plot it
             spatial_unc = uncertainty_data[frac]['spatial']
             
-            # Draw network
-            nx.draw_networkx_edges(G, pos, ax=ax, alpha=0.3, width=2, edge_color='gray')
+            # OPTIMIZED: Draw network with reduced detail for faster rendering
+            # Use simpler drawing options to speed up
+            nx.draw_networkx_edges(G, pos, ax=ax, alpha=0.3, width=1.5, edge_color='gray', arrows=False)
             
-            # Draw nodes colored by uncertainty
+            # Draw nodes colored by uncertainty (optimized node size)
             nodes = nx.draw_networkx_nodes(
                 G, pos, ax=ax,
                 node_color=spatial_unc,
-                node_size=500,
+                node_size=300,  # Reduced from 500 for faster rendering
                 cmap='YlOrRd',
                 vmin=vmin,
                 vmax=vmax,
                 edgecolors='black',
-                linewidths=1.5
+                linewidths=1.0  # Reduced from 1.5
             )
             
-            # Add node labels
-            nx.draw_networkx_labels(G, pos, ax=ax, font_size=8, font_weight='bold')
+            # OPTIMIZED: Only draw labels for larger systems (skip for case118 to save time)
+            if case_name != "case118":
+                nx.draw_networkx_labels(G, pos, ax=ax, font_size=7, font_weight='bold')
             
             # Title
             ax.set_title(f'{int(frac*100)}% Renewables\n(Mean σ: {uncertainty_data[frac]["mean_spatial"]:.4f} p.u.)',
@@ -278,9 +299,9 @@ def plot_spatial_comparison_grid(uncertainty_data: Dict, case_name: str,
         title += f' - {model_name}'
     fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
     
-    # Save
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    # Save with optimized DPI (150 is high quality but 4x faster than 300)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close('all')  # Close all figures to free memory
     # Consolidated output - printed once at the end
 
 
@@ -296,7 +317,8 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         model_name: Optional model name for title
         config: Optional config object to check if using time-series mode
     """
-    fig, ax = plt.subplots(figsize=(12, 6))  # Match data profile story aspect ratio
+    # Reduced figure size for faster rendering
+    fig, ax = plt.subplots(figsize=(10, 5))  # Reduced from 12x6 for faster rendering
     
     fractions = sorted(uncertainty_data.keys())
     
@@ -310,8 +332,8 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
         ax.set_title(f'Temporal Uncertainty - {case_name.upper()} - {model_name}', 
                     fontsize=16, fontweight='bold', pad=20)
         plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close('all')  # Close all figures to free memory
         return
     
     # Continue with available fractions
@@ -383,9 +405,9 @@ def plot_temporal_comparison_curves(uncertainty_data: Dict, case_name: str,
     # Tight layout
     plt.tight_layout()
     
-    # Save
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    # Save with optimized DPI (150 is high quality but 4x faster than 300)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close('all')  # Close all figures to free memory
     # Consolidated output - printed once at the end
 
 

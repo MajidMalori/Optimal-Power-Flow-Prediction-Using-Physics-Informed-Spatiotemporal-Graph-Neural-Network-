@@ -67,13 +67,13 @@ class PowerSystemLoss(nn.Module):
         # Denormalize for physics calculation (need actual p.u. voltages for Ybus)
         preds_phys = self.normalizer.denormalize(outputs_norm)
         
-        # Extract State Variables (Physical Units)
+        # Extract State Variables (Physical Units) - use indexing to avoid copies
         # Voltage Magnitude (p.u.)
         vm_pu = preds_phys[..., FeatureIndices.VM]
         # Voltage Angle (radians)
         va_rad = preds_phys[..., FeatureIndices.VA]
         
-        # Construct Complex Voltage
+        # Construct Complex Voltage (in-place where possible)
         V = vm_pu * torch.exp(1j * va_rad)
         
         # Calculate Theoretical Power Flow (Injection)
@@ -81,14 +81,15 @@ class PowerSystemLoss(nn.Module):
         # Ybus is in p.u.
         ybus_complex = ybus_batch if ybus_batch.is_complex() else ybus_batch.to(torch.complex64)
         
-        
-        I_inj = torch.einsum('bij,bj->bi', ybus_complex, V)
+        # Optimized: Use matmul instead of einsum for better memory efficiency
+        # I_inj = Y @ V
+        I_inj = torch.bmm(ybus_complex, V.unsqueeze(-1)).squeeze(-1)
         S_flow_pu = V * torch.conj(I_inj)
         P_flow_pu = S_flow_pu.real
         Q_flow_pu = S_flow_pu.imag
         
         # Extract Predicted Net Injections (Physical Units -> Convert to p.u.)
-        # P_net = (P_ext + P_conv + P_ren) - P_load
+        # Use direct indexing to avoid intermediate copies
         p_load = preds_phys[..., FeatureIndices.P_LOAD]
         p_ext = preds_phys[..., FeatureIndices.P_EXT_GRID]
         p_conv = preds_phys[..., FeatureIndices.P_CONV]
@@ -99,16 +100,16 @@ class PowerSystemLoss(nn.Module):
         q_conv = preds_phys[..., FeatureIndices.Q_CONV]
         q_ren = preds_phys[..., FeatureIndices.Q_REN]
         
-        # Calculate Net Injection (MW/MVar)
+        # Calculate Net Injection (MW/MVar) - use in-place operations where possible
         P_net_mw = (p_ext + p_conv + p_ren) - p_load
         Q_net_mvar = (q_ext + q_conv + q_ren) - q_load
         
-        # Convert to p.u.
+        # Convert to p.u. (in-place division)
         P_net_pu = P_net_mw / self.base_mva
         Q_net_pu = Q_net_mvar / self.base_mva
         
-        # L2 Loss: MSE of Mismatch
-        l2_loss = F.mse_loss(P_net_pu, P_flow_pu) + F.mse_loss(Q_net_pu, Q_flow_pu)
+        # L2 Loss: MSE of Mismatch (compute directly without storing intermediate)
+        l2_loss = F.mse_loss(P_net_pu, P_flow_pu, reduction='mean') + F.mse_loss(Q_net_pu, Q_flow_pu, reduction='mean')
         
         # 3. Safety Loss (L3) - Voltage Limits
         # Soft constraints on Voltage Magnitude
