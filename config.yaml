@@ -40,7 +40,7 @@ training:
   batch_size: 256
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 5
+  num_epochs: 3
   early_stopping_patience: 5
   gradient_accumulation_steps: 1  # Memory optimization: accumulate gradients over N batches before updating weights (reduces effective batch size memory)
   use_learning_rate_scheduler: true
@@ -100,7 +100,7 @@ experimental:
   # - non_physics_only: [GCN, adaptiveGCN]
   # - sequential_only: All LSTM/GRU models
   # - all: ALL 7 MODELS
-  test_config: "all"
+  test_config: "core"
   
   # Option 2: Override with specific models (precise control)
   # Examples:
@@ -109,7 +109,7 @@ experimental:
   # models_to_train: "all"  # Use test_config above (default behavior)
   models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
   
-  bus_systems: [33,57,118]
+  bus_systems: [57,118]
   data_mode: "test"
   train_timesteps: 10008  # 417 days
   test_timesteps: 240 # 1 day

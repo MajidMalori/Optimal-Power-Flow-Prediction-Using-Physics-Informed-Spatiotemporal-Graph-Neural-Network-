@@ -935,36 +935,34 @@ def main():
             # Removed redundant evaluate_model_mc_dropout and compute_engineering_metrics
             # (those metrics are already computed by compute_moopf_metrics)
             
-            if is_physics_informed:
-                # Evaluate MOOPF objectives (single pass through test data)
-                print(f"[{model_name}] MOOPF evaluation...")
-                moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
-                    model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed
+            # ==== CONSOLIDATED EVALUATION ====
+            # Removed redundant evaluate_model_mc_dropout and compute_engineering_metrics
+            # (those metrics are already computed by compute_moopf_metrics)
+            
+            # Evaluate MOOPF objectives (single pass through test data)
+            # UNIVERSAL EVALUATION: Run for ALL models (Physics and Non-Physics)
+            print(f"[{model_name}] MOOPF evaluation...")
+            moopf_results, renewable_impact_data = evaluate_moopf_objectives_normalized(
+                model_to_eval, test_loader_best, best_config, device, _normalizer, is_physics_informed=True # Force True to enable evaluation
+            )
+            
+            # Save mse_detailed.csv
+            if 'mse_per_sample' in moopf_results:
+                mse_df = pd.DataFrame({'mse_score': moopf_results['mse_per_sample']})
+                mse_detailed_path = os.path.join(model_output_dir, 'mse_detailed.csv')
+                mse_df.to_csv(mse_detailed_path, index=False)
+            
+            # Save comprehensive results
+            try:
+                save_results(
+                    metrics=moopf_results,
+                    results_df=renewable_impact_data,
+                    config=base_config,
+                    output_dir=model_output_dir
                 )
-                
-                # Save mse_detailed.csv
-                if 'mse_per_sample' in moopf_results:
-                    mse_df = pd.DataFrame({'mse_score': moopf_results['mse_per_sample']})
-                    mse_detailed_path = os.path.join(model_output_dir, 'mse_detailed.csv')
-                    mse_df.to_csv(mse_detailed_path, index=False)
-                
-                # Save comprehensive results
-                # Save comprehensive results
-                try:
-                    save_results(
-                        metrics=moopf_results,
-                        results_df=renewable_impact_data,
-                        config=base_config,
-                        output_dir=model_output_dir
-                    )
-                except Exception as e:
-                    print(f"[{model_name}] Warning: Could not save results: {e}")
-                print()  # Add space between MOOPF bar and plot generation bar
-            else:
-                # Non-physics models: skip MOOPF evaluation
-                moopf_results = {}
-                renewable_impact_data = None
-                print(f"[{model_name}] Non-physics model - skipping MOOPF evaluation")
+            except Exception as e:
+                print(f"[{model_name}] Warning: Could not save results: {e}")
+            print()  # Add space between MOOPF bar and plot generation bar
             
             # Generate all plots with single progress bar (for all models)
             if True: # Always save results
@@ -1109,12 +1107,15 @@ def main():
                     traceback.print_exc()
             
             # Calculate final test performance metric for comparison
-            if is_physics_informed and moopf_results:
-                # Use MOOPF score for physics-informed models
-                final_test_score = moopf_results.get('mse_score', best_run.get('mse', 0.0))
+            # Calculate final test performance metric for comparison
+            # FIX: Always use MOOPF Score for comparison to ensure fair ranking between Physics and Non-Physics models
+            # This penalizes non-physics models for physical violations, which is the correct scientific comparison.
+            if moopf_results:
+                # Use MOOPF score for ALL models
+                final_test_score = moopf_results.get('moopf_score', best_run.get('mse', 0.0))
                 final_metric_name = "MOOPF Score"
             else:
-                # Use test MSE for non-physics models (moopf_results is empty dict)
+                # Fallback if MOOPF failed (shouldn't happen now)
                 final_test_score = best_run.get('mse', best_run.get('test_score', 0.0))
                 final_metric_name = "Test MSE"
             

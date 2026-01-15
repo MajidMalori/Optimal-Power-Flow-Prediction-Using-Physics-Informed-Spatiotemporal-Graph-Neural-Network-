@@ -12,7 +12,6 @@ class PowerSystemTrainer(BaseTrainer):
         self.is_physics_informed = is_physics_informed
         self.forensic_logger = get_logger()
         self.use_cuda = device.type == 'cuda'
-        self.use_cuda = device.type == 'cuda'
         # Mixed precision removed as per user request (RTX 5090)
 
     def _train_epoch(self, train_loader):
@@ -25,7 +24,7 @@ class PowerSystemTrainer(BaseTrainer):
         epoch_metrics = {
             'total_loss': 0.0,
             'mse': 0.0,
-            'mae': 0.0,  # Mean Absolute Error (for non-physics models)
+            'mae': 0.0,  # Mean Absolute Error (used in plotting)
             'physics_loss': 0.0,
             'safety_loss': 0.0,
             'constraint_loss': 0.0,
@@ -66,17 +65,16 @@ class PowerSystemTrainer(BaseTrainer):
             scaled_loss = loss_dict['total_loss'].item()  # Original unscaled loss
             epoch_metrics['total_loss'] += scaled_loss
             
-            # Update other metrics (before deleting loss_dict)
+            # Update metrics from loss_dict
             epoch_metrics.update({k: epoch_metrics[k] + loss_dict[k] for k in epoch_metrics if k in loss_dict and k != 'grad_norm'})
             
-            # Store weights for progress bar (before deleting loss_dict)
-            # For physics-informed models, weights MUST be in loss_dict
+            # Store weights for progress bar and result
             if self.is_physics_informed:
                 if 'weights' not in loss_dict:
                     raise KeyError(f"Physics-informed model requires 'weights' in loss_dict. Got keys: {list(loss_dict.keys())}")
                 self._last_weights = loss_dict['weights']
             
-            # Calculate MAE (Mean Absolute Error) for non-physics models
+            # Calculate MAE (Mean Absolute Error) - used in plotting
             if not self.is_physics_informed:
                 mae_batch = torch.nn.functional.l1_loss(outputs, targets).item()
                 epoch_metrics['mae'] += mae_batch
@@ -98,39 +96,34 @@ class PowerSystemTrainer(BaseTrainer):
             
             # Calculate running averages for progress bar (matches log file values)
             # Only update progress bar every few batches to reduce overhead
-            if batch_count % max(1, len(train_loader) // 20) == 0 or batch_idx == len(train_loader) - 1:
+            if batch_count % max(1, len(train_loader) // 10) == 0 or batch_idx == len(train_loader) - 1:
                 avg_mse = epoch_metrics['mse'] / batch_count
                 avg_total_loss = epoch_metrics['total_loss'] / batch_count
                 
-                # Progress Bar - Show running averages (matches epoch-averaged values in log)
+                # Progress Bar - Show running averages
                 if self.is_physics_informed:
-                    # Weights must be stored in _last_weights (set above)
-                    if not hasattr(self, '_last_weights') or self._last_weights is None:
-                        raise RuntimeError("Physics-informed model: _last_weights not set. This indicates a bug in the training loop.")
-                    weights = self._last_weights
                     avg_phys = epoch_metrics['physics_loss'] / batch_count
                     avg_safe = epoch_metrics['safety_loss'] / batch_count
                     avg_constraint = epoch_metrics['constraint_loss'] / batch_count
-                    desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f},{weights[3]:.2f}]"
+                    if hasattr(self, '_last_weights') and self._last_weights is not None:
+                        weights = self._last_weights
+                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f},{weights[3]:.2f}]"
+                    else:
+                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f}"
                 else:
                     desc = f"MSE: {avg_mse:.4f}"
                 
                 pbar.set_postfix_str(desc)
         
-        # Verify weights are stored for final result
-        if self.is_physics_informed:
-            if not hasattr(self, '_last_weights') or self._last_weights is None:
-                raise RuntimeError("Physics-informed model: _last_weights not set after training epoch. This indicates a bug in the training loop.")
-        
         # Average Metrics
         num_batches = len(train_loader)
         result = {k: v / num_batches for k, v in epoch_metrics.items()}
         
-        # Add weights to result (must exist for physics-informed models)
+        # Add weights to result
         if self.is_physics_informed:
             result['weights'] = self._last_weights
         else:
-            result['weights'] = None  # Non-physics models don't have weights
+            result['weights'] = None
         
         return result
 
@@ -139,7 +132,7 @@ class PowerSystemTrainer(BaseTrainer):
         epoch_metrics = {
             'total_loss': 0.0,
             'mse': 0.0,
-            'mae': 0.0,  # Mean Absolute Error (for non-physics models)
+            'mae': 0.0,  
             'physics_loss': 0.0,
             'safety_loss': 0.0,
             'constraint_loss': 0.0
@@ -148,7 +141,7 @@ class PowerSystemTrainer(BaseTrainer):
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
         
         batch_count = 0
-        last_weights = None  # Store weights from last batch for progress bar
+        last_weights = None
         with torch.no_grad():
             for batch in pbar:
                 features = batch['features'].to(self.device, non_blocking=True)
@@ -166,17 +159,16 @@ class PowerSystemTrainer(BaseTrainer):
                     return_components=True
                 )
                 
-                # Update Metrics (vectorized dict comprehension)
+                # Update metrics from loss_dict
                 epoch_metrics.update({k: epoch_metrics[k] + loss_dict[k] for k in epoch_metrics if k in loss_dict})
                 
-                # Store weights for progress bar (before deleting loss_dict)
-                # For physics-informed models, weights MUST be in loss_dict
+                # Store weights for progress bar and result
                 if self.is_physics_informed:
                     if 'weights' not in loss_dict:
                         raise KeyError(f"Physics-informed model requires 'weights' in loss_dict. Got keys: {list(loss_dict.keys())}")
                     last_weights = loss_dict['weights']
                 
-                # Calculate MAE (Mean Absolute Error) for non-physics models
+                # Calculate MAE (Mean Absolute Error) - used in plotting
                 if not self.is_physics_informed:
                     mae_batch = torch.nn.functional.l1_loss(outputs, targets).item()
                     epoch_metrics['mae'] += mae_batch
@@ -186,16 +178,15 @@ class PowerSystemTrainer(BaseTrainer):
                 avg_mse = epoch_metrics['mse'] / batch_count
                 avg_total_loss = epoch_metrics['total_loss'] / batch_count
                 
-                # Progress Bar - Show running averages (matches epoch-averaged values in log)
+                # Progress Bar - Show running averages
                 if self.is_physics_informed:
-                    # Weights must be stored (set above)
-                    if last_weights is None:
-                        raise RuntimeError("Physics-informed model: last_weights not set. This indicates a bug in the validation loop.")
-                    weights = last_weights
                     avg_phys = epoch_metrics['physics_loss'] / batch_count
                     avg_safe = epoch_metrics['safety_loss'] / batch_count
                     avg_constraint = epoch_metrics['constraint_loss'] / batch_count
-                    desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f},{weights[3]:.2f}]"
+                    if last_weights is not None:
+                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f} w=[{last_weights[0]:.2f},{last_weights[1]:.2f},{last_weights[2]:.2f},{last_weights[3]:.2f}]"
+                    else:
+                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f}"
                 else:
                     desc = f"MSE: {avg_mse:.4f}"
                 
@@ -207,12 +198,10 @@ class PowerSystemTrainer(BaseTrainer):
         num_batches = len(val_loader)
         result = {k: v / num_batches for k, v in epoch_metrics.items()}
         
-        # Add weights to result (must exist for physics-informed models)
+        # Add weights to result
         if self.is_physics_informed:
-            if last_weights is None:
-                raise RuntimeError("Physics-informed model: last_weights not set after validation epoch. This indicates a bug in the validation loop.")
             result['weights'] = last_weights
         else:
-            result['weights'] = None  # Non-physics models don't have weights
+            result['weights'] = None
         
         return result

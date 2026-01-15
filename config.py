@@ -473,7 +473,7 @@ class Config:
                 # THOROUGH: Small systems can afford extensive search
                 return {
                     'num_seagulls': 1,     
-                    'max_iterations': 2,   
+                    'max_iterations': 1,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
@@ -481,7 +481,7 @@ class Config:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
                     'num_seagulls': 1,      
-                    'max_iterations': 2,   
+                    'max_iterations': 1,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
@@ -489,7 +489,7 @@ class Config:
                 # QUICK: Large systems prioritize efficiency
                 return {
                     'num_seagulls': 1,      # Optimized for quick testing
-                    'max_iterations': 2,    # Optimized for quick testing
+                    'max_iterations': 1,    # Optimized for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -908,6 +908,7 @@ class Config:
         
         # Update run metadata with completion info
         metadata_file = os.path.join(self.CURRENT_RUN_DIR, 'run_metadata.json')
+        metadata = {}  
         if os.path.exists(metadata_file):
             with open(metadata_file, 'r') as f:
                 metadata = json.load(f)

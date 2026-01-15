@@ -120,10 +120,23 @@ class PowerSystemLoss(nn.Module):
         
         # 4. Physics Constraint Loss (L4) - Non-negative Physical Quantities
         # P_conv, P_ren, and VM must be non-negative (physical constraints)
-        # Penalize negative values: ReLU(-P_conv)^2 + ReLU(-P_ren)^2 + ReLU(-VM)^2
-        p_conv_violation = F.relu(-p_conv)  # Positive when p_conv < 0
-        p_ren_violation = F.relu(-p_ren)    # Positive when p_ren < 0
-        vm_negative_violation = F.relu(-vm_pu)  # Positive when vm_pu < 0
+        # FIX: Calculate on NORMALIZED values to prevent loss explosion due to unit scaling (MW vs p.u.)
+        # Normalized P_conv and P_ren should be >= 0 (since they are scaled by 1/BaseMVA)
+        
+        # Extract normalized quantities directly
+        p_conv_norm = outputs_norm[..., FeatureIndices.P_CONV]
+        p_ren_norm = outputs_norm[..., FeatureIndices.P_REN]
+        
+        # Penalize negative normalized power (equivalent to negative physical power but scaled)
+        p_conv_violation = F.relu(-p_conv_norm)
+        p_ren_violation = F.relu(-p_ren_norm)
+        
+        # For VM, we still check physical value because normalized VM can be negative (centered at 1.0)
+        # VM_phys = (VM_norm / 10) + 1.0. Constraint: VM_phys >= 0.
+        # But VM explosion is rare compared to Power. We can keep physical check for VM or use normalized threshold.
+        # Using physical for VM is fine as it's ~1.0.
+        vm_negative_violation = F.relu(-vm_pu) 
+        
         l4_loss = torch.mean(p_conv_violation**2 + p_ren_violation**2 + vm_negative_violation**2)
         
         # 5. Combine with Kendall's Homoscedastic Uncertainty Weighting

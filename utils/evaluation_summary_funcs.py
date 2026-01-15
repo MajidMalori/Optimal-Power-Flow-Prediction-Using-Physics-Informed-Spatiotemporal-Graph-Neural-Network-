@@ -13,7 +13,11 @@ def print_model_summary(best_run, moopf_results, model_name, num_buses, is_physi
     val_mse = best_run.get('training_mse', 'N/A')
     if val_mse != 'N/A':
         print(f"  Validation MSE: {val_mse:.6f}")
-    if is_physics_informed:
+    if val_mse != 'N/A':
+        print(f"  Validation MSE: {val_mse:.6f}")
+    
+    # FIX: Always print MOOPF metrics if available (for both Physics and Non-Physics models)
+    if moopf_results:
         print(f"  Power Loss: {moopf_results.get('power_loss', 'N/A')}")
         print(f"  Voltage Deviation: {moopf_results.get('voltage_deviation', 'N/A')}")
         carbon_pu = moopf_results.get('carbon_emissions', 'N/A')

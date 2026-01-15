@@ -292,8 +292,9 @@ def evaluate_moopf_objectives_normalized(model, test_loader, config, device, nor
     """
     Evaluate Multi-Objective Optimal Power Flow objectives using the new Audit Metrics.
     """
-    if not is_physics_informed:
-        return {}, None
+    # ENABLE UNIVERSAL EVALUATION:
+    # We remove the check "if not is_physics_informed: return {}, None"
+    # This allows non-physics models to be evaluated on physical consistency (MOOPF score).
     
     model.eval()
     

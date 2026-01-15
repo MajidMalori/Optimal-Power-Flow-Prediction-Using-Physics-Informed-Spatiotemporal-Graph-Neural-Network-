@@ -533,3 +533,66 @@ def create_comparative_convergence_plot(convergence_data: dict, config: Any, num
     except Exception as e:
         plt.close('all')
         print(f"Warning: Comparative convergence plot failed: {e}")
+
+def create_moopf_comparison_plot(all_results: list, output_dir: str, num_buses: int):
+    """
+    Create a comparative bar chart of MOOPF scores for all models on a specific bus system.
+    
+    Args:
+        all_results: List of result dictionaries from train.py
+        output_dir: Directory to save the plot (e.g., results/57_bus/)
+        num_buses: Bus system size (e.g., 57)
+    """
+    try:
+        # Filter results for this bus system
+        bus_results = [r for r in all_results if r['num_buses'] == num_buses]
+        
+        if not bus_results:
+            return
+
+        # Extract data
+        models = [r['model_name'] for r in bus_results]
+        moopf_scores = []
+        
+        for r in bus_results:
+            # Extract MOOPF score (or 0 if missing, though it should be there now)
+            score = r.get('final_test_score', 0) if r.get('final_metric_name') == 'MOOPF Score' else 0
+            moopf_scores.append(score)
+            
+        # Create DataFrame for plotting
+        df = pd.DataFrame({
+            'Model': models,
+            'MOOPF Score': moopf_scores
+        })
+        
+        # Plotting
+        plt.clf()
+        plt.close('all')
+        plt.figure(figsize=(10, 6))
+        
+        # Bar chart
+        bars = plt.bar(df['Model'], df['MOOPF Score'], color='skyblue', edgecolor='black')
+        
+        # Add value labels
+        for bar in bars:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2., height,
+                     f'{height:.4f}',
+                     ha='center', va='bottom')
+        
+        plt.title(f'MOOPF Score Comparison ({num_buses}-bus System)', fontsize=14, fontweight='bold')
+        plt.ylabel('MOOPF Score (Lower is Better)', fontsize=12)
+        plt.xlabel('Model', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        # Save plot
+        save_path = os.path.join(output_dir, 'moopf_comparison.png')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close('all')
+        print(f"Saved MOOPF comparison plot to {save_path}")
+        
+    except Exception as e:
+        plt.close('all')
+        print(f"Warning: MOOPF comparison plotting failed: {e}")
