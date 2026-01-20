@@ -52,7 +52,9 @@ class AdaptivePIGCN(BaseModel, BaseAdaptiveGCN):
         ])
 
         # Output Layer
-        self.output_layer = nn.Linear(hidden_dim, self.output_features_per_bus)
+        # Output Layer - Use PhysicsInformedOutput to enforce constraints
+        from .physics_layer import PhysicsInformedOutput
+        self.output_layer = PhysicsInformedOutput(hidden_dim, self.output_features_per_bus)
         
         self.dropout_layer = nn.Dropout(dropout)
 

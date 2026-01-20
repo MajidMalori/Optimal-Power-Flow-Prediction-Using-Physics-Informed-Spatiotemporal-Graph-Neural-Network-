@@ -75,94 +75,10 @@ def cleanup_bus_system_data():
     _topology_cache = None
     _topology_ids = None
 
-def enable_gradient_checkpointing(model):
-    """Enable gradient checkpointing for memory efficiency (currently unused)."""
-    if hasattr(model, 'gradient_checkpointing_enable'):
-        model.gradient_checkpointing_enable()
-        print("  Gradient checkpointing enabled for memory efficiency")
 
-def _auto_detect_num_workers(device):
-    """
-    Automatically determine optimal number of data loading workers based on system specs.
-    
-    CRITICAL INSIGHT: For GPU training, FEWER workers are better (0-1 optimal).
-    For CPU training, MORE workers help (2-4 optimal).
-    
-    Why GPU training is faster with 0-1 workers:
-    1. GPU computation is fast - data loading is rarely the bottleneck
-    2. Multiple workers add overhead (process creation, IPC, memory copying)
-    3. Main process can load data while GPU computes (overlap with 0-1 workers)
-    4. Multiple workers compete for CPU resources and slow things down
-    
-    Why CPU training benefits from more workers:
-    1. CPU computation is slower - parallel data loading helps
-    2. Multiple workers keep CPU busy while one worker's batch is being processed
-    
-    Factors considered:
-    - Windows: Must use 0 (multiprocessing issues)
-    - GPU training: Prefer 0-1 workers (overhead > benefit)
-    - CPU training: Use 2-4 workers (parallel loading helps)
-    - RAM: Low RAM = fewer workers to avoid memory pressure
-    
-    Args:
-        device: torch.device (cpu or cuda)
-        
-    Returns:
-        int: Optimal number of workers (0-4)
-    """
-    import sys
-    
-    # Windows: Must use 0 due to multiprocessing limitations
-    if sys.platform == 'win32':
-        return 0
-    
-    try:
-        # Check GPU availability
-        has_gpu = device.type == 'cuda' and torch.cuda.is_available()
-        
-        # CRITICAL: GPU training performs better with 0-1 workers
-        # The overhead of multiple workers (process creation, IPC, memory copying)
-        # outweighs the benefits when GPU is fast enough
-        if has_gpu:
-            # GPU training: Use 0-1 workers (0 is often fastest)
-            # 0 = main process loads data (simple, fast, no overhead)
-            # 1 = one worker process (slight overlap, minimal overhead)
-            # More than 1 = overhead dominates, slower training
-            return 0  # Default to 0 for GPU (user can override to 1 if needed)
-        
-        # CPU training: Multiple workers help (CPU is slower, parallel loading helps)
-        try:
-            import psutil
-            ram_gb = psutil.virtual_memory().total / (1024**3)
-        except ImportError:
-            # Fallback: Assume moderate RAM if psutil not available
-            ram_gb = 16.0
-        
-        cpu_cores = os.cpu_count() or 4  # Fallback to 4 if None
-        
-        # CPU-only training: Use 2-4 workers depending on RAM and cores
-        if ram_gb < 8.0:
-            # Very low RAM: Use minimal workers
-            num_workers = min(2, cpu_cores // 4)
-        elif ram_gb < 16.0:
-            # Low-moderate RAM: Use 2 workers
-            num_workers = min(2, cpu_cores // 2)
-        else:
-            # High RAM: Can use more workers (2-4)
-            num_workers = min(4, cpu_cores // 2)
-        
-        # Ensure at least 1 worker for CPU training (unless very limited resources)
-        num_workers = max(1, num_workers) if cpu_cores >= 2 else 0
-        
-        return num_workers
-        
-    except Exception as e:
-        # Fallback: Conservative default
-        # GPU: 0 workers, CPU: 2 workers
-        has_gpu = device.type == 'cuda' and torch.cuda.is_available()
-        default = 0 if has_gpu else 2
-        print(f"Warning: Could not auto-detect num_workers: {e}. Using default: {default}")
-        return default
+
+
+
 
 def get_safe_device(force_cpu=False, min_free_memory_gb=2.0):
     """Get a safe device for training, with automatic fallback to CPU if GPU memory is insufficient"""
@@ -271,6 +187,21 @@ def setup_professional_logging():
     logging.getLogger('pandapower').setLevel(logging.WARNING)
     
     return logging.getLogger(__name__)
+
+def enable_gradient_checkpointing(model):
+    """
+    Enable gradient checkpointing for the model to save memory.
+    Trades compute for memory: saves memory by re-computing activations during backward pass.
+    """
+    if hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
+    elif hasattr(model, 'set_gradient_checkpointing'):
+        model.set_gradient_checkpointing(True)
+    else:
+        # Generic approach for modules that support it
+        for module in model.modules():
+            if hasattr(module, 'gradient_checkpointing'):
+                module.gradient_checkpointing = True
 
 def main():
     global _config_instance
@@ -428,17 +359,11 @@ def main():
     }
     clear_gpu_memory()
     
-    # Auto-configure NUM_WORKERS based on system specs (CPU, RAM, GPU, OS)
-    data_workers_config = getattr(Config, 'data_workers', 'auto')
-    if data_workers_config == 'auto':
-        base_config.NUM_WORKERS = _auto_detect_num_workers(device)
-        print(f"[Workers] Auto-detected: {base_config.NUM_WORKERS}")
-    else:
-        base_config.NUM_WORKERS = int(data_workers_config)
-        print(f"[Workers] Configured: {base_config.NUM_WORKERS}")
+    # Ensure NUM_WORKERS is an integer (from config)
+    base_config.NUM_WORKERS = int(getattr(base_config, 'NUM_WORKERS', 0))
     
     # Ensure parallel_data_loading setting is respected
-    parallel_data_loading = getattr(Config, 'parallel_data_loading', True)
+    parallel_data_loading = getattr(base_config, 'EXPERIMENTAL_PARALLEL_DATA_LOADING', True)
     if not parallel_data_loading:
         base_config.NUM_WORKERS = 0
     
@@ -630,8 +555,9 @@ def main():
                     # Create model with error handling for OOM
                     try:
                         model = model_class_map[model_name](**model_kwargs).to(device)
-                        # Enable gradient checkpointing for large models
-                        enable_gradient_checkpointing(model)
+                        # Enable gradient checkpointing if requested (saves memory, but slower)
+                        if getattr(run_config, 'GRADIENT_CHECKPOINTING', False):
+                            enable_gradient_checkpointing(model)
                     except RuntimeError as e:
                         if "out of memory" in str(e).lower():
                             print(f"CUDA OOM during model creation: {e}")
@@ -666,7 +592,9 @@ def main():
                     optimizer = torch.optim.AdamW(all_params, lr=learning_rate, weight_decay=weight_decay)
 
                     # Initialize forensic logger if debug mode is enabled
-                    debug_config = getattr(run_config, 'DEBUG_ENABLE', True)  # From config.yaml debug.enable
+                    # Controlled by config.yaml (automatically picks train/test setting)
+                    debug_config = getattr(run_config, 'DEBUG_ENABLE', False)
+                    
                     if debug_config:
                         # Get log_interval from config (default to 10 if not set)
                         log_interval = getattr(run_config, 'DEBUG_LOG_INTERVAL', 10)
@@ -1130,7 +1058,13 @@ def main():
                 'final_test_score': final_test_score,
                 'final_metric_name': final_metric_name,
                 'physics_loss': best_run['physics_loss'] if is_physics_informed else 'N/A',
-                'safety_loss': best_run['safety_loss'] if is_physics_informed else 'N/A'
+                'safety_loss': best_run['safety_loss'] if is_physics_informed else 'N/A',
+                # Add detailed MOOPF metrics
+                'test_mse': best_run.get('test_score', 'N/A'),
+                'moopf_score': moopf_results.get('moopf_score', 'N/A'),
+                'power_loss': moopf_results.get('power_loss', 'N/A'),
+                'voltage_deviation': moopf_results.get('voltage_deviation', 'N/A'),
+                'carbon_emissions': moopf_results.get('carbon_emissions', 'N/A')
             }
             all_results.append(result_entry)
             
@@ -1180,7 +1114,11 @@ def main():
             clear_gpu_memory()
         
         # Import comparative visualization functions
-        from utils.visualization import create_comparative_renewable_plots, create_comparative_convergence_plot
+        from utils.visualization import (
+            create_comparative_renewable_plots, 
+            create_comparative_convergence_plot,
+            create_moopf_comparison_plot
+        )
         
         # Create comparative renewable impact plots for all tested models
         # Always create plots if any models were tested, regardless of physics type
@@ -1189,6 +1127,14 @@ def main():
                 create_comparative_renewable_plots(bus_renewable_data, base_config, num_buses, all_tested_models)
             except Exception as e:
                 print(f"  Warning: Could not create renewable impact plots: {e}")
+                
+            try:
+                # Create MOOPF metrics comparison plot (Power Loss, Voltage Deviation, Carbon)
+                # This plots for ALL models (Physics and Non-Physics) using data from all_results
+                bus_output_dir = os.path.join(base_config.CURRENT_RUN_DIR, f"{num_buses}bus")
+                create_moopf_comparison_plot(all_results, bus_output_dir, num_buses)
+            except Exception as e:
+                print(f"  Warning: Could not create MOOPF comparison plot: {e}")
         
         # Create comparative convergence plot
         if bus_convergence_data:

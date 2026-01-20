@@ -27,7 +27,6 @@ class PowerSystemTrainer(BaseTrainer):
             'mae': 0.0,  # Mean Absolute Error (used in plotting)
             'physics_loss': 0.0,
             'safety_loss': 0.0,
-            'constraint_loss': 0.0,
             'grad_norm': 0.0  # Track gradient norm for overfitting analysis
         }
         
@@ -100,18 +99,25 @@ class PowerSystemTrainer(BaseTrainer):
                 avg_mse = epoch_metrics['mse'] / batch_count
                 avg_total_loss = epoch_metrics['total_loss'] / batch_count
                 
-                # Progress Bar - Show running averages
+                # MODE-BASED LOGGING: Controlled by config flags
+                show_detailed = getattr(self.config, 'SHOW_DETAILED_PROGRESS', False)
+                
                 if self.is_physics_informed:
                     avg_phys = epoch_metrics['physics_loss'] / batch_count
                     avg_safe = epoch_metrics['safety_loss'] / batch_count
-                    avg_constraint = epoch_metrics['constraint_loss'] / batch_count
-                    if hasattr(self, '_last_weights') and self._last_weights is not None:
+                    
+                    if show_detailed:
+                        # Detailed view: Include L and w with lower precision to fit terminal
+                        # No defensive check: weights MUST exist for physics-informed models
                         weights = self._last_weights
-                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f},{weights[3]:.2f}]"
+                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f}]"
                     else:
-                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f}"
+                        # Minimal view: M, P, S only with high precision (6 decimal places)
+                        # We don't save weights to self._last_weights if not in detailed mode to save space/overhead
+                        self._last_weights = None
+                        desc = f"M={avg_mse:.6f} P={avg_phys:.6f} S={avg_safe:.6f}"
                 else:
-                    desc = f"MSE: {avg_mse:.4f}"
+                    desc = f"MSE: {avg_mse:.6f}"
                 
                 pbar.set_postfix_str(desc)
         
@@ -134,8 +140,7 @@ class PowerSystemTrainer(BaseTrainer):
             'mse': 0.0,
             'mae': 0.0,  
             'physics_loss': 0.0,
-            'safety_loss': 0.0,
-            'constraint_loss': 0.0
+            'safety_loss': 0.0
         }
         
         pbar = tqdm(val_loader, desc=f"Epoch {self.current_epoch}/{self.config.NUM_EPOCHS} [Val]")
@@ -174,21 +179,29 @@ class PowerSystemTrainer(BaseTrainer):
                     epoch_metrics['mae'] += mae_batch
                 
                 batch_count += 1
-                # Calculate running averages for progress bar (matches log file values)
+                
+                # Calculate running averages for progress bar
                 avg_mse = epoch_metrics['mse'] / batch_count
                 avg_total_loss = epoch_metrics['total_loss'] / batch_count
                 
-                # Progress Bar - Show running averages
+                # MODE-BASED LOGGING: Controlled by config flags
+                show_detailed = getattr(self.config, 'SHOW_DETAILED_PROGRESS', False)
+                
                 if self.is_physics_informed:
                     avg_phys = epoch_metrics['physics_loss'] / batch_count
                     avg_safe = epoch_metrics['safety_loss'] / batch_count
-                    avg_constraint = epoch_metrics['constraint_loss'] / batch_count
-                    if last_weights is not None:
-                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f} w=[{last_weights[0]:.2f},{last_weights[1]:.2f},{last_weights[2]:.2f},{last_weights[3]:.2f}]"
+                    
+                    if show_detailed:
+                        # Detailed view: Include L and w with lower precision
+                        # No defensive check: weights MUST exist for physics-informed models
+                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} w=[{last_weights[0]:.2f},{last_weights[1]:.2f},{last_weights[2]:.2f}]"
                     else:
-                        desc = f"L={avg_total_loss:.2f} M={avg_mse:.3f} P={avg_phys:.3f} S={avg_safe:.3f} C={avg_constraint:.3f}"
+                        # Clean view: M, P, S only with high precision (6 decimal places)
+                        # We don't save weights to last_weights if not in detailed mode
+                        last_weights = None
+                        desc = f"M={avg_mse:.6f} P={avg_phys:.6f} S={avg_safe:.6f}"
                 else:
-                    desc = f"MSE: {avg_mse:.4f}"
+                    desc = f"MSE: {avg_mse:.6f}"
                 
                 pbar.set_postfix_str(desc)
                 

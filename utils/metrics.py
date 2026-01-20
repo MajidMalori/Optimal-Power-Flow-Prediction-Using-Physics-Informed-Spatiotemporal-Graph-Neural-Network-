@@ -23,7 +23,7 @@ class PowerSystemLoss(nn.Module):
         
         # Learnable weights using Kendall's method (log variance for numerical stability)
         # Initialize with 0.0 (variance = 1.0, precision weight = 1.0)
-        self.log_vars = nn.Parameter(torch.zeros(4))  # [Data, Physics, Safety, Constraint]
+        self.log_vars = nn.Parameter(torch.zeros(3))  # [Data, Physics, Safety]
         
         # System Limits
         self.register_buffer('v_min', torch.tensor(getattr(config, 'V_MIN', 0.9), dtype=torch.float32))
@@ -118,49 +118,23 @@ class PowerSystemLoss(nn.Module):
         v_lower_violation = F.relu(self.v_min - vm_pu)
         l3_loss = torch.mean(v_upper_violation**2 + v_lower_violation**2)
         
-        # 4. Physics Constraint Loss (L4) - Non-negative Physical Quantities
-        # P_conv, P_ren, and VM must be non-negative (physical constraints)
-        # FIX: Calculate on NORMALIZED values to prevent loss explosion due to unit scaling (MW vs p.u.)
-        # Normalized P_conv and P_ren should be >= 0 (since they are scaled by 1/BaseMVA)
-        
-        # Extract normalized quantities directly
-        p_conv_norm = outputs_norm[..., FeatureIndices.P_CONV]
-        p_ren_norm = outputs_norm[..., FeatureIndices.P_REN]
-        
-        # Penalize negative normalized power (equivalent to negative physical power but scaled)
-        p_conv_violation = F.relu(-p_conv_norm)
-        p_ren_violation = F.relu(-p_ren_norm)
-        
-        # For VM, we still check physical value because normalized VM can be negative (centered at 1.0)
-        # VM_phys = (VM_norm / 10) + 1.0. Constraint: VM_phys >= 0.
-        # But VM explosion is rare compared to Power. We can keep physical check for VM or use normalized threshold.
-        # Using physical for VM is fine as it's ~1.0.
-        vm_negative_violation = F.relu(-vm_pu) 
-        
-        l4_loss = torch.mean(p_conv_violation**2 + p_ren_violation**2 + vm_negative_violation**2)
+        # 4. Physics Constraint Loss (L4) - REMOVED
+        # Model architecture now enforces positivity via Softplus.
         
         # 5. Combine with Kendall's Homoscedastic Uncertainty Weighting
         # Loss = (w_i * L_i + log_var_i) where w_i = exp(-log_var_i)
-        # L1 (MSE) is in normalized space, L2/L3/L4 in physics space (p.u.)
+        # L1 (MSE) is in normalized space, L2/L3 in physics space (p.u.)
         # Kendall's weights automatically learn to balance these different scales
-        #
-        # NOTE: The total loss CAN be negative because log_var_i can be negative.
-        # This is mathematically correct in Kendall's method - the loss is actually
-        # a log-likelihood that can be negative. The optimizer will still work correctly.
-        # We do NOT clamp log_vars - that would be "cheating" and break the optimization.
         
         # Calculate precision weights (higher weight = more confident in that task)
         w_data = torch.exp(-self.log_vars[0])
         w_phys = torch.exp(-self.log_vars[1])
         w_safe = torch.exp(-self.log_vars[2])
-        w_constraint = torch.exp(-self.log_vars[3])
         
         # Kendall's weighted loss formula (all components in physical units)
-        # Total loss can be negative if log_vars are very negative - this is mathematically correct
         loss = (w_data * l1_loss + self.log_vars[0]) + \
                (w_phys * l2_loss + self.log_vars[1]) + \
-               (w_safe * l3_loss + self.log_vars[2]) + \
-               (w_constraint * l4_loss + self.log_vars[3])
+               (w_safe * l3_loss + self.log_vars[2])
                
         if return_components:
             return {
@@ -168,8 +142,7 @@ class PowerSystemLoss(nn.Module):
                 'mse': l1_loss.item(),
                 'physics_loss': l2_loss.item(),
                 'safety_loss': l3_loss.item(),
-                'constraint_loss': l4_loss.item(),
-                'weights': [w_data.item(), w_phys.item(), w_safe.item(), w_constraint.item()]
+                'weights': [w_data.item(), w_phys.item(), w_safe.item()]
             }
             
         return loss
@@ -214,20 +187,37 @@ def compute_moopf_metrics(preds_phys: torch.Tensor, ybus_batch: torch.Tensor, ba
     carbon_score = fossil_gen / (total_gen + 1e-6)
     
     # --- Metric B: Power Loss Score ---
-    # Loss_MW = P_gen - P_load (from actual power values)
-    # Load_MW = Sum(P_load)
-    # Score = Loss_MW / Load_MW
-    # 
-    # Note: We calculate losses from actual power values (P_gen - P_load),
-    # not from voltages (sum(Real(V*conj(Y*V)))), because predicted voltages
-    # may not satisfy power balance during training. For a balanced system,
-    # both methods give the same result, but P_gen - P_load is more reliable.
+    # FIX: Calculate losses using Voltage solution and Ybus (Ohmic losses).
+    # The previous method (Gen - Load) can be negative if the model violates
+    # power balance physics (Gen < Load), which happens during early training.
+    # The Voltage method guarantees non-negative losses for a passive network.
+
+    # Construct Complex Voltage
+    V = vm_pu * torch.exp(1j * va_rad)
     
-    # Calculate losses from actual power values (always positive for passive network)
-    total_gen_mw = (p_ext + p_conv + p_ren).sum(dim=1)  # Sum all generation
-    total_load_mw = p_load.sum(dim=1)  # Sum all loads
-    total_losses_mw = total_gen_mw - total_load_mw  # Losses = Gen - Load (must be >= 0)
+    # Ensure Ybus is complex
+    if not ybus_batch.is_complex():
+        ybus_batch = ybus_batch.to(torch.complex64)
+
+    # Calculate Total Complex Power Injection S_inj = V * conj(Y * V)
+    # The sum of real power injections in a closed system equals total losses.
+    # P_loss = Sum(Real(S_inj))
     
+    # I_inj = Y @ V
+    I_inj = torch.bmm(ybus_batch, V.unsqueeze(-1)).squeeze(-1)
+    S_inj = V * torch.conj(I_inj)
+    P_inj = S_inj.real
+    
+    # Sum over buses to get total system loss (in p.u.)
+    total_losses_pu = P_inj.sum(dim=1)
+    
+    # Convert to MW
+    total_losses_mw = total_losses_pu * base_mva
+    
+    # Calculate Total Load (MW) for normalization
+    total_load_mw = p_load.sum(dim=1)
+
+    # Calculate Score
     power_loss_score = total_losses_mw / (total_load_mw + 1e-6)
     
     # --- Metric C: Voltage Stability Score ---

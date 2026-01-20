@@ -33,7 +33,10 @@ class GCN(BaseModel):
             self.gc_layers.append(ProfessionalGCNLayer(in_dim, hidden_dim, bias=True, activation='relu'))
         
         self.dropout_layer = nn.Dropout(dropout)
-        self.output_layer = nn.Linear(hidden_dim, output_features_per_bus)
+        
+        # Use Physics-Informed Output Layer to enforce sign conventions
+        from .physics_layer import PhysicsInformedOutput
+        self.output_layer = PhysicsInformedOutput(hidden_dim, output_features_per_bus)
         
         self.forensic_logger = None
         self.forward_count = 0

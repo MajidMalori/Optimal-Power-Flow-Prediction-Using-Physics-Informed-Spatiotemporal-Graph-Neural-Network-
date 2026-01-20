@@ -40,7 +40,7 @@ training:
   batch_size: 256
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 3
+  num_epochs: 10
   early_stopping_patience: 5
   gradient_accumulation_steps: 1  # Memory optimization: accumulate gradients over N batches before updating weights (reduces effective batch size memory)
   use_learning_rate_scheduler: true
@@ -100,7 +100,7 @@ experimental:
   # - non_physics_only: [GCN, adaptiveGCN]
   # - sequential_only: All LSTM/GRU models
   # - all: ALL 7 MODELS
-  test_config: "core"
+  test_config: "all"
   
   # Option 2: Override with specific models (precise control)
   # Examples:
@@ -109,18 +109,24 @@ experimental:
   # models_to_train: "all"  # Use test_config above (default behavior)
   models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
   
-  bus_systems: [57,118]
-  data_mode: "test"
-  train_timesteps: 10008  # 417 days
+  bus_systems: [33]
+  data_mode: "train"
+  train_timesteps: 240  # 417 days
   test_timesteps: 240 # 1 day
   force_cpu: false
   parallel_data_loading: true
-  data_workers: "auto"  # Data loading workers: "auto" (recommended) or integer (0-4). 
-                        # IMPORTANT: For GPU training, 0-1 workers is optimal (overhead > benefit).
-                        # For CPU training, 2-4 workers helps. Auto-detection handles this correctly.
+  data_workers: 0
+  pin_memory: false
+  gradient_checkpointing: false
+  save_checkpoints: false
   clear_results: true
 
 # --- Debug Configuration ---
 debug:
-  enable: false  # Enable forensic logging (generates large log files)
+  train:
+    enable_forensic_logging: false
+    show_detailed_progress: false
+  test:
+    enable_forensic_logging: true
+    show_detailed_progress: true
   log_interval: 100  # Log every N forward passes

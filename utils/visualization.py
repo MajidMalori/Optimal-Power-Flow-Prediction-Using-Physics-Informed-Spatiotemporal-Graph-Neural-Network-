@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # Optimize matplotlib for performance
 plt.ioff()  # Turn off interactive mode (faster)
 from matplotlib.patches import Patch
-from typing import Dict, Any
+from typing import Dict, Any, List
 import warnings
 
 warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
@@ -60,7 +60,7 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
             return np.array([to_float(x) for x in hist_list])
         
         if is_physics_informed:
-            # ========== PHYSICS-INFORMED MODEL PLOTS ==========
+            # ========== PHYSICS-INFORMED MODEL PLOTS ========== 
             
             # Row 1, Col 1: MSE (Train vs Val)
             if 'train_mse' in history and 'val_mse' in history:
@@ -117,12 +117,11 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
             # Row 2, Col 2: Learned Task Weights (Kendall's Method)
             if 'train_weights' in history and history['train_weights']:
                 weights = np.array([w for w in history['train_weights'] if w is not None])
-                if weights.ndim == 2 and weights.shape[1] == 4:
+                if weights.ndim == 2 and weights.shape[1] == 3:
                     epochs = np.arange(len(weights))
                     axes[1, 1].plot(epochs, weights[:, 0], label='w_data (L1)', linewidth=2)
                     axes[1, 1].plot(epochs, weights[:, 1], label='w_phys (L2)', linewidth=2)
                     axes[1, 1].plot(epochs, weights[:, 2], label='w_safe (L3)', linewidth=2)
-                    axes[1, 1].plot(epochs, weights[:, 3], label='w_constraint (L4)', linewidth=2, linestyle='--')
                     axes[1, 1].set_title('Learned Task Weights (Kendall)', fontweight='bold')
                     axes[1, 1].set_ylabel('Precision Weight (w)')
                     axes[1, 1].set_xlabel('Epoch')
@@ -148,7 +147,7 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
                 axes[1, 2].grid(True, alpha=0.3)
         
         else:
-            # ========== NON-PHYSICS MODEL PLOTS ==========
+            # ========== NON-PHYSICS MODEL PLOTS ========== 
             
             # Row 1, Col 1: MSE (Train vs Val)
             if 'train_mse' in history and 'val_mse' in history:
@@ -228,7 +227,7 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
                 val_mse = to_array(history['val_mse'])
                 epochs = np.arange(len(train_mse))
                 ratio = val_mse / (train_mse + 1e-10)  # Avoid division by zero
-                axes[1, 2].plot(epochs, ratio, color='red', linewidth=2, label='Ratio (Val/Train)')
+                axes[1, 2].plot(epochs, ratio, color='red', linewidth=2, label='Ratio (Val/Train)', clip_on=False)
                 axes[1, 2].axhline(y=1.0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Perfect Match')
                 axes[1, 2].set_title('Overfitting Ratio (Val/Train)', fontweight='bold')
                 axes[1, 2].set_ylabel('Ratio (>1.0 = Overfitting)')
@@ -534,7 +533,7 @@ def create_comparative_convergence_plot(convergence_data: dict, config: Any, num
         plt.close('all')
         print(f"Warning: Comparative convergence plot failed: {e}")
 
-def create_moopf_comparison_plot(all_results: list, output_dir: str, num_buses: int):
+def create_moopf_comparison_plot(all_results: List[Dict[str, Any]], output_dir: str, num_buses: int):
     """
     Create a comparative bar chart of MOOPF scores for all models on a specific bus system.
     
@@ -552,46 +551,80 @@ def create_moopf_comparison_plot(all_results: list, output_dir: str, num_buses: 
 
         # Extract data
         models = [r['model_name'] for r in bus_results]
-        moopf_scores = []
         
-        for r in bus_results:
-            # Extract MOOPF score (or 0 if missing, though it should be there now)
-            score = r.get('final_test_score', 0) if r.get('final_metric_name') == 'MOOPF Score' else 0
-            moopf_scores.append(score)
+        # We need to extract the detailed metrics. The 'all_results' in train.py 
+        # stores 'final_test_score' and 'final_metric_name', but also other keys.
+        # We need to ensure we capture the specific MOOPF components if available.
+        # The 'all_results' list in train.py is appended with 'result_entry'.
+        # We need to make sure 'result_entry' contains the detailed metrics.
+        # Let's assume it does or will be updated to do so.
+        
+        # For now, let's plot the 'final_test_score' which is MOOPF Score
+        scores = [r.get('final_test_score', 0) for r in bus_results]
+        
+        # Prepare subplots for breakdown if data exists
+        # We'll need to update 'train.py' to pass these detailed metrics into 'all_results'
+        power_loss = [r.get('power_loss', 0) for r in bus_results]
+        voltage_dev = [r.get('voltage_deviation', 0) for r in bus_results]
+        carbon = [r.get('carbon_emissions', 0) for r in bus_results]
+        
+        has_details = any(p > 0 for p in power_loss)
+        
+        if has_details:
+             fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+             fig.suptitle(f'MOOPF Metrics Comparison ({num_buses}-bus System)', fontsize=16, fontweight='bold')
+             
+             # MOOPF Score
+             ax = axes[0, 0]
+             bars = ax.bar(models, scores, color='skyblue', edgecolor='black')
+             ax.set_title('Overall MOOPF Score (Lower is Better)')
+             ax.set_ylabel('Score')
+             ax.tick_params(axis='x', rotation=45)
+             
+             # Power Loss
+             ax = axes[0, 1]
+             bars = ax.bar(models, power_loss, color='salmon', edgecolor='black')
+             ax.set_title('Power Loss')
+             ax.set_ylabel('MW / p.u.')
+             ax.tick_params(axis='x', rotation=45)
+             
+             # Voltage Deviation
+             ax = axes[1, 0]
+             bars = ax.bar(models, voltage_dev, color='lightgreen', edgecolor='black')
+             ax.set_title('Voltage Deviation')
+             ax.set_ylabel('p.u.')
+             ax.tick_params(axis='x', rotation=45)
+             
+             # Carbon Emissions
+             ax = axes[1, 1]
+             bars = ax.bar(models, carbon, color='gold', edgecolor='black')
+             ax.set_title('Carbon Emissions')
+             ax.set_ylabel('Tons / p.u.')
+             ax.tick_params(axis='x', rotation=45)
+             
+             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        else:
+            plt.figure(figsize=(10, 6))
+            bars = plt.bar(models, scores, color='skyblue', edgecolor='black')
             
-        # Create DataFrame for plotting
-        df = pd.DataFrame({
-            'Model': models,
-            'MOOPF Score': moopf_scores
-        })
-        
-        # Plotting
-        plt.clf()
-        plt.close('all')
-        plt.figure(figsize=(10, 6))
-        
-        # Bar chart
-        bars = plt.bar(df['Model'], df['MOOPF Score'], color='skyblue', edgecolor='black')
-        
-        # Add value labels
-        for bar in bars:
-            height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height,
-                     f'{height:.4f}',
-                     ha='center', va='bottom')
-        
-        plt.title(f'MOOPF Score Comparison ({num_buses}-bus System)', fontsize=14, fontweight='bold')
-        plt.ylabel('MOOPF Score (Lower is Better)', fontsize=12)
-        plt.xlabel('Model', fontsize=12)
-        plt.xticks(rotation=45, ha='right')
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        plt.tight_layout()
+            # Add value labels
+            for bar in bars:
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2., height,
+                        f'{height:.4f}',
+                        ha='center', va='bottom')
+            
+            plt.title(f'MOOPF Score Comparison ({num_buses}-bus System)', fontsize=14, fontweight='bold')
+            plt.ylabel('MOOPF Score (Lower is Better)', fontsize=12)
+            plt.xlabel('Model', fontsize=12)
+            plt.xticks(rotation=45, ha='right')
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
         
         # Save plot
-        save_path = os.path.join(output_dir, 'moopf_comparison.png')
+        save_path = os.path.join(output_dir, 'moopf_metrics_comparison.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close('all')
-        print(f"Saved MOOPF comparison plot to {save_path}")
         
     except Exception as e:
         plt.close('all')

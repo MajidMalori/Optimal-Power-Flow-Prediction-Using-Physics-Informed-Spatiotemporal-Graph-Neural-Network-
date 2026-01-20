@@ -114,11 +114,17 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_test_timesteps': 'EXPERIMENTAL_TEST_TIMESTEPS',
         'experimental_force_cpu': 'EXPERIMENTAL_FORCE_CPU',
         'experimental_parallel_data_loading': 'EXPERIMENTAL_PARALLEL_DATA_LOADING',
-        'experimental_data_workers': 'EXPERIMENTAL_DATA_WORKERS',
+        'experimental_data_workers': 'NUM_WORKERS',
+        'experimental_pin_memory': 'PIN_MEMORY',
+        'experimental_gradient_checkpointing': 'GRADIENT_CHECKPOINTING',
+        'experimental_save_checkpoints': 'SAVE_CHECKPOINTS',
         'experimental_clear_results': 'EXPERIMENTAL_CLEAR_RESULTS',
         
         # Debug configuration
-        'debug_enable': 'DEBUG_ENABLE',
+        'debug_train_enable_forensic_logging': 'DEBUG_TRAIN_ENABLE',
+        'debug_train_show_detailed_progress': 'DEBUG_TRAIN_SHOW_PROGRESS',
+        'debug_test_enable_forensic_logging': 'DEBUG_TEST_ENABLE',
+        'debug_test_show_detailed_progress': 'DEBUG_TEST_SHOW_PROGRESS',
         'debug_log_interval': 'DEBUG_LOG_INTERVAL',
     }
     
@@ -472,24 +478,24 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 1,     
-                    'max_iterations': 1,   
+                    'num_seagulls': 2,     
+                    'max_iterations': 5,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 1,      
-                    'max_iterations': 1,   
+                    'num_seagulls': 2,      
+                    'max_iterations': 5,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 1,      # Optimized for quick testing
-                    'max_iterations': 1,    # Optimized for quick testing
+                    'num_seagulls': 2,      # Optimized for quick testing
+                    'max_iterations': 5,    # Optimized for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
@@ -701,6 +707,16 @@ class Config:
             # In test mode, set a dummy timestamp to avoid errors
             if not hasattr(self, '_CURRENT_RUN_TIMESTAMP') or self._CURRENT_RUN_TIMESTAMP is None:
                 self._CURRENT_RUN_TIMESTAMP = 'test_mode'
+
+        # --- MODE-SPECIFIC DEBUG CONFIGURATION ---
+        # Automatically select the correct debug settings based on DATA_MODE
+        # This ensures the code doesn't need to check the mode manually.
+        if self.DATA_MODE == 'train':
+            self.DEBUG_ENABLE = getattr(self, 'DEBUG_TRAIN_ENABLE', False)
+            self.SHOW_DETAILED_PROGRESS = getattr(self, 'DEBUG_TRAIN_SHOW_PROGRESS', False)
+        else:
+            self.DEBUG_ENABLE = getattr(self, 'DEBUG_TEST_ENABLE', True)
+            self.SHOW_DETAILED_PROGRESS = getattr(self, 'DEBUG_TEST_SHOW_PROGRESS', True)
 
     def create_run_directories(self):
         """

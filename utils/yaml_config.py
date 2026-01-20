@@ -211,11 +211,12 @@ def merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fals
         'data_hours_per_day': 'HOURS_PER_DAY',
         'data_sequence_length': 'SEQUENCE_LENGTH',
         
-        # MOOPF configuration
-        'moopf_weights_loss': 'MOOPF_WEIGHT_LOSS',
-        'moopf_weights_voltage_deviation': 'MOOPF_WEIGHT_VDEV',
-        'moopf_weights_carbon': 'MOOPF_WEIGHT_CARBON',
-        
+        # Debug configuration
+        'debug_train_enable_forensic_logging': 'DEBUG_TRAIN_ENABLE',
+        'debug_train_show_detailed_progress': 'DEBUG_TRAIN_SHOW_PROGRESS',
+        'debug_test_enable_forensic_logging': 'DEBUG_TEST_ENABLE',
+        'debug_test_show_detailed_progress': 'DEBUG_TEST_SHOW_PROGRESS',
+        'debug_log_interval': 'DEBUG_LOG_INTERVAL',
     }
     
     # Flatten YAML config for easier processing

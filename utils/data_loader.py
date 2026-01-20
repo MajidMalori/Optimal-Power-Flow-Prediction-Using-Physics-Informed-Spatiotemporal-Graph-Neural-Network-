@@ -614,23 +614,18 @@ def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, con
     shuffle_train = is_static
     collate_fn_to_use = default_collate if is_static else _collate_sequential_padded
     
-    is_windows = sys.platform == 'win32'
-    use_cuda = torch.cuda.is_available()
-    num_workers = config.NUM_WORKERS
-    
-    # Windows: Must use 0 workers due to multiprocessing limitations
-    # (This overrides any auto-detected or configured value)
-    if is_windows:
-        num_workers = 0
+    # num_workers and pin_memory are now explicitly controlled by config.yaml
+    num_workers = getattr(config, 'NUM_WORKERS', 0)
+    pin_memory = getattr(config, 'PIN_MEMORY', False)
     
     train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=shuffle_train, 
                               num_workers=num_workers, collate_fn=collate_fn_to_use, 
-                              pin_memory=use_cuda, persistent_workers=(num_workers > 0))
+                              pin_memory=pin_memory, persistent_workers=(num_workers > 0))
     val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False, 
                             num_workers=num_workers, collate_fn=collate_fn_to_use, 
-                            pin_memory=use_cuda, persistent_workers=(num_workers > 0))
+                            pin_memory=pin_memory, persistent_workers=(num_workers > 0))
     test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, shuffle=False, 
                              num_workers=num_workers, collate_fn=collate_fn_to_use, 
-                             pin_memory=use_cuda, persistent_workers=(num_workers > 0))
+                             pin_memory=pin_memory, persistent_workers=(num_workers > 0))
     return train_loader, val_loader, test_loader
 

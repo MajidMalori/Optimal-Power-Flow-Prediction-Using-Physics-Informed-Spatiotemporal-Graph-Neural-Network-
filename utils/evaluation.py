@@ -46,7 +46,7 @@ def evaluate_performance(model, data_loader, device, config, normalizer, is_sequ
             if return_denormalized:
                 out = normalizer.denormalize(out)
                 targets = normalizer.denormalize(targets)
-            
+                
             # FIX: Use reduction='mean' to match training loss and avoid scaling by batch size * num_elements
             # We want the average MSE per element (per bus, per feature)
             batch_mse = torch.nn.functional.mse_loss(out, targets, reduction='mean').item()
@@ -146,10 +146,10 @@ def save_results(metrics, results_df, config, output_dir=None):
             f.write(f"{k}: {v}\n")
             
     # Save DataFrame
+    # Save DataFrame
     if not results_df.empty:
+        # Always save detailed results (files are small)
         results_df.to_csv(os.path.join(save_dir, 'detailed_results.csv'), index=False)
-    # Quietly save results (no verbose output)
-    # print(f"Results saved to {save_dir}")
 
 def evaluate_model_with_uncertainty(model, test_loader, device, config, normalizer, is_sequential=False):
     """

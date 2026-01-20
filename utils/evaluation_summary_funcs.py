@@ -13,8 +13,6 @@ def print_model_summary(best_run, moopf_results, model_name, num_buses, is_physi
     val_mse = best_run.get('training_mse', 'N/A')
     if val_mse != 'N/A':
         print(f"  Validation MSE: {val_mse:.6f}")
-    if val_mse != 'N/A':
-        print(f"  Validation MSE: {val_mse:.6f}")
     
     # FIX: Always print MOOPF metrics if available (for both Physics and Non-Physics models)
     if moopf_results:
@@ -86,18 +84,29 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any =
     print(f"{'='*100}")
     
     # Print table header
-    print(f"{'Model':<15} {'Bus':<8} {'Type':<11} {'H.Dim':<7} {'Layers':<7} {'Train MSE':<12} {'Test Score':<12} {'Metric':<12}")
-    print("-" * 100)
+    print(f"{'Model':<15} {'Bus':<8} {'Type':<11} {'H.Dim':<7} {'Layers':<7} {'Train MSE':<12} {'Test MSE':<12} {'MOOPF':<12} {'P.Loss':<10} {'V.Dev':<10} {'Carbon':<10}")
+    print("-" * 140)
     
     # Print each result
     for result in all_results:
         model_type = 'Physics' if result['is_physics_informed'] else 'NonPhys'
         train_mse_str = f"{result['training_mse']:.6f}" if result['training_mse'] != float('inf') else 'Failed'
-        test_score_str = f"{result['final_test_score']:.6f}" if result['final_test_score'] != float('inf') else 'Failed'
         
-        print(f"{result['model_name']:<15} {result['num_buses']:<8} {model_type:<11} {result['best_hidden_dim']:<7} {result['best_gc_layers']:<7} {train_mse_str:<12} {test_score_str:<12} {result['final_metric_name']:<12}")
+        # Get Test MSE and MOOPF Score explicitly
+        test_mse = result.get('test_mse')
+        test_mse_str = f"{test_mse:.6f}" if isinstance(test_mse, (int, float)) else 'N/A'
+        
+        moopf = result.get('moopf_score')
+        moopf_str = f"{moopf:.6f}" if isinstance(moopf, (int, float)) else 'N/A'
+        
+        # Get individual metrics
+        p_loss = f"{result.get('power_loss', 'N/A'):.4f}" if isinstance(result.get('power_loss'), (int, float)) else 'N/A'
+        v_dev = f"{result.get('voltage_deviation', 'N/A'):.4f}" if isinstance(result.get('voltage_deviation'), (int, float)) else 'N/A'
+        carbon = f"{result.get('carbon_emissions', 'N/A'):.4f}" if isinstance(result.get('carbon_emissions'), (int, float)) else 'N/A'
+        
+        print(f"{result['model_name']:<15} {result['num_buses']:<8} {model_type:<11} {result['best_hidden_dim']:<7} {result['best_gc_layers']:<7} {train_mse_str:<12} {test_mse_str:<12} {moopf_str:<12} {p_loss:<10} {v_dev:<10} {carbon:<10}")
     
-    print("-" * 100)
+    print("-" * 140)
     
     # Find best performers
     successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]

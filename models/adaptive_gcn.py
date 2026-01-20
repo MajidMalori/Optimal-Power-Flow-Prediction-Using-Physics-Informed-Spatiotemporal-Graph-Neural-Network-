@@ -27,7 +27,10 @@ class adaptiveGCN(BaseAdaptiveGCN):
 
         # Output: 10 features per bus
         num_output_features = 10
-        self.output_layer = nn.Linear(hidden_dim, num_output_features)
+        
+        # Use Physics-Informed Output Layer to enforce sign conventions
+        from .physics_layer import PhysicsInformedOutput
+        self.output_layer = PhysicsInformedOutput(hidden_dim, num_output_features)
         
         self.dropout_layer = nn.Dropout(dropout)
 

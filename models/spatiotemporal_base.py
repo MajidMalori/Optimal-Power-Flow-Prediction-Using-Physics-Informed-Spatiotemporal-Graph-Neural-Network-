@@ -7,6 +7,8 @@ from .base_model import BaseModel
 from .base_adaptive_gcn import BaseAdaptiveGCN
 
 
+from .physics_layer import PhysicsInformedOutput
+
 class SpatioTemporalBase(BaseModel, BaseAdaptiveGCN):
     """
     Base class for spatio-temporal models.
@@ -45,9 +47,9 @@ class SpatioTemporalBase(BaseModel, BaseAdaptiveGCN):
             rnn_layers=rnn_layers, physics_informed=True, dropout=dropout
         )
         
-        # Output Layer
+        # Output Layer - Use PhysicsInformedOutput to enforce constraints
         output_features = 10
-        self.output_transform = nn.Linear(hidden_dim, output_features)
+        self.output_transform = PhysicsInformedOutput(hidden_dim, output_features)
         self.dropout_layer = nn.Dropout(dropout)
         
     

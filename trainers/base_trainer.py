@@ -39,9 +39,9 @@ class BaseTrainer(ABC):
         # Add history tracking
         self.history = {
             'train_total_loss': [], 'train_mse': [], 'train_mae': [],
-            'train_physics_loss': [], 'train_safety_loss': [], 'train_constraint_loss': [],
+            'train_physics_loss': [], 'train_safety_loss': [],
             'val_total_loss': [], 'val_mse': [], 'val_mae': [],
-            'val_physics_loss': [], 'val_safety_loss': [], 'val_constraint_loss': [],
+            'val_physics_loss': [], 'val_safety_loss': [],
             'train_weights': [], 'train_log_vars': [],
             'learning_rate': []  # Track learning rate for both physics and non-physics models
         }
@@ -67,7 +67,8 @@ class BaseTrainer(ABC):
             config_params: Dictionary of configuration parameters for this run (for logging)
         """
         # Initialize training log file if config supports it
-        if hasattr(self.config, 'get_training_log_path') and model_name is not None and num_buses is not None:
+        debug_enabled = getattr(self.config, 'DEBUG_ENABLE', False)
+        if debug_enabled and hasattr(self.config, 'get_training_log_path') and model_name is not None and num_buses is not None:
             # Get mode from config (train/test)
             mode = getattr(self.config, 'DATA_MODE', 'train')
             self.log_file_path = self.config.get_training_log_path(num_buses, model_name, mode)
@@ -199,7 +200,6 @@ class BaseTrainer(ABC):
             self.history['train_mae'].append(train_metrics.get('mae', 0.0))
             self.history['train_physics_loss'].append(train_metrics['physics_loss'])
             self.history['train_safety_loss'].append(train_metrics['safety_loss'])
-            self.history['train_constraint_loss'].append(train_metrics.get('constraint_loss', 0.0))
             # Track Kendall's learned weights and log_vars
             if 'weights' in train_metrics:
                 self.history['train_weights'].append(train_metrics['weights'])
@@ -218,7 +218,6 @@ class BaseTrainer(ABC):
             self.history['val_mae'].append(val_metrics.get('mae', 0.0))
             self.history['val_physics_loss'].append(val_metrics['physics_loss'])
             self.history['val_safety_loss'].append(val_metrics['safety_loss'])
-            self.history['val_constraint_loss'].append(val_metrics.get('constraint_loss', 0.0))
             
             # Forensic: Log model weights periodically
             if hasattr(self, 'forensic_logger') and self.forensic_logger and self.forensic_logger.enabled:
@@ -252,25 +251,23 @@ class BaseTrainer(ABC):
             
             # Log complete epoch summary to file (one line per epoch)
             if hasattr(self, 'criterion') and self.criterion.is_physics_informed:
-                # Physics-informed model: include MSE, physics, safety, constraint, weights, log_vars, and LR
+                # Physics-informed model: include MSE, physics, safety, weights, log_vars, and LR
                 train_phys = train_metrics['physics_loss']
                 train_safe = train_metrics['safety_loss']
-                train_constraint = train_metrics.get('constraint_loss', 0.0)
                 val_phys = val_metrics['physics_loss']
                 val_safe = val_metrics['safety_loss']
-                val_constraint = val_metrics.get('constraint_loss', 0.0)
                 
                 # Extract Kendall's learned weights
-                weights = train_metrics['weights']
-                weight_str = f"w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f},{weights[3]:.2f}]"
+                weights = train_metrics.get('weights')
+                weight_str = f"w=[{weights[0]:.2f},{weights[1]:.2f},{weights[2]:.2f}]" if weights is not None else "w=N/A"
                 
                 # Extract log_vars for debugging (these are added to total loss and can cause overfitting)
                 log_vars_str = ""
                 if hasattr(self.criterion, 'log_vars'):
                     log_vars = [v.item() for v in self.criterion.log_vars]
-                    log_vars_str = f" | log_vars=[{log_vars[0]:.3f},{log_vars[1]:.3f},{log_vars[2]:.3f},{log_vars[3]:.3f}]"
+                    log_vars_str = f" | log_vars=[{log_vars[0]:.3f},{log_vars[1]:.3f},{log_vars[2]:.3f}]"
                 
-                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f}, Const={train_constraint:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f}, Const={val_constraint:.6f} | {weight_str}{log_vars_str} | LR={current_lr:.6f} | Gap={overfitting_gap:+.6f} | Ratio={overfitting_ratio:.3f} | GradNorm={avg_grad_norm:.4f} | WD={weight_decay:.6f}")
+                _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f}, Phys={train_phys:.6f}, Safe={train_safe:.6f} | Val: MSE={val_mse:.6f}, Phys={val_phys:.6f}, Safe={val_safe:.6f} | {weight_str}{log_vars_str} | LR={current_lr:.6f} | Gap={overfitting_gap:+.6f} | Ratio={overfitting_ratio:.3f} | GradNorm={avg_grad_norm:.4f} | WD={weight_decay:.6f}")
             else:
                 # Non-physics model: only MSE and LR
                 _log(f"Epoch {epoch} | Train: MSE={train_mse:.6f} | Val: MSE={val_mse:.6f} | LR={current_lr:.6f} | Gap={overfitting_gap:+.6f} | Ratio={overfitting_ratio:.3f} | GradNorm={avg_grad_norm:.4f} | WD={weight_decay:.6f}")
@@ -323,6 +320,10 @@ class BaseTrainer(ABC):
 
     def _save_checkpoint(self, filename):
         """Helper function to save model checkpoints."""
+        # Only save if explicitly enabled in config
+        if not getattr(self.config, 'SAVE_CHECKPOINTS', True):
+            return
+            
         if hasattr(self.config, 'get_checkpoint_path'):
             path = self.config.get_checkpoint_path(filename)
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -331,5 +332,3 @@ class BaseTrainer(ABC):
     def get_training_history(self):
         """Return the training history dictionary."""
         return self.history
-
-    
