@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from .base_model import BaseModel
-from .professional_gcn_layer import ProfessionalGCNLayer
+from .gcn_layer import GCNLayer
 from typing import Optional
-from utils.forensic_logger import get_logger
 
 class GCN(BaseModel):
     """
@@ -30,7 +28,7 @@ class GCN(BaseModel):
         self.gc_layers = nn.ModuleList()
         for i in range(num_gc_layers):
             in_dim = feature_dim if i == 0 else hidden_dim
-            self.gc_layers.append(ProfessionalGCNLayer(in_dim, hidden_dim, bias=True, activation='relu'))
+            self.gc_layers.append(GCNLayer(in_dim, hidden_dim, bias=True, activation='relu'))
         
         self.dropout_layer = nn.Dropout(dropout)
         
@@ -60,7 +58,7 @@ class GCN(BaseModel):
         # Standard GCN needs to normalize adjacency internally if not pre-normalized
         # In Suspect #2 fix, we disabled pre-normalization in loader.
         # So we need to normalize here.
-        adj_norm = self._normalize_adjacency_batch(adj)
+        adj_norm = GCNLayer.normalize_adjacency(adj)
 
         for gc_layer in self.gc_layers:
             # Use normalized adjacency
@@ -69,29 +67,3 @@ class GCN(BaseModel):
         
         out = self.output_layer(x)
         return out
-        
-    def _normalize_adjacency_batch(self, adj: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize a batch of adjacency matrices (Symmetric normalization).
-        D^-0.5 * (A + I) * D^-0.5
-        """
-        batch_size, num_nodes, _ = adj.shape
-        device = adj.device
-        dtype = adj.dtype
-        
-        # Add self-loops (A_hat = A + I) - vectorized
-        identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
-        adj_hat = adj + identity
-        
-        # Compute degree matrix
-        degree = torch.sum(adj_hat, dim=-1)  # [batch_size, num_nodes]
-        epsilon = 1e-8
-        degree = degree + epsilon
-        
-        # Symmetric normalization: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
-        degree_inv_sqrt = torch.pow(degree, -0.5)  # [batch_size, num_nodes]
-        degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)
-        degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
-        
-        adj_norm = torch.bmm(torch.bmm(degree_matrix_inv_sqrt, adj_hat), degree_matrix_inv_sqrt)
-        return adj_norm

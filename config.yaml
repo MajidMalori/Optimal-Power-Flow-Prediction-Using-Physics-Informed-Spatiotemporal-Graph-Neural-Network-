@@ -60,7 +60,7 @@ physics:
 # --- Data Configuration ---
 data:
   hours_per_day: 24
-  sequence_length: 5  # For RNN models
+  sequence_length: 10  # Increased from 5 to 10 for better context (matches user intent)
   contingency_rate: 0.05  # Probability of line contingency per timestep
   pmu_coverage: 0.3  # Fraction of buses with PMU measurements
 
@@ -74,8 +74,8 @@ data:
 # - Embedding Dimension: normal=64-150, medium=100-200, large=100-300
 model_capacity:
   bus_33: 'large'     # All buses use same research-backed ranges
-  bus_57: 'large'     # All buses use same research-backed ranges
-  bus_118: 'large'    # All buses use same research-backed ranges
+  bus_57: 'large'    
+  bus_118: 'large'    
 
 # --- MOOPF (Multi-Objective Optimal Power Flow) Weights ---
 moopf:
@@ -109,11 +109,10 @@ experimental:
   # models_to_train: "all"  # Use test_config above (default behavior)
   models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
   
-  bus_systems: [33]
+  bus_systems: [33,57,118]
   data_mode: "train"
-  train_timesteps: 240  # 417 days
-  test_timesteps: 240 # 1 day
-  force_cpu: false
+  train_timesteps: 10008  # 417 days
+  test_timesteps: 24 # 24 day
   parallel_data_loading: true
   data_workers: 0
   pin_memory: false

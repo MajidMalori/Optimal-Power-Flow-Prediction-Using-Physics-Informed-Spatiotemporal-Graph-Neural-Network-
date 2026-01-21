@@ -6,12 +6,11 @@ Consolidates PIGCGRU, PIGCLSTM, ResnetPIGCGRU, and ResnetPIGCLSTM into a single 
 import torch
 import torch.nn as nn
 from typing import Optional
-from .spatiotemporal_base import SpatioTemporalBase
-from .professional_graph_rnn_cells import ProfessionalGraphConvGRUCell, ProfessionalGraphConvLSTMCell
-from utils.forensic_logger import get_logger
+from .graph_rnn_base import GraphRNNBase
+from .graph_rnn_cells import GraphConvGRUCell, GraphConvLSTMCell
 
 
-class SpatioTemporalRNN(SpatioTemporalBase):
+class GraphRNN(GraphRNNBase):
     """
     Unified Physics-Informed Graph Convolutional RNN.
     
@@ -56,12 +55,12 @@ class SpatioTemporalRNN(SpatioTemporalBase):
         self.rnn_type = rnn_type
         self.use_resnet = use_resnet
         
-        # Create Professional RNN cells based on type
-        # FIXED: These cells integrate graph convolution INSIDE the RNN update rule,
-        # eliminating redundant double convolution
+        # Refactored RNN cell initialization to use integrated GraphConv cells.
+        # This eliminates redundant double convolution by performing graph operations
+        # directly within the RNN update rule, improving computational efficiency.
         if rnn_type == 'GRU':
             self.rnn_cells = nn.ModuleList([
-                ProfessionalGraphConvGRUCell(
+                GraphConvGRUCell(
                     input_dim=feature_dim if i == 0 else hidden_dim,  # First layer takes raw input
                     hidden_dim=hidden_dim,
                     num_buses=num_buses,
@@ -70,7 +69,7 @@ class SpatioTemporalRNN(SpatioTemporalBase):
             ])
         else:  # LSTM
             self.rnn_cells = nn.ModuleList([
-                ProfessionalGraphConvLSTMCell(
+                GraphConvLSTMCell(
                     input_dim=feature_dim if i == 0 else hidden_dim,  # First layer takes raw input
                     hidden_dim=hidden_dim,
                     num_buses=num_buses,
@@ -138,9 +137,10 @@ class SpatioTemporalRNN(SpatioTemporalBase):
             c_layers = [torch.zeros(batch_size, num_nodes, self.hidden_dim, device=x.device, dtype=x.dtype)
                        for _ in range(len(self.rnn_cells))]
         
-        # Process sequence timestep by timestep
-        # FIXED: Removed redundant GCN pre-processing. Graph convolution is now
-        # integrated INSIDE the RNN cells (ProfessionalGraphConvGRUCell/LSTMCell)
+        # Process sequence timestep by timestep.
+        # Removed external GCN pre-processing step as graph convolution is now
+        # integrated directly into the GraphConvGRUCell/GraphConvLSTMCell.
+        # This optimizes the forward pass by reducing operation count.
         for t in range(seq_len):
             # Get input at timestep t (RAW input, no pre-processing)
             x_t = x[:, t, :, :]  # [batch, nodes, feature_dim]
@@ -148,17 +148,19 @@ class SpatioTemporalRNN(SpatioTemporalBase):
             # Get adjacency for this timestep [batch, nodes, nodes]
             A_adp_t = A_adp[:, t, :, :]
             
-            # Process through RNN layers
-            # FIXED: Pass RAW input x_t directly to first RNN cell
-            # The cell will handle graph convolution on combined input+hidden state
+            # Process through RNN layers.
+            # Pass raw input x_t directly to the first RNN cell.
+            # The cell internally handles graph convolution on the concatenated
+            # input and hidden state, ensuring correct feature fusion.
             h_input = x_t  # [batch, nodes, feature_dim] for first layer, [batch, nodes, hidden_dim] for subsequent
             for layer_idx, rnn_cell in enumerate(self.rnn_cells):
                 # Check if we can use residual connection (only when input_dim == output_dim)
                 can_use_residual = self.use_resnet and (layer_idx > 0 or self.rnn_cells[layer_idx].input_dim == self.rnn_cells[layer_idx].hidden_dim)
                 
                 if can_use_residual:
-                    # FIXED: Pre-activation normalization (He et al., 2016)
-                    # Normalize BEFORE the operation, not after
+                    # Implemented Pre-activation normalization (He et al., 2016).
+                    # Applies LayerNorm before the operation to improve gradient flow
+                    # and training stability in deep residual networks.
                     residual = h_input  # Store input for residual connection
                     h_norm = self.layer_norms[layer_idx](h_input)  # Normalize FIRST
                 else:
@@ -185,7 +187,7 @@ class SpatioTemporalRNN(SpatioTemporalBase):
         # Use hidden state from last layer at final timestep
         last_step_per_node = h_layers[-1]  # [batch, nodes, hidden_dim]
       
-        output = self.apply_output_transformation(last_step_per_node, bus_types)
+        output = self.apply_output_transformation(last_step_per_node)
           
         # FORENSIC: Log output
         if self.forensic_logger and self.forward_count % self.forensic_logger.log_interval == 1:
@@ -197,5 +199,27 @@ class SpatioTemporalRNN(SpatioTemporalBase):
                 )
         
         return output
-    
 
+# ==============================================================================
+# Factory Classes for Backward Compatibility
+# ==============================================================================
+
+class PIGCLSTM(GraphRNN):
+    """Physics-Informed Graph Convolutional LSTM."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, rnn_type='LSTM', use_resnet=False, **kwargs)
+
+class PIGCGRU(GraphRNN):
+    """Physics-Informed Graph Convolutional GRU."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, rnn_type='GRU', use_resnet=False, **kwargs)
+
+class ResnetPIGCLSTM(GraphRNN):
+    """ResNet + Physics-Informed Graph Convolutional LSTM."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, rnn_type='LSTM', use_resnet=True, **kwargs)
+
+class ResnetPIGCGRU(GraphRNN):
+    """ResNet + Physics-Informed Graph Convolutional GRU."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, rnn_type='GRU', use_resnet=True, **kwargs)

@@ -57,8 +57,8 @@ Where $|V|_{\mathrm{meas}}$ and $\theta_{\mathrm{meas}}$ are sparse PMU measurem
 ## 3. Model Architectures
 The repository implements several state-of-the-art architectures, all inheriting from a common base class.
 
-### 3.1. Professional GCN Layer (`models/professional_gcn_layer.py`)
-The core building block is a mathematically rigorous implementation of the Graph Convolutional Network (GCN) layer. Unlike standard implementations, this layer explicitly handles:
+### 3.1. Graph Convolutional Network (GCN) Layer (`models/gcn_layer.py`)
+The core building block is a standard implementation of the Graph Convolutional Network (GCN) layer, enhanced with:
 1.  **Self-Loops**: $\tilde{A} = A + I$ to preserve node features.
 2.  **Symmetric Normalization**: $\tilde{D}^{-\frac{1}{2}}\tilde{A}\tilde{D}^{-\frac{1}{2}}$ to prevent gradient explosion in deep networks.
 3.  **Operation Order**:
@@ -66,7 +66,7 @@ The core building block is a mathematically rigorous implementation of the Graph
 $$H^{(l+1)} = \sigma(\underbrace{\tilde{D}^{-\frac{1}{2}}\tilde{A}\tilde{D}^{-\frac{1}{2}}}_{\text{Normalized Adj}} (\underbrace{H^{(l)} W^{(l)}}_{\text{Linear Trans}}))$$
 
 ### 3.2. Adaptive Graph Models (AdaptiveGCN / AdaptivePIGCN)
-These models (`models/adaptive_pigcn.py`) learn the graph structure dynamically. Instead of relying solely on the physical topology $A_{phys}$, they compute a learned adjacency matrix $A_{learn}$ via node embeddings $E_1, E_2$:
+These models (`models/adaptive_gcn.py`) learn the graph structure dynamically using the **Adaptive Topology Learner** (`models/adaptive_topology_learner.py`). Instead of relying solely on the physical topology $A_{phys}$, they compute a learned adjacency matrix $A_{learn}$ via node embeddings $E_1, E_2$:
 
 $$A_{learn} = \text{ReLU}(E_1 E_2^T)$$
 
@@ -77,8 +77,8 @@ $$A_{final} = \phi A_{phys} + (1-\phi) A_{learn}$$
 This allows the model to capture unobserved correlations and electrical distances that are not present in the physical connectivity matrix.
 
 ### 3.3. Physics-Informed Graph Recurrent Networks (PIGC-RNN)
-For spatiotemporal dynamics, we employ **PIGCLSTM** and **PIGCGRU** (`models/pigc_rnn.py`). These architectures combine Graph Convolutions with LSTM/GRU cells.
-*   **Professional GraphConvGRU Cell** (`models/professional_graph_rnn_cells.py`):
+For spatiotemporal dynamics, we employ **PIGCLSTM** and **PIGCGRU** (`models/graph_rnn.py`). These architectures combine Graph Convolutions with LSTM/GRU cells.
+*   **GraphConvGRU Cell** (`models/graph_rnn_cells.py`):
     *   Integrates the GCN operation *inside* the GRU gate equations.
     *   **Key Innovation**: Concatenates input $x_t$ and hidden state $h_{t-1}$ *before* convolution to reduce computational overhead and improve feature mixing.
     
@@ -112,75 +112,22 @@ $$\mathcal{L}_{\text{safe}} = \text{ReLU}(|V| - V_{\text{max}})^2 + \text{ReLU}(
 
 4.  **Constraint Loss ($\mathcal{L}_{const}$)**: Penalties for non-physical negative values (e.g., negative generation).
 
-### 4.2. Novel Hyperparameter Optimization: Perturbation-Driven Seagull Algorithm (MoSOA)
+### 4.2. Hyperparameter Optimization: Perturbation-Driven Seagull Algorithm (MoSOA)
+The framework employs **MoSOA**, a bio-inspired optimization algorithm designed for efficient hyperparameter tuning in deep learning applications.
 
-> **Published Research Contribution**: This framework employs a novel **Perturbation-Driven Seagull Optimization Algorithm (MoSOA)** for hyperparameter tuning, specifically designed for deep learning applications. This algorithm has been **accepted for publication in IOSR Journals** and represents a significant advancement in bio-inspired optimization for neural network hyperparameter search.
+MoSOA addresses the limitations of traditional grid search and Bayesian optimization by combining:
+1. **Bio-Inspired Search Strategy**: Mimics the spiral attack pattern of seagulls for efficient exploration.
+2. **Adaptive Perturbation**: Dynamically adjusts the exploration-exploitation balance based on swarm fitness diversity.
+3. **Multi-Objective Fitness**: Optimizes for validation loss, training time, and model complexity.
 
-Traditional grid search and random search are inefficient for high-dimensional hyperparameter spaces. Bayesian optimization is effective but computationally expensive. Our **MoSOA algorithm** addresses these limitations by:
-
-1. **Bio-Inspired Search Strategy**: Mimics the spiral attack pattern of seagulls hunting prey, enabling efficient exploration of the hyperparameter landscape.
-2. **Adaptive Perturbation Mechanism**: Dynamically adjusts exploration-exploitation balance based on swarm fitness diversity, preventing premature convergence.
-3. **Multi-Objective Fitness**: Simultaneously optimizes for validation loss, training time, and model complexity.
-
-**Key Algorithmic Innovations**:
-- **Diversity-Driven Adaptation**: Adjusts search parameters based on population variance to escape local optima.
-- **Spiral Movement with Perturbation**: Combines deterministic spiral trajectories with stochastic perturbations for robust search.
-- **Early Stopping Integration**: Efficiently evaluates partial training curves to discard poor configurations early.
-
-The MoSOA algorithm has proven particularly effective for tuning Graph Neural Networks on power system applications, where the hyperparameter space includes both architectural parameters (`hidden_dim`, `num_gc_layers`) and domain-specific parameters (`embedding_dim`, `phi` for adaptive graph learning).
-
-#### Why Create a Custom Tuner? Empirical Justification
-
-To validate the effectiveness of MoSOA and justify the development of a custom hyperparameter tuner instead of using established frameworks (e.g., Optuna, Ray Tune), we conducted comprehensive benchmarks against state-of-the-art methods.
-
-**Benchmark Setup**:
-- **Fixed Evaluation Budget**: 120 function evaluations (fair comparison)
-- **Test Problems**: 
-  - Hyperparameter Landscape (4D) - realistic GNN tuning simulation
-  - Rastrigin (5D) - highly multimodal benchmark
-  - Ackley (6D) - challenging high-dimensional landscape
-- **Compared Methods**:
-  - **Random Search** (common baseline)
-  - **Grid Search** (exhaustive but expensive)
-  - **PSO** (Particle Swarm Optimization - popular bio-inspired method)
-  - **GWO** (Grey Wolf Optimizer - recent bio-inspired method)
-  - **MoSOA** (our novel algorithm)
-
-**Benchmark Results**:
+**Performance Benchmarks**:
+On the IEEE 118-bus system, MoSOA achieves **15-20% better validation loss** compared to random search with **40% fewer model evaluations**.
 
 | Metric | MoSOA | PSO | GWO | Random Search | Grid Search |
 |--------|-------|-----|-----|---------------|-------------|
 | **Average Rank** (lower=better) | **2.00** |  3.00 | 1.67 | 3.33 | 5.00 |
-| **Wins** (best score achieved) | **2/3** | 0/3 | 1/3 | 0/3 | 0/3 |
 | **Convergence Speed** (evaluations) | **4.3** | 5.7 | 4.3 | 40.0 | 14.3 |
 | **Speed-up vs Random** | **9.23x** | 7.0x | 9.2x | 1.0x | 2.8x |
-
-**Key Findings**:
-
-1. **Competitive Performance**: MoSOA achieved average rank 2.0, winning 2 out of 3 benchmarks (Rastrigin 5D and Ackley 6D)
-2. **9.23x Faster Convergence**: MoSOA reaches good solutions in 4.3 evaluations on average, compared to 40.0 for random search
-3. **40% Better Than Random**: Significant improvement over naive baselines
-4. **Robustness**: Performed well across diverse problem landscapes (convex, multimodal, high-dimensional)
-
-**Why Not Use Optuna or Ray Tune?**
-
-1. **Computational Overhead**: Bayesian optimization (Optuna's default) requires expensive surrogate model fitting (1-5 seconds per trial)
-   - **MoSOA advantage**: Bio-inspired swarm approach has minimal overhead
-   
-2. **Scalability**: Gaussian Processes struggle with high-dimensional spaces (>10 parameters)
-   - **MoSOA advantage**: Adaptive perturbation mechanism scales naturally to high dimensions
-   
-3. **Domain-Specific Design**: MoSOA is tailored for physics-informed neural networks with noisy validation landscapes
-   - **MoSOA advantage**: Diversity-driven adaptation prevents premature convergence on noisy objectives
-   
-4. **Reproducibility**: Custom implementation ensures full control over optimization trajectory
-   - **MoSOA advantage**: Transparent algorithm suitable for academic publication
-
-**Performance Claim**: On the IEEE 118-bus system with 4-6 hyperparameters, MoSOA achieves **15-20% better validation loss** compared to random search with **40% fewer model evaluations**, making it ideal for computationally expensive physics-informed models where each evaluation requires minutes of training.
-
-**Testing Your Own Benchmarks**: Run `python benchmark_mosoa.py` to reproduce these results or test on custom objective functions.
-
-**Performance**: On the IEEE 118-bus system, MoSOA achieves 15-20% better validation loss compared to random search with 40% fewer model evaluations, making it ideal for computationally expensive physics-informed models.
 
 ### 4.3. Training Configuration
 *   **Optimizer**: AdamW with Weight Decay ($10^{-4}$).
@@ -228,80 +175,39 @@ This framework includes extensive automation features that handle data validatio
 
 ### 7.1. Automation Features
 
-#### 7.1.1. Intelligent Data Validation (`utils/data_validation.py`)
+#### 7.1.1. Data Validation (`utils/data_validation.py`)
 
-The system automatically validates data before training and regenerates only what's necessary:
+The system automatically validates data before training and regenerates only what is necessary:
 
 **Key Features:**
-- **Per-Bus-System Validation**: Validates each bus system (33, 57, 118) independently
-- **Selective Regeneration**: Only regenerates invalid bus systems, preserving valid data
-- **Configuration Hash Checking**: Detects configuration changes (timesteps, mode, etc.) and regenerates affected data
-- **Metadata Management**: Uses per-process metadata files to support parallel execution without race conditions
-- **Automatic Cleanup**: Removes old data files for bus systems being regenerated (preserves others)
-
-**What Gets Validated:**
-- File existence (all required data files present)
-- Timestep consistency (matches config requirements)
-- Mode consistency (train vs test)
-- Configuration hash (detects config changes)
-- Data structure integrity (OPF format, file shapes)
+- **Per-Bus-System Validation**: Validates each bus system (33, 57, 118) independently.
+- **Selective Regeneration**: Only regenerates invalid bus systems, preserving valid data.
+- **Configuration Hash Checking**: Detects configuration changes (timesteps, mode, etc.) and regenerates affected data.
+- **Metadata Management**: Uses per-process metadata files to support parallel execution without race conditions.
+- **Automatic Cleanup**: Removes old data files for bus systems being regenerated.
 
 **Example Workflow:**
-```
-User runs: python train.py
-→ System validates all bus systems
-→ Finds case33 has wrong timesteps (12 vs required 10)
-→ Automatically deletes only case33 data (preserves case57, case118)
-→ Regenerates case33 with correct timesteps
-→ Generates plots for case33 automatically
-→ Proceeds with training
-```
+1. User runs: `python train.py`
+2. System validates all bus systems.
+3. Finds discrepancies (e.g., incorrect timesteps).
+4. Automatically deletes and regenerates only the affected data.
+5. Proceeds with training.
 
-#### 7.1.2. Automatic Plot Generation
+#### 7.1.2. Plot Generation
 
-Plots are automatically generated after data generation:
+Plots are automatically generated after data generation or validation:
 
-**When Plots Are Generated:**
-- After running `data/main.py` directly
-- After data validation regenerates data
-- Only for bus systems that were generated/regenerated
-
-**What Gets Plotted:**
-- **Data Profile**: Load/generation patterns and data quality
-- **Convergence Story**: Data generation quality metrics across renewable fractions
-- **Physics Health**: Voltage distribution and system health
+- **Data Profile**: Load/generation patterns and data quality.
+- **Convergence**: Data generation quality metrics.
+- **Physics Health**: Voltage distribution and system health.
 
 **Plot Locations:**
 - Train mode: `data/plots_train/`
 - Test mode: `data/plots_test/`
 
-**Automatic Cleanup:**
-- Old plots for regenerated bus systems are automatically deleted
-- Plots for other bus systems are preserved
-
 #### 7.1.3. Parallel Execution Support
 
-The system supports running data generation in parallel for different bus systems:
-
-**How It Works:**
-- Each process writes to its own metadata file: `data_generation_metadata_{process_id}_{timestamp}.json`
-- No race conditions: Each process has a unique filename
-- Metadata files are automatically merged when reading
-- Cleanup is selective: Only affects bus systems being regenerated
-
-**Example:**
-```bash
-# Terminal 1
-python data/main.py --mode train --buses 33
-
-# Terminal 2 (run simultaneously)
-python data/main.py --mode train --buses 57
-
-# Terminal 3 (run simultaneously)
-python data/main.py --mode train --buses 118
-```
-
-All three processes run safely in parallel without conflicts.
+The system supports running data generation in parallel for different bus systems. Each process uses unique metadata files to prevent race conditions.
 
 ### 7.2. Command-Line Interface (CLI)
 
@@ -319,9 +225,9 @@ python data/main.py [OPTIONS]
   - `train`: Generates training data (default: 10008 timesteps)
   - `test`: Generates test data (default: 240 timesteps)
 
-- `--time_steps TIMESTEPS` or `--timesteps TIMESTEPS`: Number of time steps to generate
+- `--timesteps TIMESTEPS`: Number of time steps to generate
   - Overrides default values from config
-  - Example: `--time_steps 1000`
+  - Example: `--timesteps 1000`
 
 - `--buses BUS_SYSTEMS`: Comma-separated bus system numbers to generate
   - Examples: `--buses 33`, `--buses 33,57`, `--buses 33,57,118`
@@ -348,7 +254,7 @@ python data/main.py
 python data/main.py --mode test --buses 33
 
 # Generate training data with custom timesteps for specific buses
-python data/main.py --mode train --time_steps 5000 --buses 33,57
+python data/main.py --mode train --timesteps 5000 --buses 33,57
 
 # Generate data and disable progress bars
 python data/main.py --no_progress_bar
@@ -376,7 +282,7 @@ python train.py [OPTIONS]
   - Overrides `data_mode` in config.yaml
   - Example: `--mode test` uses test data
 
-- `--time_steps TIMESTEPS`: Override number of time steps
+- `--timesteps TIMESTEPS`: Override number of time steps
   - Overrides `train_timesteps` or `test_timesteps` in config.yaml
 
 - `--output_dir PATH`: Override output directory for results
@@ -461,7 +367,7 @@ python train.py
 
 ```bash
 # Regenerate only 33-bus system with new timesteps
-python data/main.py --mode train --time_steps 5000 --buses 33
+python data/main.py --mode train --timesteps 5000 --buses 33
 
 # Training will automatically use the new data
 python train.py

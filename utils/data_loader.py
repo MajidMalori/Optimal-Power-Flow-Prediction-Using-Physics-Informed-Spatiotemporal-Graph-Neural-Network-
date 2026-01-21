@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.data.dataloader import default_collate
 from torch.nn.utils.rnn import pad_sequence
 from config import FeatureIndices
-from utils.contingency_ybus import modify_adjacency_for_line_outage
+from utils.contingency_ybus import modify_adjacency_for_line_outage, normalize_adjacency
 
 class PowerSystemNormalizer:
     """
@@ -144,7 +144,7 @@ class PowerSystemNormalizer:
 
 class PowerSystemLazyDataset(Dataset):
     """
-    Professional lazy-loading PyTorch Dataset for power system time-series data.
+    Lazy-loading PyTorch Dataset for power system time-series data.
     
     This dataset only stores file paths and metadata, loading data on-demand in __getitem__.
     This is the scalable, memory-efficient approach for large datasets.
@@ -336,18 +336,13 @@ def _convert_edge_index_to_adj(edge_index, num_nodes):
     return adj
 
 def pre_normalize_adjacency(adj: np.ndarray) -> np.ndarray:
+    """
+    Normalize adjacency matrix using the centralized utility.
+    Wraps utils.contingency_ybus.normalize_adjacency for Numpy input/output.
+    """
     adj_tensor = torch.from_numpy(adj).float()
-    num_nodes = adj_tensor.shape[0]
-    identity = torch.eye(num_nodes, dtype=adj_tensor.dtype)
-    adj_hat = adj_tensor + identity
-    degree = torch.sum(adj_hat, dim=1)
-    epsilon = 1e-8
-    degree = degree + epsilon
-    degree_inv_sqrt = torch.pow(degree, -0.5)
-    degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)
-    degree_matrix_inv_sqrt = torch.diag(degree_inv_sqrt)
-    normalized_adj = degree_matrix_inv_sqrt @ adj_hat @ degree_matrix_inv_sqrt
-    return normalized_adj.numpy().astype(np.float32)
+    normalized_tensor = normalize_adjacency(adj_tensor)
+    return normalized_tensor.numpy().astype(np.float32)
 
 def _build_topology_cache_from_ids(file_metadata, base_adjacency, num_buses, case_name, data_dir, disable_normalization=False):
     """

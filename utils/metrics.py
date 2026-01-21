@@ -1,7 +1,36 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple, Dict, Optional
 from config import FeatureIndices
+
+def calculate_power_flow(vm_pu: torch.Tensor, va_rad: torch.Tensor, ybus_batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Calculate theoretical power flow (injections) from voltage state and Ybus.
+    
+    Args:
+        vm_pu: Voltage magnitude (p.u.) [batch, buses]
+        va_rad: Voltage angle (radians) [batch, buses]
+        ybus_batch: Ybus matrix (p.u.) [batch, buses, buses]
+        
+    Returns:
+        Tuple of (P_flow_pu, Q_flow_pu)
+    """
+    # Construct Complex Voltage
+    V = vm_pu * torch.exp(1j * va_rad)
+    
+    # Ensure Ybus is complex
+    ybus_complex = ybus_batch if ybus_batch.is_complex() else ybus_batch.to(torch.complex64)
+    
+    # Calculate Current Injection: I = Y @ V
+    # Use bmm (batch matrix multiplication)
+    I_inj = torch.bmm(ybus_complex, V.unsqueeze(-1)).squeeze(-1)
+    
+    # Calculate Power Injection: S = V * conj(I)
+    S_flow_pu = V * torch.conj(I_inj)
+    
+    return S_flow_pu.real, S_flow_pu.imag
+
 
 class PowerSystemLoss(nn.Module):
     """
@@ -73,20 +102,8 @@ class PowerSystemLoss(nn.Module):
         # Voltage Angle (radians)
         va_rad = preds_phys[..., FeatureIndices.VA]
         
-        # Construct Complex Voltage (in-place where possible)
-        V = vm_pu * torch.exp(1j * va_rad)
-        
-        # Calculate Theoretical Power Flow (Injection)
-        # S = V * conj(Y * V)
-        # Ybus is in p.u.
-        ybus_complex = ybus_batch if ybus_batch.is_complex() else ybus_batch.to(torch.complex64)
-        
-        # Optimized: Use matmul instead of einsum for better memory efficiency
-        # I_inj = Y @ V
-        I_inj = torch.bmm(ybus_complex, V.unsqueeze(-1)).squeeze(-1)
-        S_flow_pu = V * torch.conj(I_inj)
-        P_flow_pu = S_flow_pu.real
-        Q_flow_pu = S_flow_pu.imag
+        # Calculate Theoretical Power Flow (Injection) using helper
+        P_flow_pu, Q_flow_pu = calculate_power_flow(vm_pu, va_rad, ybus_batch)
         
         # Extract Predicted Net Injections (Physical Units -> Convert to p.u.)
         # Use direct indexing to avoid intermediate copies
@@ -117,9 +134,6 @@ class PowerSystemLoss(nn.Module):
         v_upper_violation = F.relu(vm_pu - self.v_max)
         v_lower_violation = F.relu(self.v_min - vm_pu)
         l3_loss = torch.mean(v_upper_violation**2 + v_lower_violation**2)
-        
-        # 4. Physics Constraint Loss (L4) - REMOVED
-        # Model architecture now enforces positivity via Softplus.
         
         # 5. Combine with Kendall's Homoscedastic Uncertainty Weighting
         # Loss = (w_i * L_i + log_var_i) where w_i = exp(-log_var_i)
@@ -192,23 +206,11 @@ def compute_moopf_metrics(preds_phys: torch.Tensor, ybus_batch: torch.Tensor, ba
     # power balance physics (Gen < Load), which happens during early training.
     # The Voltage method guarantees non-negative losses for a passive network.
 
-    # Construct Complex Voltage
-    V = vm_pu * torch.exp(1j * va_rad)
-    
-    # Ensure Ybus is complex
-    if not ybus_batch.is_complex():
-        ybus_batch = ybus_batch.to(torch.complex64)
-
-    # Calculate Total Complex Power Injection S_inj = V * conj(Y * V)
-    # The sum of real power injections in a closed system equals total losses.
-    # P_loss = Sum(Real(S_inj))
-    
-    # I_inj = Y @ V
-    I_inj = torch.bmm(ybus_batch, V.unsqueeze(-1)).squeeze(-1)
-    S_inj = V * torch.conj(I_inj)
-    P_inj = S_inj.real
+    # Calculate Power Injection using helper
+    P_inj, _ = calculate_power_flow(vm_pu, va_rad, ybus_batch)
     
     # Sum over buses to get total system loss (in p.u.)
+    # The sum of real power injections in a closed system equals total losses.
     total_losses_pu = P_inj.sum(dim=1)
     
     # Convert to MW

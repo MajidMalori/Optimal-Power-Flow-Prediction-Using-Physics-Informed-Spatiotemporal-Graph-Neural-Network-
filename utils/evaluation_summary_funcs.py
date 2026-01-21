@@ -87,6 +87,9 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any =
     print(f"{'Model':<15} {'Bus':<8} {'Type':<11} {'H.Dim':<7} {'Layers':<7} {'Train MSE':<12} {'Test MSE':<12} {'MOOPF':<12} {'P.Loss':<10} {'V.Dev':<10} {'Carbon':<10}")
     print("-" * 140)
     
+    # Prepare data for CSV
+    summary_data = []
+    
     # Print each result
     for result in all_results:
         model_type = 'Physics' if result['is_physics_informed'] else 'NonPhys'
@@ -105,8 +108,33 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any =
         carbon = f"{result.get('carbon_emissions', 'N/A'):.4f}" if isinstance(result.get('carbon_emissions'), (int, float)) else 'N/A'
         
         print(f"{result['model_name']:<15} {result['num_buses']:<8} {model_type:<11} {result['best_hidden_dim']:<7} {result['best_gc_layers']:<7} {train_mse_str:<12} {test_mse_str:<12} {moopf_str:<12} {p_loss:<10} {v_dev:<10} {carbon:<10}")
+        
+        # Append to CSV data
+        summary_data.append({
+            'Model': result['model_name'],
+            'Bus System': result['num_buses'],
+            'Type': model_type,
+            'Hidden Dim': result['best_hidden_dim'],
+            'GC Layers': result['best_gc_layers'],
+            'Train MSE': train_mse_str,
+            'Test MSE': test_mse_str,
+            'MOOPF Score': moopf_str,
+            'Power Loss': p_loss,
+            'Voltage Deviation': v_dev,
+            'Carbon Emissions': carbon,
+            'Training Time': result.get('training_time', 'N/A')
+        })
     
     print("-" * 140)
+    
+    # Save to CSV
+    if config and hasattr(config, 'CURRENT_RUN_DIR'):
+        try:
+            csv_path = os.path.join(config.CURRENT_RUN_DIR, "comprehensive_summary.csv")
+            pd.DataFrame(summary_data).to_csv(csv_path, index=False)
+            print(f"\n [INFO] Comprehensive summary saved to: {csv_path}")
+        except Exception as e:
+            print(f"\n [WARNING] Failed to save comprehensive summary CSV: {e}")
     
     # Find best performers
     successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]

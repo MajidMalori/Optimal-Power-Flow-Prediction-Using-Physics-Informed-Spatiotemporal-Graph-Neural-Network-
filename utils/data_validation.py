@@ -122,6 +122,37 @@ def find_latest_timestamp(data_dir: str, case_name: str = None) -> str:
     
     return max(timestamps) if timestamps else None
 
+def get_data_file_path(data_dir: str, case_name: str, file_type: str, frac: float, timestamp: str = None) -> str:
+    """
+    Construct the absolute file path for a data file.
+    Supports both timestamped (new) and legacy (old) formats.
+    """
+    name_part, ext_part = file_type.split('.')
+    
+    if timestamp:
+        filename = f"{case_name}_{name_part}_frac{frac:.1f}_{timestamp}.{ext_part}"
+    else:
+        filename = f"{case_name}_{name_part}_frac{frac:.1f}.{ext_part}"
+        
+    return os.path.join(data_dir, filename)
+
+def check_file_exists(data_dir: str, case_name: str, file_type: str, frac: float, timestamp: str = None) -> bool:
+    """
+    Check if a file exists, trying timestamped version first (if provided), then legacy.
+    """
+    # 1. Try timestamped
+    if timestamp:
+        path = get_data_file_path(data_dir, case_name, file_type, frac, timestamp)
+        if os.path.exists(path):
+            return True
+            
+    # 2. Try legacy
+    path = get_data_file_path(data_dir, case_name, file_type, frac, None)
+    if os.path.exists(path):
+        return True
+        
+    return False
+
 def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
     """
     Check if all required data files exist for the specified bus systems.
@@ -182,75 +213,19 @@ def check_data_files_exist(config, bus_systems=None) -> Tuple[bool, List[str]]:
             
             # Check common files (features, targets, etc.)
             for file_type in required_file_types:
-                found = False
-                
-                if latest_timestamp:
-                    # Check for timestamped file
-                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
-                    filename = base_name + '.' + file_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
-                    # Check for legacy format (no timestamp)
-                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}"
-                    filename = base_name + '.' + file_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
+                if not check_file_exists(data_dir, case_name, file_type, frac, latest_timestamp):
                     missing_files.append(f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}.{file_type.split('.')[1]}")
-            
-
             
             # Check OPF files (bus_types) - required for new OPF structure
             for file_type in opf_files:
-                found = False
-                
-                if latest_timestamp:
-                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
-                    filename = base_name + '.' + file_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
-                    base_name = f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}"
-                    filename = base_name + '.' + file_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
+                if not check_file_exists(data_dir, case_name, file_type, frac, latest_timestamp):
                     missing_files.append(f"{case_name}_{file_type.split('.')[0]}_frac{frac:.1f}.{file_type.split('.')[1]} (OPF structure)")
             
             # Check Ybus files - REQUIRE sparse format (new implementation)
             # Old dense format is only for backward compatibility during loading, not validation
-            sparse_ybus_found = True
             for ybus_type in sparse_ybus_types:
-                found = False
-                
-                # Normal file checking
-                if latest_timestamp:
-                    base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}_{latest_timestamp}"
-                    filename = base_name + '.' + ybus_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
-                    base_name = f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}"
-                    filename = base_name + '.' + ybus_type.split('.')[1]
-                    filepath = os.path.join(data_dir, filename)
-                    if os.path.exists(filepath):
-                        found = True
-                
-                if not found:
-                    # Sparse file missing - add to missing list
+                if not check_file_exists(data_dir, case_name, ybus_type, frac, latest_timestamp):
                     missing_files.append(f"{case_name}_{ybus_type.split('.')[0]}_frac{frac:.1f}.{ybus_type.split('.')[1]}")
-                    sparse_ybus_found = False
     
     all_exist = len(missing_files) == 0
     return all_exist, missing_files
@@ -312,18 +287,10 @@ def check_data_consistency(config) -> Tuple[bool, str]:
             return False, f"Error reading metadata file: {e}. Regeneration recommended."
     
     # Fallback to old timestamp-based validation if no metadata file
-    filename_timestamps = set()
+    # Use find_latest_timestamp helper to avoid code duplication
+    timestamp = find_latest_timestamp(data_dir)
     
-    # Look for timestamp patterns in filenames
-    timestamp_pattern = r"_(\d{8}_\d{6})"
-    
-    for file in os.listdir(data_dir):
-        if file.endswith(('.npy', '.txt')):
-            match = re.search(timestamp_pattern, file)
-            if match:
-                filename_timestamps.add(match.group(1))
-    
-    if len(filename_timestamps) == 0:
+    if not timestamp:
         # No timestamped files found - check if legacy files exist
         bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
         renewable_fractions = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
@@ -343,13 +310,6 @@ def check_data_consistency(config) -> Tuple[bool, str]:
             return False, "Found legacy data files without metadata. Regeneration recommended."
         else:
             return True, "No data files found"
-    
-    # Check if all files have the same timestamp
-    if len(filename_timestamps) > 1:
-        timestamps_list = sorted(list(filename_timestamps))
-        return False, f"Found mixed timestamps in data files: {', '.join(timestamps_list)}"
-    
-    timestamp = list(filename_timestamps)[0]
     
     # Check if data was generated with correct number of timesteps
     bus_systems = config.NUM_BUSES if isinstance(config.NUM_BUSES, list) else [config.NUM_BUSES]
@@ -955,7 +915,7 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
             result = subprocess.run(
                 [sys.executable, data_gen_script, 
                  "--mode", config.DATA_MODE, 
-                 "--time_steps", str(timesteps),
+                 "--timesteps", str(timesteps),
                  "--buses", buses_arg],
                 # No --no_progress_bar: Show individual fraction progress bars
                 # No capture_output: Show real-time progress in terminal

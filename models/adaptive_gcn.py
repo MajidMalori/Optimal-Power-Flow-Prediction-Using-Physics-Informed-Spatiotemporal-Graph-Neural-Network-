@@ -1,57 +1,92 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional
-from .base_adaptive_gcn import BaseAdaptiveGCN
-from .professional_gcn_layer import ProfessionalGCNLayer
-from utils.forensic_logger import get_logger
+from .base_model import BaseModel
+from .adaptive_topology_learner import AdaptiveTopologyLearner
+from .gcn_layer import GCNLayer
+from .physics_layer import PhysicsInformedOutput
 
-class adaptiveGCN(BaseAdaptiveGCN):
+class AdaptiveGCN(BaseModel, AdaptiveTopologyLearner):
     """
-    Adaptive Graph Convolutional Network (non-physics-informed).
+    Adaptive Graph Convolutional Network.
+    Supports both physics-informed and standard modes via configuration.
     Refactored for Full State Reconstruction (10 features).
-    Originally adaptiveGCN.
     """
-    def __init__(self, feature_dim, hidden_dim, num_gc_layers, num_buses, dropout,
-                 embedding_dim: int = 16, phi: float = 0.5):
-        # Initialize base class with adaptive adjacency components
-        super().__init__(num_buses=num_buses, embedding_dim=embedding_dim, phi=phi)
+    def __init__(self, feature_dim: int = 10, hidden_dim: int = 64,
+                 num_gc_layers: int = 3, num_buses: int = 118, dropout: float = 0.1,
+                 embedding_dim: int = 16, phi: float = 0.5, 
+                 physics_informed: bool = True, use_batch_norm: bool = True,
+                 config=None, normalizer=None):
+        """
+        Args:
+            feature_dim: Number of input features (10)
+            hidden_dim: Hidden layer dimension
+            num_gc_layers: Number of graph convolution layers
+            num_buses: Number of buses
+            dropout: Dropout rate
+            embedding_dim: Embedding dimension for adaptive adjacency
+            phi: Mixing coefficient
+            physics_informed: Whether to use physics-informed loss/constraints (passed to BaseModel)
+            use_batch_norm: Whether to use Batch Normalization
+        """
+        self.output_features_per_bus = 10
+        total_output_dim = num_buses * self.output_features_per_bus
         
-        self.dropout = dropout
+        # Initialize nn.Module first
+        nn.Module.__init__(self)
+        
+        # Mark that we're handling initialization manually (for AdaptiveTopologyLearner)
+        self._skip_super_init = True
+        
+        # Initialize AdaptiveTopologyLearner first (it doesn't call super, so safe)
+        AdaptiveTopologyLearner.__init__(self, num_buses=num_buses, embedding_dim=embedding_dim, phi=phi)
+        
+        # Then initialize BaseModel
+        BaseModel.__init__(self, feature_dim=feature_dim, hidden_dim=hidden_dim,
+                        output_dim=total_output_dim, num_gc_layers=num_gc_layers,
+                        num_buses=num_buses, physics_informed=physics_informed, dropout=dropout)
 
-        # Professional GCN layers
+        self.use_batch_norm = use_batch_norm
+        
+        # GCN Layers
         self.gc_layers = nn.ModuleList()
-        for i in range(num_gc_layers):
-            in_dim = feature_dim if i == 0 else hidden_dim
-            self.gc_layers.append(ProfessionalGCNLayer(in_dim, hidden_dim, bias=True, activation='relu'))
+        # First layer
+        self.gc_layers.append(GCNLayer(feature_dim, hidden_dim, bias=True, activation='relu'))
+        # Subsequent layers
+        for _ in range(num_gc_layers - 1):
+            self.gc_layers.append(GCNLayer(hidden_dim, hidden_dim, bias=True, activation='relu'))
 
-        # Output: 10 features per bus
-        num_output_features = 10
-        
-        # Use Physics-Informed Output Layer to enforce sign conventions
-        from .physics_layer import PhysicsInformedOutput
-        self.output_layer = PhysicsInformedOutput(hidden_dim, num_output_features)
+        # Batch Norm (Optional)
+        if self.use_batch_norm:
+            self.batch_norms = nn.ModuleList([
+                nn.BatchNorm1d(hidden_dim) for _ in range(num_gc_layers)
+            ])
+        else:
+            self.batch_norms = None
+
+        # Output Layer - Always use PhysicsInformedOutput to enforce constraints (non-negative magnitude)
+        self.output_layer = PhysicsInformedOutput(hidden_dim, self.output_features_per_bus)
         
         self.dropout_layer = nn.Dropout(dropout)
-
+        
         # Forensic logging state
         self.forensic_logger = None
         self.forward_count = 0
-    
+
     def set_logger(self, logger):
         """Attach a forensic logger."""
-        self.forensic_logger = logger
+        self.forensic_logger = logger   
 
-    def forward(self, x, static_adj, bus_types: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, static_adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None):
         """
         Forward pass.
         
         Args:
-            x: Input features [batch_size, num_buses, 10]
-            static_adj: Static adjacency matrix [batch_size, num_buses, num_buses]
+            x: Input [batch, num_buses, 10]
+            static_adj: Adjacency [batch, num_buses, num_buses]
             
         Returns:
-            torch.Tensor: Predicted full state [batch_size, num_buses, 10]
+            Predicted state [batch, num_buses, 10]
         """
         # FORENSIC: Log input
         self.forward_count += 1
@@ -61,20 +96,33 @@ class adaptiveGCN(BaseAdaptiveGCN):
                 {'features': x, 'adjacency': static_adj},
                 None
             )
-
-        batch_size = x.size(0)
         
-        # Compute adaptive adjacency
-        # SUSPECT #2 FIX: static_adj is now RAW (unnormalized).
-        # compute_adaptive_adjacency mixes raw static + raw learned, then normalizes.
-        A_adp_batch = self.compute_adaptive_adjacency(static_adj, batch_size, normalize=True)
+        batch_size = x.size(0)
 
-        # Apply GCN layers
+        # 1. Adaptive Adjacency
+        # static_adj is RAW. Mix then normalize.
+        adaptive_adj = self.compute_adaptive_adjacency(static_adj, batch_size, normalize=True)
+
+        # 2. GCN Layers
         h = x
-        for i, gc_layer in enumerate(self.gc_layers):
-            h = gc_layer(h, A_adp_batch, is_pre_normalized=True)
-            h = self.dropout_layer(h)
-
+        for layer_idx, gc_layer in enumerate(self.gc_layers):
+            # Pass is_pre_normalized=True because we normalized adaptive_adj above
+            h = gc_layer(h, adaptive_adj, is_pre_normalized=True)
+            
+            if self.use_batch_norm and self.batch_norms is not None:
+                # BatchNorm expects [batch, features, length]
+                # Our h is [batch, num_buses, hidden_dim]
+                h = h.transpose(1, 2)
+                h = self.batch_norms[layer_idx](h)
+                h = h.transpose(1, 2)
+            
+            if layer_idx < len(self.gc_layers): # Apply dropout between layers (and after last layer? logic check)
+                 # Original logic applied dropout after every layer.
+                 # Let's keep it consistent.
+                 h = self.dropout_layer(h)
+        
+        # 3. Output
         output = self.output_layer(h)
         
         return output
+

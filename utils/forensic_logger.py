@@ -31,9 +31,9 @@ class ForensicLogger:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create timestamped log file - FIXED: Use a single file for the session if it exists
-        # We use a fixed filename pattern that doesn't include seconds to allow appending within the same minute/session
-        # or we check if a global log file path has been set
+        # Create timestamped log file.
+        # Updated logic to use a single log file for the entire session if it already exists,
+        # preventing fragmentation of logs across multiple files during the same run.
         
         if hasattr(ForensicLogger, 'current_log_file') and ForensicLogger.current_log_file:
             log_file = ForensicLogger.current_log_file
@@ -243,11 +243,17 @@ class ForensicLogger:
         
         self.logger.info(f"\n  TRAIN:")
         for key, value in train_metrics.items():
-            self.logger.info(f"    {key:25s}: {value:.6f}")
+            if isinstance(value, (int, float)):
+                self.logger.info(f"    {key:25s}: {value:.6f}")
+            else:
+                self.logger.info(f"    {key:25s}: {value}")
         
         self.logger.info(f"\n  VALIDATION:")
         for key, value in val_metrics.items():
-            self.logger.info(f"    {key:25s}: {value:.6f}")
+            if isinstance(value, (int, float)):
+                self.logger.info(f"    {key:25s}: {value:.6f}")
+            else:
+                self.logger.info(f"    {key:25s}: {value}")
         
         # Check for overfitting
         if 'mse' in train_metrics and 'mse' in val_metrics:

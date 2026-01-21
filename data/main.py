@@ -63,50 +63,16 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 # Refactored to use Config class and CLI arguments
 from config import Config
 
-def parse_arguments():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Physics-Informed Data Generation')
-    parser.add_argument('--time_steps', '--timesteps', type=int, default=None, help='Number of time steps to generate (default: 10008 for train mode, 240 for test mode)')
-    parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated data')
-    parser.add_argument('--config', type=str, default='config.yaml', help='Path to YAML configuration file')
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='Data generation mode (default: train)')
-    parser.add_argument('--buses', type=str, default=None, help='Comma-separated bus system numbers to run (e.g., "33,57,118" or "33"). If not specified, runs all bus systems (33, 57, 118).')
-    parser.add_argument('--no_progress_bar', action='store_true', help='Disable progress bar (useful when running from train.py)')
-    return parser.parse_known_args()[0]
-
-# Parse arguments
-args = parse_arguments()
+# Parse arguments using unified CLI
+args = Config.parse_cli_args()
 
 # Initialize Config
-# Priority: CLI args > YAML > Default ('train' with 10008 timesteps)
+# Priority: CLI args > YAML > Default ('train')
 try:
-    # First, load YAML to get experimental_data_mode if it exists
-    yaml_path = args.config if args.config else 'config.yaml'
-    yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(os.path.dirname(__file__), 'config.yaml')
-    
-    # Determine data mode: CLI arg (now defaults to 'train') > YAML > Default ('train')
-    data_mode_to_use = args.mode  # Now defaults to 'train' from argparse
-    
-    # Determine timesteps: CLI arg > Default (10008 for train, 240 for test)
-    if args.time_steps is not None:
-        # CLI argument provided - use it
-        train_timesteps = args.time_steps
-        test_timesteps = args.time_steps
-    else:
-        # No CLI argument - use defaults based on mode
-        if data_mode_to_use == 'train':
-            train_timesteps = 10008  # Default for train mode
-            test_timesteps = None  # Will use YAML default if needed
-        else:  # test mode
-            train_timesteps = None  # Will use YAML default if needed
-            test_timesteps = 240  # Default for test mode
-    
     config_instance = Config(
-        yaml_config_path=args.config,
+        cli_args=args,
         load_yaml=True,
-        data_mode=data_mode_to_use,
-        train_timesteps=train_timesteps, 
-        test_timesteps=test_timesteps,
+        data_mode='train' # Default, will be overridden by args.mode if provided
     )
 except Exception as e:
     raise RuntimeError(
@@ -115,14 +81,12 @@ except Exception as e:
     ) from e
 
 # Create CONFIG dictionary for compatibility with existing code
-# Prioritize CLI args > Config object > Defaults
+# Priority: CLI args > Config object > Defaults
 data_mode = config_instance.DATA_MODE # Config has already resolved mode
 default_timesteps = config_instance.DATA_MODE_TIMESTEPS[data_mode]
-timesteps_to_use = args.time_steps if args.time_steps is not None else default_timesteps
-output_dir_to_use = args.output_dir if args.output_dir is not None else config_instance.DATA_DIR
+timesteps_to_use = args.timesteps if args.timesteps is not None else default_timesteps
+output_dir_to_use = config_instance.DATA_DIR
 
-# Debug: Print mode and output directory
-# print(f"[Data Generation] Mode: {data_mode}, Output Directory: {output_dir_to_use}")
 
 CONFIG = {
     "random_seed": 42,
@@ -1042,18 +1006,27 @@ if __name__ == "__main__":
     
     # Filter cases based on --buses argument if provided
     if args.buses is not None:
-        bus_numbers = [int(b.strip()) for b in args.buses.split(',')]
-        filtered_cases = []
-        for bus_num in bus_numbers:
-            case_name = f"case{bus_num}"
-            if case_name in cases_to_run:
-                filtered_cases.append(case_name)
-            else:
-                print(f"Warning: {case_name} not found in test_cases. Available: {cases_to_run}")
-        if filtered_cases:
-            cases_to_run = filtered_cases
+        if args.buses.lower() == 'all':
+            # If 'all', use all available test cases (no filtering needed)
+            pass
         else:
-            raise ValueError(f"No valid bus systems found. Requested: {bus_numbers}, Available: {cases_to_run}")
+            try:
+                bus_numbers = [int(b.strip()) for b in args.buses.split(',')]
+            except ValueError:
+                raise ValueError(f"Invalid --buses argument: '{args.buses}'. "
+                               f"Must be 'all' or comma-separated integers (e.g. '33,57').")
+            
+            filtered_cases = []
+            for bus_num in bus_numbers:
+                case_name = f"case{bus_num}"
+                if case_name in cases_to_run:
+                    filtered_cases.append(case_name)
+                else:
+                    print(f"Warning: {case_name} not found in test_cases. Available: {cases_to_run}")
+            if filtered_cases:
+                cases_to_run = filtered_cases
+            else:
+                raise ValueError(f"No valid bus systems found. Requested: {bus_numbers}, Available: {cases_to_run}")
         
     # print(f"Cases to run: {cases_to_run}")
     

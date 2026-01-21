@@ -4,14 +4,14 @@ import torch.nn.functional as F
 from typing import Optional
 from abc import abstractmethod
 from .base_model import BaseModel
-from .base_adaptive_gcn import BaseAdaptiveGCN
+from .adaptive_topology_learner import AdaptiveTopologyLearner
 
 
 from .physics_layer import PhysicsInformedOutput
 
-class SpatioTemporalBase(BaseModel, BaseAdaptiveGCN):
+class GraphRNNBase(BaseModel, AdaptiveTopologyLearner):
     """
-    Base class for spatio-temporal models.
+    Base class for Graph RNN models.
     Handles common initialization and forward pass logic:
     - Adaptive adjacency matrix calculation
     - Output transformation
@@ -25,7 +25,7 @@ class SpatioTemporalBase(BaseModel, BaseAdaptiveGCN):
                  embedding_dim: int = 16, phi: float = 0.5, 
                  config=None, normalizer=None, rnn_type: str = 'GRU', **kwargs):
         """
-        Initialize common components for spatio-temporal models.
+        Initialize common components for Graph RNN models.
         """
         # Output: [batch, buses, 10] - Full Clean State
         output_dim = 10
@@ -36,8 +36,8 @@ class SpatioTemporalBase(BaseModel, BaseAdaptiveGCN):
         # Mark that we're handling initialization manually (for BaseModel.__init__)
         self._skip_super_init = True
         
-        # Initialize BaseAdaptiveGCN first (it doesn't call super, so safe)
-        BaseAdaptiveGCN.__init__(self, num_buses=num_buses, embedding_dim=embedding_dim, phi=phi)
+        # Initialize AdaptiveTopologyLearner first (it doesn't call super, so safe)
+        AdaptiveTopologyLearner.__init__(self, num_buses=num_buses, embedding_dim=embedding_dim, phi=phi)
         
         # Then initialize BaseModel
         BaseModel.__init__(

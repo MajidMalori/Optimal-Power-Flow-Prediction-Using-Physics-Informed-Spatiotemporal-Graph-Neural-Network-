@@ -75,6 +75,17 @@ def plot_convergence_story(data_dir: str, case_name: str, output_path: str, conf
         
         resolution = stats.get('resolution_methods', {})
         
+        # Calculate implicit generator trips (successful but not recorded in other categories)
+        known_sum = (
+            resolution.get('strict_normal', 0) +
+            resolution.get('strict_contingency', 0) +
+            resolution.get('relaxed_contingency', 0) +
+            resolution.get('restored_line', 0) +
+            resolution.get('hard_reset', 0)
+        )
+        # Any successful timestep not accounted for is a generator trip
+        trip_count = max(0, successful - known_sum)
+        
         data_rows.append({
             'ren_pct': ren_frac * 100,
             'total': total,
@@ -85,6 +96,7 @@ def plot_convergence_story(data_dir: str, case_name: str, output_path: str, conf
             'strict_contingency': resolution.get('strict_contingency', 0),
             'relaxed': resolution.get('relaxed_contingency', 0),
             'restored': resolution.get('restored_line', 0),
+            'trip': trip_count,
             'hard_reset': resolution.get('hard_reset', 0),
         })
     
@@ -123,9 +135,17 @@ def plot_convergence_story(data_dir: str, case_name: str, output_path: str, conf
     ax2 = axes[1]
     
     # Prepare stacked data
-    methods = ['strict_normal', 'strict_contingency', 'relaxed', 'restored', 'hard_reset', 'failed']
-    labels = ['Strict\n(Normal)', 'Strict\n(Contingency)', 'Relaxed', 'Line\nRestored', 'Hard\nReset', 'Failed']
-    colors_stack = ['#27ae60', '#16a085', '#f39c12', '#e67e22', '#e74c3c', '#95a5a6']
+    methods = ['strict_normal', 'strict_contingency', 'relaxed', 'restored', 'trip', 'hard_reset', 'failed']
+    labels = ['Strict\n(Normal)', 'Strict\n(Contingency)', 'Relaxed', 'Line\nRestored', 'Gen\nTrip', 'Hard\nReset', 'Failed']
+    # Professional high-contrast palette
+    # Strict (Normal): Green (Success)
+    # Strict (Contingency): Dark Teal (Success variant)
+    # Relaxed: Yellow (Warning) - Distinct from Orange
+    # Restored: Blue (Info) - Distinct from Orange/Red
+    # Gen Trip: Purple (Special case)
+    # Hard Reset: Orange (Severe Warning)
+    # Failed: Red (Failure)
+    colors_stack = ['#2ecc71', '#16a085', '#f1c40f', '#3498db', '#9b59b6', '#e67e22', '#c0392b']
     
     x = np.arange(len(df))
     width = 0.6

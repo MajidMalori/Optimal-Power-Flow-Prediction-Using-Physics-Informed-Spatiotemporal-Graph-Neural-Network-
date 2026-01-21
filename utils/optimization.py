@@ -462,7 +462,9 @@ def create_model_kwargs(model_config: Any, params: Dict[str, Any], num_buses: in
     if uses_adaptive_graph:
         model_kwargs.update({
             'embedding_dim': int(params['EMBEDDING_DIM']),
-            'phi': float(params['PHI'])
+            'phi': float(params['PHI']),
+            'physics_informed': is_physics_informed,
+            'use_batch_norm': is_physics_informed  # Match legacy behavior: PI models use BatchNorm
         })
     
     # Always use heteroscedastic mode (no flag needed)

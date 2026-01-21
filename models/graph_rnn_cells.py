@@ -1,12 +1,14 @@
 """
-Professional Graph Convolutional RNN Cells.
+Graph Convolutional RNN Cells.
 
-FIXED: These cells integrate graph convolution INSIDE the RNN update rule,
-eliminating the redundant double convolution that existed in the previous implementation.
+Refactored graph convolutional RNN cells to integrate graph convolution directly
+within the RNN update rule. This design eliminates redundant double convolution
+steps found in previous implementations, improving computational efficiency
+and model performance.
 
 Key improvements:
 1. Graph convolution is applied ONCE to a combined input+hidden state
-2. Uses ProfessionalGCNLayer for proper normalization and self-loops
+2. Uses GCNLayer for proper normalization and self-loops
 3. More efficient and theoretically sound architecture
 
 Based on standard Graph RNN literature (e.g., Seo et al., ICML 2018).
@@ -16,15 +18,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
-from .professional_gcn_layer import ProfessionalGCNLayer
+from .gcn_layer import GCNLayer
 
 
-class ProfessionalGraphConvGRUCell(nn.Module):
+class GraphConvGRUCell(nn.Module):
     """
-    Professional Graph Convolutional GRU Cell.
+    Graph Convolutional GRU Cell.
     
-    FIXED: Performs graph convolution ONCE on combined input+hidden state,
-    eliminating redundant double convolution.
+    Performs graph convolution a single time on the concatenated input and hidden state.
+    This architectural improvement eliminates redundant double convolution operations,
+    reducing computational overhead while maintaining representational power.
     
     Architecture:
     1. Concatenate input x and previous hidden state h_prev
@@ -54,7 +57,7 @@ class ProfessionalGraphConvGRUCell(nn.Module):
         # Input: [batch, nodes, input_dim + hidden_dim]
         # Output: [batch, nodes, hidden_dim * 3] (for reset, update, new gates)
         combined_dim = input_dim + hidden_dim
-        self.gcn_layer = ProfessionalGCNLayer(
+        self.gcn_layer = GCNLayer(
             in_features=combined_dim,
             out_features=hidden_dim * 3,  # 3 gates: reset, update, new
             bias=True,
@@ -65,7 +68,7 @@ class ProfessionalGraphConvGRUCell(nn.Module):
     
     def forward(self, x: torch.Tensor, h_prev: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of Professional GraphConvGRU cell.
+        Forward pass of GraphConvGRU cell.
         
         Args:
             x: Input features [batch, nodes, input_dim]
@@ -79,7 +82,8 @@ class ProfessionalGraphConvGRUCell(nn.Module):
         combined = torch.cat([x, h_prev], dim=-1)  # [batch, nodes, input_dim + hidden_dim]
         
         # Step 2: Apply graph convolution ONCE to the combined state
-        # This is the key fix: single convolution instead of separate convolutions
+        # Perform a single graph convolution on the concatenated state.
+        # This optimizes the operation by replacing separate convolutions for input and hidden states.
         gates_conv = self.gcn_layer(combined, adj)  # [batch, nodes, hidden_dim * 3]
         
         # Step 3: Split into three gates
@@ -100,12 +104,13 @@ class ProfessionalGraphConvGRUCell(nn.Module):
         return h_new
 
 
-class ProfessionalGraphConvLSTMCell(nn.Module):
+class GraphConvLSTMCell(nn.Module):
     """
-    Professional Graph Convolutional LSTM Cell.
+    Graph Convolutional LSTM Cell.
     
-    FIXED: Performs graph convolution ONCE on combined input+hidden state,
-    eliminating redundant double convolution.
+    Performs graph convolution a single time on the concatenated input and hidden state.
+    This architectural improvement eliminates redundant double convolution operations,
+    reducing computational overhead while maintaining representational power.
     
     Architecture:
     1. Concatenate input x and previous hidden state h_prev
@@ -135,7 +140,7 @@ class ProfessionalGraphConvLSTMCell(nn.Module):
         # Input: [batch, nodes, input_dim + hidden_dim]
         # Output: [batch, nodes, hidden_dim * 4] (for input, forget, output, cell gates)
         combined_dim = input_dim + hidden_dim
-        self.gcn_layer = ProfessionalGCNLayer(
+        self.gcn_layer = GCNLayer(
             in_features=combined_dim,
             out_features=hidden_dim * 4,  # 4 gates: input, forget, output, cell
             bias=True,
@@ -147,7 +152,7 @@ class ProfessionalGraphConvLSTMCell(nn.Module):
     def forward(self, x: torch.Tensor, h_prev: torch.Tensor, c_prev: torch.Tensor,
                 adj: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass of Professional GraphConvLSTM cell.
+        Forward pass of GraphConvLSTM cell.
         
         Args:
             x: Input features [batch, nodes, input_dim]
@@ -162,7 +167,8 @@ class ProfessionalGraphConvLSTMCell(nn.Module):
         combined = torch.cat([x, h_prev], dim=-1)  # [batch, nodes, input_dim + hidden_dim]
         
         # Step 2: Apply graph convolution ONCE to the combined state
-        # This is the key fix: single convolution instead of separate convolutions
+        # Perform a single graph convolution on the concatenated state.
+        # This optimizes the operation by replacing separate convolutions for input and hidden states.
         # Adjacency is pre-normalized in data loader for performance
         gates_conv = self.gcn_layer(combined, adj, is_pre_normalized=True)  # [batch, nodes, hidden_dim * 4]
         
@@ -188,4 +194,3 @@ class ProfessionalGraphConvLSTMCell(nn.Module):
             c_new = self.dropout_layer(c_new)
         
         return h_new, c_new
-

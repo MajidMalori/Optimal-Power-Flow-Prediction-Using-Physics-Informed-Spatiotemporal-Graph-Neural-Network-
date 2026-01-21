@@ -5,14 +5,11 @@ import csv
 import json
 import inspect
 import shutil
+import argparse
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 from pathlib import Path
 
-
-# FIXED: Args class has been REMOVED.
-# All experimental settings are now part of Config class and loaded from YAML.
-# See Config class below for experimental settings (test_config, bus_systems, etc.)
 
 # ============================================================================
 # YAML Configuration Loader (Merged from utils/yaml_config.py)
@@ -112,7 +109,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_data_mode': 'EXPERIMENTAL_DATA_MODE',
         'experimental_train_timesteps': 'EXPERIMENTAL_TRAIN_TIMESTEPS',
         'experimental_test_timesteps': 'EXPERIMENTAL_TEST_TIMESTEPS',
-        'experimental_force_cpu': 'EXPERIMENTAL_FORCE_CPU',
         'experimental_parallel_data_loading': 'EXPERIMENTAL_PARALLEL_DATA_LOADING',
         'experimental_data_workers': 'NUM_WORKERS',
         'experimental_pin_memory': 'PIN_MEMORY',
@@ -162,7 +158,6 @@ def _merge_yaml_with_config(yaml_path: str, config_obj: Any, verbose: bool = Fal
         'experimental_data_mode': 'data_mode',
         'experimental_train_timesteps': 'train_timesteps',
         'experimental_test_timesteps': 'test_timesteps',
-        'experimental_force_cpu': 'force_cpu',
         'experimental_parallel_data_loading': 'parallel_data_loading',
         'experimental_data_workers': 'data_workers',
         'experimental_clear_results': 'clear_results',
@@ -478,43 +473,54 @@ class Config:
             if num_buses <= 33:
                 # THOROUGH: Small systems can afford extensive search
                 return {
-                    'num_seagulls': 2,     
-                    'max_iterations': 5,   
+                    'num_seagulls': 1,     
+                    'max_iterations': 2,   
                     'strategy': 'thorough',
                     'description': 'Extensive search for optimal hyperparameters'
                 }
             elif num_buses <= 57:
                 # BALANCED: Medium systems need balance between quality and time
                 return {
-                    'num_seagulls': 2,      
-                    'max_iterations': 5,   
+                    'num_seagulls': 1,      
+                    'max_iterations': 2,   
                     'strategy': 'balanced',
                     'description': 'Balance optimization quality vs computational time'
                 }
             else:
                 # QUICK: Large systems prioritize efficiency
                 return {
-                    'num_seagulls': 2,      # Optimized for quick testing
-                    'max_iterations': 5,    # Optimized for quick testing
+                    'num_seagulls': 1,      # Optimized for quick testing
+                    'max_iterations': 2,    # Optimized for quick testing
                     'strategy': 'quick',
                     'description': 'Fast optimization for memory/time constraints'
                 }
+    class _AdaptiveModelConfig(_ModelConfig):
+        """Configuration specifically for Adaptive models to enforce tighter constraints."""
+        
+        @staticmethod
+        def get_embedding_dim_range(num_buses):
+            """Override to enforce small embedding dimensions for Adaptive models."""
+            # Adaptive models need smaller embeddings to avoid over-parameterization
+            return (8, 32)
+            
     GCNConfig = _ModelConfig()
     
-    AdaptivePIGCNConfig = _ModelConfig()
-    AdaptivePIGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)  # Will be overridden for 118-bus
+    # Use _AdaptiveModelConfig for AdaptivePIGCN to enforce small embeddings
+    AdaptivePIGCNConfig = _AdaptiveModelConfig()
+    AdaptivePIGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)  # Now effectively used via method override
     AdaptivePIGCNConfig.PHI_RANGE = (0.0, 1.0)
-    AdaptivePIGCNConfig.NUM_GC_LAYERS_RANGE = (1, 6)  # Slightly more layers for 118-bus
+    AdaptivePIGCNConfig.NUM_GC_LAYERS_RANGE = (1, 6)
     
-    adaptiveGCNConfig = _ModelConfig()
+    adaptiveGCNConfig = _AdaptiveModelConfig()
     adaptiveGCNConfig.EMBEDDING_DIM_RANGE = (8, 32)
     adaptiveGCNConfig.PHI_RANGE = (0.0, 1.0)
 
-    PIGCLSTMConfig = _ModelConfig()
+    PIGCLSTMConfig = _AdaptiveModelConfig()
     PIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)
     PIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
     PIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)
     PIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
+    PIGCLSTMConfig.DROPOUT = 0.25  # Higher dropout for sequential models to prevent overfitting
     
     @staticmethod
     def get_sequential_ranges(num_buses):
@@ -543,43 +549,34 @@ class Config:
     
     PIGCLSTMConfig.get_sequential_ranges = get_sequential_ranges
     
-    PIGCGRUConfig = _ModelConfig()
+    PIGCGRUConfig = _AdaptiveModelConfig()
     PIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)
     PIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
     PIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)
     PIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
+    PIGCGRUConfig.DROPOUT = 0.25  # Higher dropout for sequential models
     PIGCGRUConfig.get_sequential_ranges = get_sequential_ranges
 
-    ResnetPIGCGRUConfig = _ModelConfig()
+    ResnetPIGCGRUConfig = _AdaptiveModelConfig()
     ResnetPIGCGRUConfig.RNN_LAYERS_RANGE = (1, 3)
     ResnetPIGCGRUConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
     ResnetPIGCGRUConfig.EMBEDDING_DIM_RANGE = (8, 16)
     ResnetPIGCGRUConfig.PHI_RANGE = (0.0, 1.0)
+    ResnetPIGCGRUConfig.DROPOUT = 0.25  # Higher dropout for sequential models
     ResnetPIGCGRUConfig.get_sequential_ranges = get_sequential_ranges
     
-    ResnetPIGCLSTMConfig = _ModelConfig()
+    ResnetPIGCLSTMConfig = _AdaptiveModelConfig()
     ResnetPIGCLSTMConfig.RNN_LAYERS_RANGE = (1, 3)
     ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE = (5, 10)
     ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE = (8, 16)
     ResnetPIGCLSTMConfig.PHI_RANGE = (0.0, 1.0)
+    ResnetPIGCLSTMConfig.DROPOUT = 0.25  # Higher dropout for sequential models
     ResnetPIGCLSTMConfig.get_sequential_ranges = get_sequential_ranges
     
     @property
     def CURRENT_RUN_DIR(self):
         """Get the current run directory with timestamp."""
         return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, f'run_{self._CURRENT_RUN_TIMESTAMP}')
-    
-    @property
-    def LATEST_RUN_DIR(self):
-        """Get the latest run directory (deprecated - use latest_run_info.txt instead)."""
-        # This property is kept for backward compatibility but should not be used
-        # The latest run is tracked via latest_run_info.txt pointer file
-        return self.CURRENT_RUN_DIR
-    
-    @property
-    def EVALUATION_DIR(self):
-        """Backward compatibility property."""
-        return self.CURRENT_RUN_DIR
     
     @property
     def model_config_map(self):
@@ -595,7 +592,7 @@ class Config:
         }
     
     def __init__(self, data_mode='train', train_timesteps=None, test_timesteps=None, clear_results=False, 
-                 hours_per_day=24, sequence_length=5, yaml_config_path=None, load_yaml=True):
+                 hours_per_day=24, sequence_length=5, yaml_config_path=None, load_yaml=True, cli_args=None):
         """
         Initializes configuration.
         
@@ -611,6 +608,7 @@ class Config:
             sequence_length: Sequence length for LSTM/GRU models
             yaml_config_path: Path to YAML configuration file (default: 'config.yaml')
             load_yaml: Whether to load configuration from YAML file (default: True, REQUIRED)
+        cli_args: Parsed command-line arguments from Config.parse_cli_args()
         
         Raises:
             FileNotFoundError: If config.yaml is missing
@@ -619,7 +617,7 @@ class Config:
         """
         # YAML IS REQUIRED - Fail fast if missing (no fallback)
         if load_yaml:
-            yaml_path = yaml_config_path or 'config.yaml'
+            yaml_path = yaml_config_path or (cli_args.config if cli_args else 'config.yaml')
             yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(self.ROOT_DIR, yaml_path)
             
             if not os.path.exists(yaml_full_path):
@@ -643,7 +641,46 @@ class Config:
                 "Set load_yaml=True and ensure config.yaml exists."
             )
         
-        # Set clear_results flag - YAML overrides function argument
+        # --- CLI OVERRIDES ---
+        # If CLI arguments are provided, they override YAML settings
+        if cli_args:
+            if cli_args.models:
+                # Handle unified --models flag
+                if cli_args.models in self.MODEL_TEST_CONFIGS:
+                    # It's a category (e.g., 'physics_only')
+                    setattr(Config, 'test_config', cli_args.models)
+                    setattr(Config, 'models_to_train', "all") # Use test_config
+                else:
+                    # It's a specific model list (e.g., 'GCN,adaptiveGCN')
+                    models = [m.strip() for m in cli_args.models.split(',')]
+                    setattr(Config, 'models_to_train', models)
+            
+            if cli_args.buses:
+                if cli_args.buses.lower() == 'all':
+                    # Use standard bus systems
+                    buses = [33, 57, 118]
+                else:
+                    try:
+                        buses = [int(b.strip()) for b in cli_args.buses.split(',')]
+                    except ValueError:
+                        raise ValueError(f"Invalid --buses argument: '{cli_args.buses}'. "
+                                       f"Must be 'all' or comma-separated integers (e.g. '33,57').")
+                setattr(Config, 'bus_systems', buses)
+            
+            if cli_args.timesteps is not None:
+                train_timesteps = cli_args.timesteps
+                test_timesteps = cli_args.timesteps
+                setattr(Config, 'train_timesteps', train_timesteps)
+                setattr(Config, 'test_timesteps', test_timesteps)
+            
+            if cli_args.mode:
+                data_mode = cli_args.mode
+            
+            if cli_args.clear_results is not None:
+                clear_results = cli_args.clear_results
+                setattr(Config, 'clear_results', clear_results)
+
+        # Set clear_results flag - YAML or CLI overrides function argument
         if hasattr(Config, 'clear_results'):
             clear_results = Config.clear_results
         
@@ -740,15 +777,14 @@ class Config:
     def get_model_class_map():
         """Returns mapping of model names to their classes."""
         # Import here to avoid circular imports
-        from models.adaptive_gcn import adaptiveGCN
+        from models.adaptive_gcn import AdaptiveGCN
         from models.gcn import GCN
-        from models.adaptive_pigcn import AdaptivePIGCN
-        from models.pigc_rnn import PIGCLSTM, PIGCGRU, ResnetPIGCGRU, ResnetPIGCLSTM
+        from models.graph_rnn import PIGCLSTM, PIGCGRU, ResnetPIGCGRU, ResnetPIGCLSTM
         
         return {
-            'adaptiveGCN': adaptiveGCN, 
+            'adaptiveGCN': AdaptiveGCN, 
             'GCN': GCN, 
-            'AdaptivePIGCN': AdaptivePIGCN, 
+            'AdaptivePIGCN': AdaptiveGCN, 
             'PIGCLSTM': PIGCLSTM,
             'PIGCGRU': PIGCGRU, 
             'ResnetPIGCGRU': ResnetPIGCGRU, 
@@ -788,15 +824,56 @@ class Config:
     
     def get_evaluation_path(self, filename):
         """Constructs a path in the evaluation directory."""
-        return os.path.join(self.EVALUATION_DIR, filename)
+        return os.path.join(self.CURRENT_RUN_DIR, filename)
 
     def get_model_eval_dir(self, num_buses: int, model_name: str) -> str:
         """Returns the evaluation directory path for a specific model."""
-        return os.path.join(self.EVALUATION_DIR, f"{num_buses}bus", "models", model_name)
+        return os.path.join(self.CURRENT_RUN_DIR, f"{num_buses}bus", "models", model_name)
 
     def get_renewable_impacts_dir(self, num_buses: int, model_name: str) -> str:
         """Returns the renewable impacts directory path for a specific model."""
         return os.path.join(self.get_model_eval_dir(num_buses, model_name), "renewable_impacts")
+
+    @staticmethod
+    def parse_cli_args():
+        """
+        Unified CLI for configuration overrides.
+        Unified argument parsing for both training and data generation.
+        """
+        parser = argparse.ArgumentParser(description='Physics-Informed Machine Learning - Unified CLI')
+        
+        # Model Selection (Unified Flag)
+        parser.add_argument('--models', type=str, default=None,
+                          help='Models to train/test. Can be a category (quick, core, comprehensive, physics_only, '
+                               'non_physics_only, sequential_only, all) or a comma-separated list of model names '
+                               '(e.g., "GCN,adaptiveGCN").')
+        
+        # System Selection
+        parser.add_argument('--buses', type=str, default=None,
+                          help='Comma-separated bus system numbers (e.g., "33,57,118").')
+        
+        # Data Configuration
+        parser.add_argument('--mode', type=str, choices=['train', 'test'], default=None,
+                          help='Data mode (train or test).')
+        parser.add_argument('--timesteps', type=int, default=None,
+                          help='Number of timesteps to process.')
+        
+        # Configuration File
+        parser.add_argument('--config', type=str, default='config.yaml',
+                          help='Path to YAML configuration file.')
+        
+        # Experimental Flags
+        parser.add_argument('--clear_results', action='store_true', default=None,
+                          help='Clear experimental_results folder before running.')
+        parser.add_argument('--no_clear_results', action='store_false', dest='clear_results',
+                          help='Do NOT clear experimental_results folder.')
+        
+        # Progress Bar (for data generation)
+        parser.add_argument('--no_progress_bar', action='store_true',
+                          help='Disable progress bar.')
+
+        args = parser.parse_args()
+        return args
 
     def get_model_checkpoint_path(self, num_buses: int, model_name: str) -> str:
         """Returns the checkpoint path for a specific model."""
@@ -843,7 +920,7 @@ class Config:
         if mode is None:
             mode = getattr(self, 'DATA_MODE', 'train')
         
-        log_dir = os.path.join(self.EVALUATION_DIR, f"{num_buses}bus", "log")
+        log_dir = os.path.join(self.CURRENT_RUN_DIR, f"{num_buses}bus", "log")
         os.makedirs(log_dir, exist_ok=True)  # Ensure log directory exists
         return os.path.join(log_dir, f"{model_name}_{mode}.log")
     

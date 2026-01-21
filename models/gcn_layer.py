@@ -1,5 +1,5 @@
 """
-Professional Graph Convolutional Network Layer
+Graph Convolutional Network Layer
 
 This module implements a mathematically sound GCN layer following best practices:
 1. Self-loops: A_hat = A + I (preserves node features)
@@ -9,10 +9,10 @@ This module implements a mathematically sound GCN layer following best practices
 Based on Kipf & Welling (ICLR 2017): "Semi-Supervised Classification with Graph Convolutional Networks"
 Paper: https://arxiv.org/abs/1609.02907
 
-This fixes the fundamental architectural flaws identified in the original implementation:
-- Flaw #1: Missing self-loops (nodes forgetting their own features)
-- Flaw #2: Missing normalization (gradient explosion from degree imbalance)
-- Flaw #3: Incorrect operation order (aggregation then MLP, not proper GCN)
+This fixes architectural flaws identified in original implementations:
+- Missing self-loops (nodes forgetting their own features)
+- Missing normalization (gradient explosion from degree imbalance)
+- Incorrect operation order (aggregation then MLP, not proper GCN)
 """
 
 import torch
@@ -20,9 +20,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ProfessionalGCNLayer(nn.Module):
+class GCNLayer(nn.Module):
     """
-    Professional Graph Convolutional Network Layer.
+    Graph Convolutional Network Layer.
     
     Implements the standard GCN operation with self-loops and symmetric normalization:
     H^(l+1) = σ(D_hat^(-0.5) * A_hat * D_hat^(-0.5) * H^(l) * W^(l))
@@ -49,7 +49,7 @@ class ProfessionalGCNLayer(nn.Module):
     """
     
     def __init__(self, in_features: int, out_features: int, bias: bool = True, activation: str = 'relu'):
-        super(ProfessionalGCNLayer, self).__init__()
+        super(GCNLayer, self).__init__()
         
         self.in_features = in_features
         self.out_features = out_features
@@ -76,66 +76,18 @@ class ProfessionalGCNLayer(nn.Module):
             # Initialize bias to small values
             nn.init.zeros_(self.bias)
     
-    def normalize_adjacency(self, adj: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def normalize_adjacency(adj: torch.Tensor) -> torch.Tensor:
         """
         DEPRECATED: Normalization is now pre-computed during data loading for performance.
         
         This method is kept for backward compatibility with adaptive models that need
         to normalize combined (static + learned) adjacency matrices.
         
-        For static models, the adjacency is already pre-normalized in the data loader.
-        For adaptive models, this is used to normalize the combined adaptive adjacency.
-        
-        Args:
-            adj: Adjacency matrix [batch_size, num_nodes, num_nodes] or [num_nodes, num_nodes]
-        
-        Returns:
-            Normalized adjacency matrix with self-loops [batch_size, num_nodes, num_nodes]
+        Delegates to the centralized utility in utils.contingency_ybus.
         """
-        # Handle both batched and unbatched adjacency matrices
-        if adj.dim() == 2:
-            # Unbatched: [num_nodes, num_nodes] -> [1, num_nodes, num_nodes]
-            adj = adj.unsqueeze(0)
-            was_unbatched = True
-        else:
-            was_unbatched = False
-        
-        batch_size, num_nodes, _ = adj.shape
-        device = adj.device
-        dtype = adj.dtype
-        
-        # Step 1: Add self-loops (A_hat = A + I) - vectorized
-        # Create identity matrix for each batch (efficient expand)
-        identity = torch.eye(num_nodes, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
-        adj_hat = adj + identity
-        
-        # Step 2: Compute degree matrix D_hat
-        # D_hat[i,i] = sum of row i (or column i, since A_hat is symmetric)
-        degree = torch.sum(adj_hat, dim=-1)  # [batch_size, num_nodes] - degree of each node
-        
-        # Handle zero-degree nodes (isolated nodes) to avoid division by zero
-        # Add small epsilon to prevent NaN
-        epsilon = 1e-8
-        degree = degree + epsilon
-        
-        # Step 3: Symmetric normalization: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
-        # Compute D_hat^(-0.5) as a diagonal matrix
-        degree_inv_sqrt = torch.pow(degree, -0.5)  # [batch_size, num_nodes]
-        degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)  # Prevent extreme values
-        
-        # Create diagonal matrices: D_hat^(-0.5) for each batch
-        degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
-        
-        # Symmetric normalization: D_hat^(-0.5) * A_hat * D_hat^(-0.5)
-        # This ensures stable information flow regardless of node degree
-        adj_norm = torch.bmm(torch.bmm(degree_matrix_inv_sqrt, adj_hat), degree_matrix_inv_sqrt)
-        # [batch_size, num_nodes, num_nodes]
-        
-        # Remove batch dimension if input was unbatched
-        if was_unbatched:
-            adj_norm = adj_norm.squeeze(0)  # [num_nodes, num_nodes]
-        
-        return adj_norm
+        from utils.contingency_ybus import normalize_adjacency
+        return normalize_adjacency(adj)
     
     def forward(self, x: torch.Tensor, adj: torch.Tensor, is_pre_normalized: bool = True) -> torch.Tensor:
         """
@@ -209,10 +161,9 @@ class ProfessionalGCNLayer(nn.Module):
         return output
 
 
-class ProfessionalGCNLayerNoActivation(ProfessionalGCNLayer):
+class GCNLayerNoActivation(GCNLayer):
     """
-    Professional GCN Layer without activation (for output layers or when activation is applied separately).
+    GCN Layer without activation (for output layers or when activation is applied separately).
     """
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__(in_features, out_features, bias=bias, activation=None)
-

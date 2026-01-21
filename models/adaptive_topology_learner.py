@@ -7,9 +7,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
+from utils.contingency_ybus import normalize_adjacency
 
 
-class BaseAdaptiveGCN(nn.Module):
+class AdaptiveTopologyLearner(nn.Module):
     """
     Base class for adaptive graph convolutional networks.
     Contains shared logic for:

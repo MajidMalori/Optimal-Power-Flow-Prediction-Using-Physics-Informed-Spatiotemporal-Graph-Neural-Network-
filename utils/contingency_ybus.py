@@ -191,3 +191,55 @@ def create_contingency_adjacency_batch(adjacency_batch: torch.Tensor, net, line_
     # Convert back to torch tensor
     return torch.from_numpy(adj_modified_batch).to(adjacency_batch.device).to(adjacency_batch.dtype)
 
+
+def normalize_adjacency(adj: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize adjacency matrix using the Renormalization Trick (Kipf & Welling).
+    D^(-0.5) * (A + I) * D^(-0.5)
+    
+    Args:
+        adj: Adjacency matrix [batch_size, num_nodes, num_nodes] or [num_nodes, num_nodes]
+        
+    Returns:
+        Normalized adjacency matrix
+    """
+    # Handle both batched and unbatched adjacency matrices
+    if adj.dim() == 2:
+        # Unbatched: [num_nodes, num_nodes] -> [1, num_nodes, num_nodes]
+        adj = adj.unsqueeze(0)
+        was_unbatched = True
+    else:
+        was_unbatched = False
+        
+    # 1. Add self-loops: A_hat = A + I
+    num_nodes = adj.shape[-1]
+    identity = torch.eye(num_nodes, device=adj.device, dtype=adj.dtype).unsqueeze(0)
+    adj_hat = adj + identity
+    
+    # 2. Calculate degree matrix D_hat
+    # Degree is sum of rows (or cols since symmetric)
+    degree = torch.sum(adj_hat, dim=2)  # [batch_size, num_nodes]
+    
+    # 3. Calculate D_hat^(-0.5)
+    # Add epsilon to prevent division by zero
+    epsilon = 1e-8
+    degree = degree + epsilon
+    degree_inv_sqrt = torch.pow(degree, -0.5)
+    
+    # Clip for numerical stability (prevent Inf)
+    degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)
+    
+    # Create diagonal matrix from vector
+    degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
+    
+    # 4. Symmetric normalization: D^(-0.5) * A_hat * D^(-0.5)
+    # Use bmm (batch matrix multiplication)
+    # (D * A) * D
+    adj_norm = torch.bmm(torch.bmm(degree_matrix_inv_sqrt, adj_hat), degree_matrix_inv_sqrt)
+    
+    # Return in original shape
+    if was_unbatched:
+        return adj_norm.squeeze(0)
+    
+    return adj_norm
+
