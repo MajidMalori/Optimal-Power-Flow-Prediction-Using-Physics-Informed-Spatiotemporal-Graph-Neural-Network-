@@ -74,52 +74,6 @@ def evaluate_performance(model, data_loader, device, config, normalizer, is_sequ
         'rmse': rmse
     }
 
-def evaluate_renewable_impacts_from_predictions(preds_phys, uncertainties, normalizer):
-    """
-    Evaluates renewable penetration impact from already-computed MC Dropout predictions.
-    This avoids re-running MC Dropout (reuses results for efficiency).
-    
-    Args:
-        preds_phys: Denormalized predictions [samples, buses, 10]
-        uncertainties: MC Dropout uncertainties [samples, buses, features]
-        normalizer: PowerSystemNormalizer instance (for base_mva)
-    
-    Returns:
-        DataFrame with renewable impact analysis
-    """
-    # Calculate Renewable Fraction per sample
-    # Requires 10-feature output to identify P_REN/P_CONV
-    if preds_phys.shape[-1] == 10:
-        p_ren = preds_phys[..., FeatureIndices.P_REN].sum(dim=1)
-        p_conv = preds_phys[..., FeatureIndices.P_CONV].sum(dim=1)
-        ren_frac = p_ren / (p_ren + p_conv + 1e-6)
-        
-        vm = preds_phys[..., FeatureIndices.VM]
-        voltage_dev = torch.mean(torch.abs(vm - 1.0), dim=1)
-        
-        p_load = preds_phys[..., FeatureIndices.P_LOAD].sum(dim=1)
-        p_gen = (preds_phys[..., FeatureIndices.P_EXT_GRID] + 
-                 preds_phys[..., FeatureIndices.P_CONV] + 
-                 preds_phys[..., FeatureIndices.P_REN]).sum(dim=1)
-        power_loss = torch.abs(p_gen - p_load) / normalizer.base_mva 
-        
-        carbon = (preds_phys[..., FeatureIndices.P_CONV] + 
-                  torch.nn.functional.relu(preds_phys[..., FeatureIndices.P_EXT_GRID])).sum(dim=1)
-        
-        uncertainty = torch.mean(uncertainties, dim=(1, 2)) 
-        
-        results_df = pd.DataFrame({
-            'renewable_fraction': ren_frac.cpu().numpy(),
-            'voltage_deviation': voltage_dev.cpu().numpy(),
-            'power_loss': power_loss.cpu().numpy(),
-            'carbon_proxy': carbon.cpu().numpy(),
-            'uncertainty': uncertainty.cpu().numpy()
-        })
-        return results_df
-    else:
-        return pd.DataFrame()
-
-
 def save_results(metrics, results_df, config, output_dir=None):
     """
     Saves evaluation results.

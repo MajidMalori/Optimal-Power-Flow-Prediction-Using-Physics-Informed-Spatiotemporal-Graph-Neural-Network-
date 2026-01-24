@@ -50,7 +50,21 @@ class Config:
         @staticmethod
         def get_recommended_model(nb): return "PIGCGRU" if nb <= 33 else "AdaptivePIGCN"
         @staticmethod
-        def get_adaptive_mosoa_params(nb):
+        def get_adaptive_mosoa_params(nb, config_instance=None):
+            # Check for config overrides first
+            if config_instance:
+                num_seagulls = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_NUM_SEAGULLS', None)
+                max_iterations = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_MAX_ITERATIONS', None)
+                strategy = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_STRATEGY', None)
+                
+                if num_seagulls is not None and max_iterations is not None:
+                     return {
+                        'num_seagulls': num_seagulls,
+                        'max_iterations': max_iterations,
+                        'strategy': strategy or ('thorough' if nb <= 33 else ('balanced' if nb <= 57 else 'quick')),
+                        'description': f'Configured via config.yaml ({strategy})'
+                    }
+
             if nb <= 33: return {'num_seagulls': 1, 'max_iterations': 2, 'strategy': 'thorough', 'description': 'Extensive search'}
             return {'num_seagulls': 1, 'max_iterations': 2, 'strategy': 'balanced' if nb <= 57 else 'quick', 'description': 'Balanced' if nb <= 57 else 'Fast'}
 
@@ -96,6 +110,9 @@ class Config:
             if cli_args.clear_results is not None: clear_results = cli_args.clear_results
 
         if hasattr(Config, 'clear_results'): clear_results = Config.clear_results
+        # Check instance attribute (from YAML) if not found on class
+        if hasattr(self, 'clear_results'): clear_results = self.clear_results
+
         if clear_results and os.path.exists(self.EXPERIMENTAL_RESULTS_DIR): shutil.rmtree(self.EXPERIMENTAL_RESULTS_DIR, ignore_errors=True)
         
         self.DATA_MODE_TIMESTEPS = {'train': train_timesteps or getattr(self, 'train_timesteps'), 'test': test_timesteps or getattr(self, 'test_timesteps')}
@@ -132,7 +149,10 @@ class Config:
             'experimental_test_config': 'test_config', 'experimental_bus_systems': 'bus_systems', 'experimental_models_to_train': 'models_to_train',
             'experimental_data_mode': 'data_mode', 'experimental_train_timesteps': 'train_timesteps', 'experimental_test_timesteps': 'test_timesteps',
             'experimental_parallel_data_loading': 'parallel_data_loading', 'experimental_data_workers': 'NUM_WORKERS', 'experimental_pin_memory': 'PIN_MEMORY',
-            'experimental_gradient_checkpointing': 'GRADIENT_CHECKPOINTING', 'experimental_save_checkpoints': 'SAVE_CHECKPOINTS', 'experimental_clear_results': 'clear_results',
+            'experimental_gradient_checkpointing': 'GRADIENT_CHECKPOINTING', 'experimental_save_checkpoints': 'SAVE_CHECKPOINTS', 'experimental_enable_logging': 'LOGGING_ENABLED', 'experimental_clear_results': 'clear_results',
+            'optimization_case33_num_seagulls': 'OPTIMIZATION_CASE33_NUM_SEAGULLS', 'optimization_case33_max_iterations': 'OPTIMIZATION_CASE33_MAX_ITERATIONS',
+            'optimization_case57_num_seagulls': 'OPTIMIZATION_CASE57_NUM_SEAGULLS', 'optimization_case57_max_iterations': 'OPTIMIZATION_CASE57_MAX_ITERATIONS',
+            'optimization_case118_num_seagulls': 'OPTIMIZATION_CASE118_NUM_SEAGULLS', 'optimization_case118_max_iterations': 'OPTIMIZATION_CASE118_MAX_ITERATIONS',
             'debug_train_show_detailed_progress': 'DEBUG_TRAIN_SHOW_PROGRESS', 'debug_test_show_detailed_progress': 'DEBUG_TEST_SHOW_PROGRESS', 'debug_log_interval': 'DEBUG_LOG_INTERVAL'
         }
         for k, v in flat.items():

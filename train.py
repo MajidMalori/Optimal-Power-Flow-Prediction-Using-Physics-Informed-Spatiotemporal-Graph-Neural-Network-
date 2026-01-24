@@ -27,7 +27,6 @@ from utils.uncertainty_analysis import generate_uncertainty_visualizations
 from utils.evaluation_plots import (plot_predicted_vs_actual, plot_error_distributions, plot_calibration_diagram)
 from utils.visualization import plot_training_history, plot_convergence, plot_all_renewable_impacts
 from utils.evaluation import (evaluate_performance,
-                             evaluate_renewable_impacts_from_predictions,
                              evaluate_model_with_uncertainty,
                              evaluate_moopf_objectives_normalized,
                              save_results)
@@ -226,7 +225,7 @@ def main():
             raise KeyboardInterrupt("Training interrupted by user")
         
         # Get adaptive MoSOA parameters for this system size
-        mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses)
+        mosoa_params = base_config._ModelConfig.get_adaptive_mosoa_params(num_buses, config_instance=base_config)
         
         # Initialize data collectors for comparative plots
         bus_renewable_data = {}  # model_name -> renewable_impact_dataframe
@@ -561,7 +560,7 @@ def main():
             os.makedirs(model_output_dir, exist_ok=True)
             
             # Save best model checkpoint to model folder
-            if best_run['model_state'] is not None:
+            if best_run['model_state'] is not None and getattr(best_config, 'SAVE_CHECKPOINTS', True):
                 best_model_path = os.path.join(model_output_dir, 'best_model.pth')
                 torch.save(model_to_eval.state_dict(), best_model_path)
             
@@ -892,11 +891,12 @@ def main():
     
     # Final summary
     if all_results:
+        print_comprehensive_summary(all_results, base_config)
         successful = [r for r in all_results if r['final_test_score'] != float('inf')]
         best = min(successful, key=lambda x: x['final_test_score']) if successful else None
         base_config.finalize_run({
             'models_tested': [r['model_name'] for r in all_results], 'total': len(all_results), 'success': len(successful),
-            'test_config': test_config, 'best_model': f"{best['model_name']} ({best['num_buses']}b)" if best else 'None',
+            'test_config': getattr(base_config, 'test_config', 'all'), 'best_model': f"{best['model_name']} ({best['num_buses']}b)" if best else 'None',
             'best_score': best['final_test_score'] if best else float('inf'), 'buses': list(set(r['num_buses'] for r in all_results))
         })
     else:

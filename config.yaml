@@ -1,126 +1,85 @@
-# ============================================================================
-# YAML Configuration File for Physics-Informed Machine Learning Project
-# ============================================================================
-# This file provides a clean, version-controlled way to manage all configuration
-# parameters. The Config class in config.py can load from this file.
-#
-# Usage:
-#   - Edit this file to change configuration
-#   - Command-line overrides: Use --config-override key=value
-#   - Environment variables: Supported for sensitive values
-#
-# ============================================================================
+experimental:
+  test_config: "all"
+  models_to_train: "all"
+  bus_systems: [33, 57, 118]
+  data_mode: "train"
+  train_timesteps: 10008
+  test_timesteps: 24
+  parallel_data_loading: true
+  data_workers: 0
+  pin_memory: false
+  gradient_checkpointing: false
+  save_checkpoints: true
+  enable_logging: false
+  clear_results: true
 
-# --- System & Device Configuration ---
 system:
-  device: "cuda"  # "cuda" or "cpu" - auto-detected if not specified
+  device: "cuda"
   num_buses: [33, 57, 118]
-  test_cases: ["case33", "case57", "case118"]  # Default cases to run
+  test_cases: ["case33", "case57", "case118"]
   seed: 42
 
-# --- System-Specific Voltage Limits and BASE_MVA ---
-# These are loaded based on CASE_NAME during runtime
-# NOTE: These MUST match the limits used in data generation (data/validation.py)
 system_limits:
   case33:
-    base_mva: 10.0  # Distribution system (from pandapower case33bw)
+    base_mva: 10.0
     v_min: 0.85
     v_max: 1.15
   case57:
-    base_mva: 100.0  # Transmission system (from pandapower case57)
-    v_min: 0.70  # More relaxed for transmission
+    base_mva: 100.0
+    v_min: 0.70
     v_max: 1.20
   case118:
-    base_mva: 100.0  # Transmission system (from pandapower case118)
+    base_mva: 100.0
     v_min: 0.85
     v_max: 1.15
 
-# --- Training Configuration ---
 training:
   batch_size: 256
   learning_rate: 0.0005
-  max_grad_norm: 1.0  # Gradient clipping
+  max_grad_norm: 1.0
   num_epochs: 3
   early_stopping_patience: 5
-  gradient_accumulation_steps: 1  # Memory optimization: accumulate gradients over N batches before updating weights (reduces effective batch size memory)
+  gradient_accumulation_steps: 1
   use_learning_rate_scheduler: true
   cosine_annealing_lr:
-    t_max: null  # Auto-set to num_epochs if null
-    eta_min: 0.00001  # Higher minimum LR (was 1e-6, now 1e-5) - prevents premature convergence
-  weight_decay: 0.0001  # L2 regularization (was 0.0) - helps prevent overfitting
+    t_max: null
+    eta_min: 0.00001
+  weight_decay: 0.0001
 
-# --- Physics Configuration ---
 physics:
-  split_mode: "blocked_timeseries"  # Data split strategy
+  split_mode: "blocked_timeseries"
   splits:
     train: 0.6
     val: 0.2
-    # test: 0.2 (implicit)
 
-# --- Data Configuration ---
 data:
   hours_per_day: 24
-  sequence_length: 10  # Increased from 5 to 10 for better context (matches user intent)
-  contingency_rate: 0.05  # Probability of line contingency per timestep
-  pmu_coverage: 0.3  # Fraction of buses with PMU measurements
+  sequence_length: 10
+  contingency_rate: 0.05
+  pmu_coverage: 0.3
 
-# --- Model Capacity (Hyperparameter Search Bounds) ---
-# Options: 'normal' (conservative), 'medium' (balanced), 'large' (maximum)
-# Set to 'large' for best results - MoSOA will search within these bounds
-# 
-# Research-backed ranges (consistent across all bus systems):
-# - Hidden Dimension: normal=64-128, medium=96-192, large=64-256
-# - GCN Layers: normal=1-2, medium=2-3, large=2-3 (optimal depth, prevents over-smoothing)
-# - Embedding Dimension: normal=64-150, medium=100-200, large=100-300
+optimization:
+  case33:
+    num_seagulls: 1
+    max_iterations: 2
+  case57:
+    num_seagulls: 1
+    max_iterations: 2
+  case118:
+    num_seagulls: 1
+    max_iterations: 2
+
 model_capacity:
-  bus_33: 'large'     # All buses use same research-backed ranges
-  bus_57: 'large'    
-  bus_118: 'large'    
+  bus_33: 'large'
+  bus_57: 'large'
+  bus_118: 'large'
 
-# --- MOOPF (Multi-Objective Optimal Power Flow) Weights ---
 moopf:
   weights:
     loss: 0.33333333
     voltage_deviation: 0.33333333
     carbon: 0.33333333
 
-# --- Experimental Configuration ---
-# These control what gets tested during experimental runs
-experimental:
-  # Model selection strategy (hierarchical):
-  # 1. If models_to_train is set to specific models → Uses those (overrides test_config)
-  # 2. If models_to_train is "all" or not set → Uses test_config
-  
-  # Option 1: Use test_config presets (convenient)
-  # Options: quick, core, comprehensive, physics_only, non_physics_only, sequential_only, all
-  # - quick: [AdaptivePIGCN] - fast testing
-  # - core: [adaptiveGCN, AdaptivePIGCN] - best comparison
-  # - comprehensive: [GCN, adaptiveGCN, AdaptivePIGCN, PIGCLSTM, PIGCGRU] - full comparison
-  # - physics_only: All physics-informed models
-  # - non_physics_only: [GCN, adaptiveGCN]
-  # - sequential_only: All LSTM/GRU models
-  # - all: ALL 7 MODELS
-  test_config: "all"
-  
-  # Option 2: Override with specific models (precise control)
-  # Examples:
-  # models_to_train: ["GCN"]  # Train only GCN
-  # models_to_train: ["GCN", "adaptiveGCN"]  # Train only these two
-  # models_to_train: "all"  # Use test_config above (default behavior)
-  models_to_train: "all"  # Set to "all" to use test_config, or specify models to override  
-  
-  bus_systems: [33,57,118]
-  data_mode: "train"
-  train_timesteps: 10008  # 417 days
-  test_timesteps: 24 # 24 day
-  parallel_data_loading: true
-  data_workers: 0
-  pin_memory: false
-  gradient_checkpointing: false
-  save_checkpoints: false
-  clear_results: true
-
-# --- Debug Configuration ---
 debug:
   train:
     show_detailed_progress: false

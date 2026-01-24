@@ -54,7 +54,7 @@ class PowerSystemTrainer:
 
     def train(self, train_loader, val_loader, model_name, num_buses, config_params=None):
         self.model_name = model_name; self.num_buses = num_buses
-        if self.config.DEBUG_ENABLE:
+        if getattr(self.config, 'LOGGING_ENABLED', False):
             log_path = self.config.get_training_log_path(num_buses, model_name)
             self.log_file = open(log_path, 'a', encoding='utf-8')
             self.log_file.write(f"\n{'#'*80}\n# Run Started: {datetime.now()}\n{'#'*80}\n")

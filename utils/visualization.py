@@ -239,7 +239,7 @@ def plot_training_history(history: Dict[str, list], model_name: str, config: Any
         
         save_path = config.get_training_history_path(num_buses, model_name)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, facecolor='white')
+        plt.savefig(save_path, dpi=100, facecolor='white')
         plt.close('all')
         
     except Exception as e:
@@ -263,7 +263,7 @@ def plot_convergence(history: list, model_name: str, config: Any, num_buses: int
         
         save_path = config.get_convergence_plot_path(num_buses, model_name)
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, facecolor='white')
+        plt.savefig(save_path, dpi=100, facecolor='white')
         plt.close('all')
         
     except Exception as e:
@@ -304,7 +304,7 @@ def plot_all_renewable_impacts(renewable_impact_data: pd.DataFrame, config: Any,
         plt.tight_layout()
         model_dir = config.get_model_eval_dir(num_buses, model_name)
         os.makedirs(model_dir, exist_ok=True)
-        plt.savefig(os.path.join(model_dir, 'ri_combined.png'), dpi=300)
+        plt.savefig(os.path.join(model_dir, 'ri_combined.png'), dpi=150)
         plt.close('all')
         
     except Exception as e:
@@ -383,7 +383,7 @@ def create_model_comparison_plot(all_results: list, save_path: str = None):
         
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+            plt.savefig(save_path, dpi=100, bbox_inches='tight', facecolor='white')
             print(f"Model comparison plot saved: {save_path}")
         
         plt.close('all')
@@ -623,7 +623,7 @@ def create_moopf_comparison_plot(all_results: List[Dict[str, Any]], output_dir: 
         
         # Save plot
         save_path = os.path.join(output_dir, 'moopf_metrics_comparison.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close('all')
         
     except Exception as e:
