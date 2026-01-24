@@ -60,20 +60,19 @@ def mosoa_optimizer(num_agents: int, max_iter: int, lb: np.ndarray, ub: np.ndarr
     return best_score, best_pos, curve, details
 
 def setup_hyperparameter_bounds(model_name: str, cfg: Any, nb: int, is_pi: bool, is_seq: bool, use_adapt: bool) -> Dict[str, Tuple[float, float]]:
-    hr = cfg.get_hidden_dim_range(nb) if hasattr(cfg, 'get_hidden_dim_range') else cfg.HIDDEN_DIM_RANGE
+    hr = cfg.get_hidden_dim_range(nb)
     sr, rr = (None, None)
     if is_seq:
-        if hasattr(cfg, 'get_sequential_ranges'):
-            r = cfg.get_sequential_ranges(nb)
-            hr, sr, rr = r['hidden_dim'], r['sequence_length'], r['rnn_layers']
-        else: sr, rr = cfg.SEQUENCE_LENGTH_RANGE, cfg.RNN_LAYERS_RANGE
+        r = cfg.get_sequential_ranges(nb)
+        hr, sr, rr = r['hidden_dim'], r['sequence_length'], r['rnn_layers']
     
-    gcr = cfg.get_num_gc_layers_range(nb) if hasattr(cfg, 'get_num_gc_layers_range') else cfg.NUM_GC_LAYERS_RANGE
+    gcr = cfg.get_num_gc_layers_range(nb)
     bounds = {'HIDDEN_DIM': hr, 'NUM_GC_LAYERS': gcr}
     if is_seq: bounds.update({'SEQUENCE_LENGTH': sr, 'RNN_LAYERS': rr})
     if use_adapt:
-        er = cfg.get_embedding_dim_range(nb) if hasattr(cfg, 'get_embedding_dim_range') else cfg.EMBEDDING_DIM_RANGE
-        bounds.update({'EMBEDDING_DIM': er, 'PHI': cfg.PHI_RANGE})
+        er = cfg.get_embedding_dim_range(nb)
+        pr = cfg.get_phi_range(nb)
+        bounds.update({'EMBEDDING_DIM': er, 'PHI': pr})
     return bounds
 
 def create_model_kwargs(cfg: Any, params: Dict[str, Any], nb: int, is_seq: bool, use_adapt: bool, model_name: str = None, config: Any = None, normalizer: Any = None, is_physics_informed: bool = False) -> Dict[str, Any]:

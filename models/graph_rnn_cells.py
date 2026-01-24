@@ -17,7 +17,7 @@ Based on standard Graph RNN literature (e.g., Seo et al., ICML 2018).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Tuple
 from .gcn_layer import GCNLayer
 
 

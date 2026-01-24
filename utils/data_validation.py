@@ -6,7 +6,6 @@ Data validation utilities for ensuring data files exist before training.
 import os
 import subprocess
 import sys
-import threading
 import time
 import glob
 import re
@@ -15,7 +14,7 @@ import shutil
 import numpy as np
 import hashlib
 from datetime import datetime
-from typing import List, Tuple, Dict, Set
+from typing import List, Tuple, Dict
 from tqdm import tqdm
 
 def merge_metadata_files(data_dir: str) -> dict:
@@ -80,6 +79,10 @@ def merge_metadata_files(data_dir: str) -> dict:
     
     # Build merged metadata
     if all_runs:
+        # Sort runs by timestamp (ascending) to ensure chronological order
+        # This is critical for finding the 'latest' run correctly when merging multiple files
+        all_runs.sort(key=lambda x: x.get('ts', ''))
+        
         merged_metadata = {
             'runs': all_runs,
             'test_cases': sorted(list(all_test_cases)),
@@ -861,10 +864,26 @@ def generate_data_if_missing(config, bus_systems=None) -> bool:
     else:
         print(f"\n[Summary] All systems valid ({valid_str})")
     
-    # STEP 3: If all systems are valid, skip generation
+    # STEP 3: Check if existing data matches requirements (Smart Data Generation)
     if not systems_need_regeneration:
-        print(f"✓ All data validation passed - Using existing data")
-        return True
+        # Check timesteps match
+        expected_timesteps = config.DATA_MODE_TIMESTEPS[config.DATA_MODE]
+        # Note: If CLI argument was provided, it overrides config timesteps in the Config object already
+        
+        all_match = True
+        for bus_system in systems_valid:
+            is_valid, reason, details = validate_bus_system_data(config, bus_system)
+            if not details.get('timesteps_match', False):
+                all_match = False
+                print(f"  Note: case{bus_system} has {details.get('actual_timesteps')} steps, need {expected_timesteps}. Regenerating.")
+                systems_need_regeneration.append(bus_system)
+        
+        if all_match:
+            print(f"✓ All data validation passed - Using existing data")
+            return True
+        else:
+             # Remove systems that need regeneration from valid list
+             systems_valid = [b for b in systems_valid if b not in systems_need_regeneration]
     
     # STEP 4: Selective regeneration (only for systems that need it)
     invalid_str = ', '.join([f'case{b}' for b in systems_need_regeneration])

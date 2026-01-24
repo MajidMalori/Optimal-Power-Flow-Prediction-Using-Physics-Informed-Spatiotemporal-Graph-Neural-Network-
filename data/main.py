@@ -5,13 +5,11 @@ import json
 import warnings
 import copy
 import gc
-import time
 import shutil
 import tempfile
 import random
 import glob
-import argparse
-import yaml
+import hashlib
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -19,78 +17,41 @@ import pandapower as pp
 from tqdm import tqdm
 from scipy import sparse
 
-
-# Add parent directory to Python path so we can import utils
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+if parent_dir not in sys.path: sys.path.insert(0, parent_dir)
 
-# Import from refactored modules
 from data.profiles import (
-    get_daily_load_profile, 
-    get_solar_generation_profile, 
-    get_wind_generation_profile,
-    simulate_weather_sequence,
+    get_daily_load_profile, get_solar_generation_profile, 
+    get_wind_generation_profile, simulate_weather_sequence,
     calculate_renewable_reactive_power
 )
 from data.topology import (
-    load_network, 
-    configure_renewables, 
-    apply_n1_contingency, 
-    restore_contingency,
-    calculate_ybus_from_net,
-    calculate_adjacency_matrix,
-    identify_bus_types,
-    create_opf_targets
+    load_network, configure_renewables, apply_n1_contingency, 
+    restore_contingency, calculate_ybus_from_net, calculate_adjacency_matrix,
+    identify_bus_types, create_opf_targets
 )
 from data.validation import (
-    SuppressPrints,
-    validate_power_flow_inputs,
-    validate_power_flow_outputs,
-    apply_curtailment_with_retry,
-    hard_reset_system,
-    trip_renewable_generators
+    SuppressPrints, validate_power_flow_inputs, validate_power_flow_outputs,
+    apply_curtailment_with_retry, hard_reset_system, trip_renewable_generators
 )
 from utils.contingency_ybus import DataGenerationError
-
-# from data.data_auditor import transform_convergence_to_audit  # Optional auditing module
-
-# Suppress warnings
-warnings.filterwarnings('ignore', category=FutureWarning)
-
-# CONFIGURATION
-# Refactored to use Config class and CLI arguments
 from config import Config
 
-# Parse arguments using unified CLI
+warnings.filterwarnings('ignore', category=FutureWarning)
+
 args = Config.parse_cli_args()
-
-# Initialize Config
-# Priority: CLI args > YAML > Default ('train')
 try:
-    config_instance = Config(
-        cli_args=args,
-        load_yaml=True,
-        data_mode='train' # Default, will be overridden by args.mode if provided
-    )
+    config_instance = Config(cli_args=args, load_yaml=True, data_mode='train')
 except Exception as e:
-    raise RuntimeError(
-        f"Error loading configuration: {e}\n"
-        f"This is a critical error - cannot proceed without valid configuration."
-    ) from e
+    raise RuntimeError(f"Critical config error: {e}") from e
 
-# Create CONFIG dictionary for compatibility with existing code
-# Priority: CLI args > Config object > Defaults
-data_mode = config_instance.DATA_MODE # Config has already resolved mode
-default_timesteps = config_instance.DATA_MODE_TIMESTEPS[data_mode]
-timesteps_to_use = args.timesteps if args.timesteps is not None else default_timesteps
+data_mode = config_instance.DATA_MODE
+timesteps_to_use = args.timesteps if args.timesteps is not None else config_instance.DATA_MODE_TIMESTEPS[data_mode]
 output_dir_to_use = config_instance.DATA_DIR
-
 
 CONFIG = {
     "random_seed": 42,
-    # All values now properly loaded from YAML via config_instance
     "test_cases": getattr(config_instance, 'TEST_CASES', ["case33", "case57", "case118"]),
     "time_steps": timesteps_to_use,
     "output_dir": output_dir_to_use,
@@ -113,245 +74,70 @@ CONFIG = {
 def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = None, 
                          case_name: str = None, renewable_fraction: float = None, 
                          timestamp: str = None) -> dict:
-    """
-    Runs the main time-series power flow simulation with convergence tracking.
-    
-    HIERARCHICAL OPF CONVERGENCE STRATEGY:
-    ======================================
-    This function implements a robust, physics-based fallback strategy to ensure
-    100% data coverage while maintaining physical validity:
-    
-    1. STRICT (NORMAL) - BEST CASE ✓
-       - Standard Newton-Raphson OPF solver
-       - Tight convergence tolerance (1e-5 MVA)
-       - No line outages (N-0 condition)
-       - This represents normal operating conditions
-       - GOAL: Use this for as many timesteps as possible
-    
-    2. STRICT (CONTINGENCY) - N-1 SCENARIO ⚠️
-       - Same tight tolerance (1e-5 MVA)
-       - One transmission line is OUT OF SERVICE
-       - Physically represents N-1 contingency analysis
-       - WHY: Sometimes removing a congested line helps convergence
-       - VALID: Real power systems must handle line outages
-    
-    3. RELAXED (CONTINGENCY) - STRESSED SYSTEM ⚠️
-       - Looser convergence tolerance (1e-4 MVA)
-       - May include line outage if needed
-       - WHY: High renewable penetration can stress the system
-       - VALID: Less precise but still physically meaningful
-    
-    WHY THIS APPROACH IS CORRECT:
-    =============================
-    - ✓ REALISTIC: Real power systems face all these conditions
-    - ✓ ROBUST TRAINING: Model learns to handle stressed states
-    - ✓ 100% COVERAGE: No failed timesteps, all data is usable
-    - ✓ PHYSICS-BASED: All fallbacks are physically valid scenarios
-    - ✓ INDUSTRY STANDARD: N-1 analysis is required by grid codes
-    
-    The mix of normal and contingency cases makes the trained model MORE ROBUST
-    to real-world conditions, not less. This is a FEATURE, not a bug!
-    
-    CONVERGENCE STATISTICS:
-    =======================
-    Typical results (from validation):
-    - Case33: 100% Strict (Normal) - Small, well-conditioned system
-    - Case57: 95% Strict (Normal), 5% Strict (Contingency)
-    - Case118: 85% Strict (Normal), 10% Strict (Contingency), 5% Relaxed
-    
-    High renewable penetration (80-100%) increases need for fallback methods
-    due to voltage stress and power flow congestion.
-    """
     num_buses = len(net.bus)
     time_steps = config['time_steps']
-    
-    # MEMORY OPTIMIZATION: Chunked writing mode
-    use_chunked_writing = config.get('use_chunked_writing', True)
     chunk_size = config.get('chunk_size', 1000)
-    
-    chunked_mode = (use_chunked_writing and output_dir is not None and 
-                    case_name is not None and renewable_fraction is not None and 
-                    timestamp is not None)
+    chunked_mode = (config.get('use_chunked_writing', True) and output_dir and 
+                    case_name and renewable_fraction is not None and timestamp)
     
     if chunked_mode:
-        # print(f"[Memory Optimization] Using chunked writing (chunk_size={chunk_size})") # UI Cleanup
         temp_dir = tempfile.mkdtemp(prefix='gen_data_chunks_')
+        files = {k: os.path.join(temp_dir, f'{k}_temp.npy') for k in ['features', 'targets', 'bus_types', 'topology_ids', 'carbon_coeffs']}
         
-        feature_file = os.path.join(temp_dir, 'features_temp.npy')
-        target_file = os.path.join(temp_dir, 'targets_temp.npy')
-        bus_types_file = os.path.join(temp_dir, 'bus_types_temp.npy')
-        topology_ids_file = os.path.join(temp_dir, 'topology_ids_temp.npy')
-        carbon_coeffs_file = os.path.join(temp_dir, 'carbon_coeffs_temp.npy')
-        
-        feature_matrix = np.memmap(feature_file, mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
-        target_matrix = np.memmap(target_file, mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
-        bus_types_array = np.memmap(bus_types_file, mode='w+', dtype=np.int32, shape=(time_steps, num_buses))
-        topology_ids = np.memmap(topology_ids_file, mode='w+', dtype=np.int32, shape=(time_steps,))
-        time_carbon_coeffs = np.memmap(carbon_coeffs_file, mode='w+', dtype=np.float32, shape=(time_steps,))
-        
-        chunks_written = 0
+        feature_matrix = np.memmap(files['features'], mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
+        target_matrix = np.memmap(files['targets'], mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
+        bus_types_array = np.memmap(files['bus_types'], mode='w+', dtype=np.int32, shape=(time_steps, num_buses))
+        topology_ids = np.memmap(files['topology_ids'], mode='w+', dtype=np.int32, shape=(time_steps,))
+        time_carbon_coeffs = np.memmap(files['carbon_coeffs'], mode='w+', dtype=np.float32, shape=(time_steps,))
     else:
         feature_matrix = np.zeros((time_steps, num_buses, 10), dtype=np.float32)
         target_matrix = np.zeros((time_steps, num_buses, 10), dtype=np.float32)
         bus_types_array = np.zeros((time_steps, num_buses), dtype=np.int32)
         topology_ids = np.zeros(time_steps, dtype=np.int32)
         time_carbon_coeffs = np.zeros(time_steps, dtype=np.float32)
-        temp_dir = None
-    
+        temp_dir, files = None, {}
+
     base_adjacency_matrix = calculate_adjacency_matrix(net)
-    
     ybus_base = None
     contingency_timesteps = []
     contingency_ybus_list = []
     
     convergence_stats = {
-        'total_timesteps': time_steps,
-        'successful': 0,
-        'failed': 0,
-        'failed_no_contingency': [],
-        'failed_with_contingency': [],
-        'contingency_line_details': {},
-        'successful_timesteps': [],
-        'resolution_methods': {
-            'strict_normal': 0,
-            'strict_contingency': 0,
-            'relaxed_contingency': 0,
-            'restored_line': 0,
-        },
-        'timestep_resolution': {},
-        'contingencies_attempted': 0,
-        'contingencies_successful': 0,
-        'contingencies_failed': 0,
-        'contingencies_resolved_strict': 0,
-        'contingencies_resolved_relaxed': 0,
-        'contingencies_restored': 0,
-        'critical_lines': {},
-        'validation_stats': {
-            'consecutive_failures': 0,
-            'max_consecutive_failures': 0,
-            'curtailment_attempts': 0,
-            'curtailment_events': 0,
-            'curtailment_successful': 0,
-            'generator_trips': 0,
-            'hard_resets': 0,
-            'pre_validation_failed': 0,
-            'post_validation_failed': 0,
-            'garbage_discarded': 0,
-            'voltage_violations': 0,
-            'angle_violations': 0,
-            'line_loading_violations': 0,
-            'slack_power_violations': 0,
-            'generator_capacity_violations': 0,
-            'inverter_capability_violations': 0,
-            'valid_stressed_states': 0,
-        },
+        'total_timesteps': time_steps, 'successful': 0, 'failed': 0,
+        'failed_no_contingency': [], 'failed_with_contingency': [],
+        'resolution_methods': {'strict_normal': 0, 'strict_contingency': 0, 'relaxed_contingency': 0, 'restored_line': 0, 'hard_reset': 0},
+        'validation_stats': {'consecutive_failures': 0, 'max_consecutive_failures': 0, 'curtailment_attempts': 0, 'curtailment_successful': 0, 
+                             'generator_trips': 0, 'hard_resets': 0, 'voltage_violations': 0, 'angle_violations': 0, 'line_loading_violations': 0}
     }
     
     base_load_p, base_load_q = net.load.p_mw.copy(), net.load.q_mvar.copy()
-    total_system_load_mw = base_load_p.sum()
-    # print(f"Total system load: {total_system_load_mw:.2f} MW") # UI Cleanup
+    total_load = base_load_p.sum()
     
-    solar_gens = net.sgen[net.sgen.type == 'solar'] if 'type' in net.sgen.columns else pd.DataFrame()
-    wind_gens = net.sgen[net.sgen.type == 'wind'] if 'type' in net.sgen.columns else pd.DataFrame()
+    num_solar = len(net.sgen[net.sgen.type == 'solar']) if 'type' in net.sgen.columns else 0
+    num_wind = len(net.sgen[net.sgen.type == 'wind']) if 'type' in net.sgen.columns else 0
+    num_renewables = num_solar + num_wind
     
-    num_solar = len(solar_gens)
-    num_wind = len(wind_gens)
-    num_total_renewable = num_solar + num_wind
-    
-    if num_total_renewable > 0:
-        # Scale capacity to achieve target penetration accounting for capacity factor (~0.3)
-        # Target Generation = Load * Fraction
-        # Required Capacity = Target Generation / Capacity Factor
-        # Required Capacity = Load * Fraction / 0.3
-        assumed_capacity_factor = 0.3
-        # Ensure we don't divide by zero if fraction is 0 (though num_total_renewable > 0 implies some renewables)
-        target_fraction = renewable_fraction if renewable_fraction is not None else 0.0
-        max_total_renewable_mw = (total_system_load_mw * target_fraction) / assumed_capacity_factor
-        solar_fraction = num_solar / num_total_renewable if num_total_renewable > 0 else 0.5
-        wind_fraction = num_wind / num_total_renewable if num_total_renewable > 0 else 0.5
+    max_solar_mw = max_wind_mw = max_total_ren_mw = 0
+    if num_renewables > 0:
+        target_frac = renewable_fraction if renewable_fraction is not None else 0.0
+        max_total_ren_mw = (total_load * target_frac) / 0.3
+        max_solar_mw = (max_total_ren_mw * (num_solar/num_renewables)) / num_solar if num_solar else 0
+        max_wind_mw = (max_total_ren_mw * (num_wind/num_renewables)) / num_wind if num_wind else 0
         
-        max_individual_solar_mw = (max_total_renewable_mw * solar_fraction) / num_solar if num_solar > 0 else 0
-        max_individual_wind_mw = (max_total_renewable_mw * wind_fraction) / num_wind if num_wind > 0 else 0
-        
-        # print(f"  Renewable generators: {num_solar} solar + {num_wind} wind") # UI Cleanup
-        # print(f"  Max individual capacity: Solar={max_individual_solar_mw:.3f} MW, Wind={max_individual_wind_mw:.3f} MW") # UI Cleanup
-    else:
-        max_individual_solar_mw = 0
-        max_individual_wind_mw = 0
-        max_total_renewable_mw = 1.0
-        # print("  No renewable generators configured") # UI Cleanup
-    
-    if num_total_renewable > 0 and 'type' in net.sgen.columns:
         for i, sgen in net.sgen.iterrows():
-            if sgen.type == 'solar' and max_individual_solar_mw > 0:
-                net.sgen.at[i, 'sn_mva'] = max_individual_solar_mw * 1.1
-            elif sgen.type == 'wind' and max_individual_wind_mw > 0:
-                net.sgen.at[i, 'sn_mva'] = max_individual_wind_mw * 1.1
-    
-    # Always generate weather-driven renewable variability
-    weather_sequence = simulate_weather_sequence(
-        timesteps=time_steps,
-        hours_per_day=config.get('hours_per_day', 24),
-        seed=config.get('seed', None)
-    )
-        
+            if sgen.type == 'solar': net.sgen.at[i, 'sn_mva'] = max_solar_mw * 1.1
+            elif sgen.type == 'wind': net.sgen.at[i, 'sn_mva'] = max_wind_mw * 1.1
+    else:
+        max_total_ren_mw = 1.0
+
+    weather_seq = simulate_weather_sequence(time_steps, config.get('hours_per_day', 24), config.get('seed', None))
     dropped_line_idx = None
-    has_contingency = False
-    consecutive_failures = 0
-    max_consecutive_failures = 0
     detailed_metrics = []
     
-    # Progress Bar Logic
-    disable_pbar = False
-    try:
-        if 'args' in globals():
-            disable_pbar = getattr(args, 'no_progress_bar', False)
-    except Exception:
-        pass
-    
-    # Also check config dict (for in-memory tests)
-    if not disable_pbar and config.get('no_progress_bar', False):
-        disable_pbar = True
-        
-    iterator = range(time_steps)
-    if not disable_pbar:
-        # Initialize progress bar with immediate updates
-        # miniters=1: update after every iteration (no batching)
-        # mininterval=0.1: update at least every 0.1 seconds for smooth display
-        # smoothing=0: disable exponential smoothing for more responsive updates
-        iterator = tqdm(
-            range(time_steps), 
-            desc=f"Generating {case_name} ({renewable_fraction*100:.0f}%)", 
-            unit="step",
-            miniters=1,
-            mininterval=0.1,
-            smoothing=0,
-            initial=0
-        )
-        # Force an immediate display update to show the bar is active
-        # This ensures the bar appears even before the first iteration completes
-        iterator.refresh()
-        # Small update to show initialization is happening
-        iterator.set_postfix_str("Initializing...")
-        iterator.refresh()
-    
-    # ============================================================================
-    # MAIN TIME-SERIES SIMULATION LOOP
-    # ============================================================================
-    # For each timestep, we attempt to solve the OPF problem using the hierarchical
-    # strategy described in the function docstring:
-    #   1. Try Strict (Normal) - standard OPF, no contingencies
-    #   2. If fails → Try Strict (Contingency) - drop a line (N-1)
-    #   3. If still fails → Try Relaxed tolerance
-    # This ensures 100% data coverage with physically valid solutions.
-    # ============================================================================
-    
+    disable_pbar = config.get('no_progress_bar', False) or getattr(args, 'no_progress_bar', False)
+    iterator = range(time_steps) if disable_pbar else tqdm(range(time_steps), desc=f"Gen {case_name} ({renewable_fraction*100:.0f}%)", unit="step", miniters=1)
+
     for t in iterator:
-        # Clear initialization message once we start processing
-        if t == 0 and not disable_pbar:
-            iterator.set_postfix_str("")
-            iterator.refresh()
-        
         restore_contingency(net, dropped_line_idx)
         dropped_line_idx = None
         has_contingency = False
@@ -359,951 +145,344 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         if np.random.random() < config['contingency_rate']:
             dropped_line_idx = apply_n1_contingency(net)
             has_contingency = (dropped_line_idx is not None)
-            if has_contingency:
-                convergence_stats['contingencies_attempted'] += 1
 
-        if has_contingency and dropped_line_idx is not None:
-            topology_ids[t] = dropped_line_idx + 1
-        else:
-            topology_ids[t] = 0
-
-
-        # Time-series simulation (always enabled)
-        current_hour = t % config['hours_per_day']
-        current_day = t // config['hours_per_day']
+        topology_ids[t] = (dropped_line_idx + 1) if has_contingency else 0
         
-        load_multiplier = get_daily_load_profile(current_hour)
-        net.load.p_mw = base_load_p * load_multiplier
-        net.load.q_mvar = base_load_q * load_multiplier
+        cur_hour, cur_day = t % config['hours_per_day'], t // config['hours_per_day']
+        load_mult = get_daily_load_profile(cur_hour)
+        net.load.p_mw = base_load_p * load_mult
+        net.load.q_mvar = base_load_q * load_mult
         
-        solar_weather = None
-        wind_weather = None
-        if weather_sequence is not None:
-            solar_weather, wind_weather = weather_sequence[t]
-        
-        current_total_renewable_p_mw = 0
-        if 'type' in net.sgen.columns and not net.sgen.empty:
-            # Vectorized renewable generation update (much faster than iterrows)
-            solar_mask = net.sgen['type'] == 'solar'
-            wind_mask = net.sgen['type'] == 'wind'
+        cur_total_ren_p = 0
+        if not net.sgen.empty and 'type' in net.sgen.columns:
+            solar_w, wind_w = weather_seq[t] if weather_seq else (None, None)
             
-            # Calculate profiles once
-            solar_profile = get_solar_generation_profile(
-                current_hour, 
-                day_of_year=180 + current_day % 180,
-                weather_state=solar_weather
-            ) if solar_mask.any() else 0.0
+            solar_prof = get_solar_generation_profile(cur_hour, 180 + cur_day % 180, solar_w)
+            wind_prof = get_wind_generation_profile(cur_hour, cur_day, wind_w)
             
-            wind_profile = get_wind_generation_profile(
-                current_hour, 
-                day=current_day,
-                weather_state=wind_weather
-            ) if wind_mask.any() else 0.0
+            mask_s, mask_w = net.sgen.type == 'solar', net.sgen.type == 'wind'
+            net.sgen.loc[mask_s, 'p_mw'] = solar_prof * max_solar_mw
+            net.sgen.loc[mask_w, 'p_mw'] = wind_prof * max_wind_mw
             
-            # Vectorized assignment
-            p_gen_values = np.zeros(len(net.sgen))
-            p_gen_values[solar_mask] = solar_profile * max_individual_solar_mw
-            p_gen_values[wind_mask] = wind_profile * max_individual_wind_mw
-            net.sgen['p_mw'] = p_gen_values
-            
-            # Calculate reactive power (vectorized where possible)
             for i in net.sgen.index:
-                q_gen = calculate_renewable_reactive_power(p_gen_values[i], net.sgen.at[i, 'bus'], net, t > 0)
-                net.sgen.at[i, 'q_mvar'] = q_gen
-            
-            current_total_renewable_p_mw = p_gen_values.sum()
+                net.sgen.at[i, 'q_mvar'] = calculate_renewable_reactive_power(net.sgen.at[i, 'p_mw'], net.sgen.at[i, 'bus'], net, t > 0)
+            cur_total_ren_p = net.sgen.p_mw.sum()
+
+        success = False
+        method = None
+        flags = {}
         
-        convergence_successful = False
-        resolution_method = None
-        violation_flags = {}
-        
-        if consecutive_failures >= 3:
-            print(f"  [Hard Reset] {consecutive_failures} consecutive failures detected - triggering hard reset")
-            base_renewable_p_mw_for_reset = {}
-            # DEFENSIVE: Check if 'type' column exists - FAIL FAST if missing
-            if not net.sgen.empty and 'type' not in net.sgen.columns:
-                raise RuntimeError(
-                    f"[Hard Reset] FATAL: 'type' column missing from net.sgen at timestep {t}. "
-                    f"This indicates configure_renewables() was not called or the network "
-                    f"structure is corrupted. Cannot reconstruct renewable profiles for reset."
-                )
-            
-            if not net.sgen.empty and 'type' in net.sgen.columns:
+        if convergence_stats['validation_stats']['consecutive_failures'] >= 3:
+            base_ren_reset = {} 
+            if not net.sgen.empty:
                 for i, sgen in net.sgen.iterrows():
-                    # Time-series simulation (always enabled)
-                    current_hour = t % config['hours_per_day']
-                    current_day = t // config['hours_per_day']
-                    if sgen.type == 'solar':
-                        solar_profile = get_solar_generation_profile(
-                            current_hour, 
-                            day_of_year=180 + current_day % 180,
-                            weather_state=weather_sequence[t][0] if weather_sequence else None
-                        )
-                        base_renewable_p_mw_for_reset[i] = solar_profile * max_individual_solar_mw
-                    elif sgen.type == 'wind':
-                        wind_profile = get_wind_generation_profile(
-                            current_hour, 
-                            day=current_day,
-                            weather_state=weather_sequence[t][1] if weather_sequence else None
-                        )
-                        base_renewable_p_mw_for_reset[i] = wind_profile * max_individual_wind_mw
-                    else:
-                        base_renewable_p_mw_for_reset[i] = net.sgen.at[i, 'p_mw']
+                    base_ren_reset[i] = net.sgen.at[i, 'p_mw']
             
-            reset_success, new_dropped_line_idx = hard_reset_system(
-                net, base_load_p, base_load_q, base_renewable_p_mw_for_reset, 
-                convergence_stats, dropped_line_idx, case_name
-            )
-            
-            if reset_success:
-                dropped_line_idx = new_dropped_line_idx
-                has_contingency = (dropped_line_idx is not None)
-                consecutive_failures = 0
-                convergence_successful = True
-                resolution_method = 'hard_reset'
-                _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats, case_name)
-                convergence_stats['successful'] += 1
-                convergence_stats['successful_timesteps'].append(t)
-                convergence_stats['resolution_methods']['hard_reset'] = convergence_stats['resolution_methods'].get('hard_reset', 0) + 1
+            reset_ok, new_drop = hard_reset_system(net, base_load_p, base_load_q, base_ren_reset, convergence_stats, dropped_line_idx, case_name)
+            if reset_ok:
+                dropped_line_idx, has_contingency = new_drop, (new_drop is not None)
+                convergence_stats['validation_stats']['consecutive_failures'] = 0
+                success, method = True, 'hard_reset'
+                convergence_stats['resolution_methods']['hard_reset'] += 1
             else:
-                consecutive_failures += 1
-                max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
-                convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
-                convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
+                convergence_stats['validation_stats']['consecutive_failures'] += 1
                 convergence_stats['failed'] += 1
-                if has_contingency:
-                    convergence_stats['failed_with_contingency'].append(t)
-                else:
-                    convergence_stats['failed_no_contingency'].append(t)
-                raise RuntimeError(f"Hard reset failed - timestep {t} cannot be recovered")
-        
-        if not convergence_successful:
-            resolution_method = None
-            violation_flags = {}
-            
-            input_valid, input_reason = validate_power_flow_inputs(net)
-            if not input_valid:
-                convergence_stats['validation_stats']['pre_validation_failed'] += 1
-                print(f"  WARNING: Timestep {t} failed pre-validation: {input_reason}, attempting generator trip")
-                
+                raise RuntimeError(f"Hard reset failed at {t}")
+
+        if not success:
+            valid_in, reason = validate_power_flow_inputs(net)
+            if not valid_in:
                 if trip_renewable_generators(net, convergence_stats, case_name):
-                    convergence_successful = True
-                    resolution_method = 'trip_generators'
-                    _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats, case_name)
+                    success, method = True, 'trip_generators'
                 else:
-                    consecutive_failures += 1
-                    max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
-                    convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
-                    convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
                     convergence_stats['failed'] += 1
-                    convergence_stats['failed_no_contingency'].append(t)
-                    raise RuntimeError(f"Timestep {t} failed even after generator trip - no valid power flow solution")
+                    raise RuntimeError(f"Pre-validation failed at {t}: {reason}")
+
+        base_ren = {i: net.sgen.at[i, 'p_mw'] for i in net.sgen.index} if not success else {}
         
-        base_renewable_p_mw = {}
-        if not net.sgen.empty and not convergence_successful:
-            for i, sgen in net.sgen.iterrows():
-                base_renewable_p_mw[i] = net.sgen.at[i, 'p_mw']
-        
-        if not convergence_successful:
-            curtailment_success, curtailment_scaling, violation_flags = apply_curtailment_with_retry(
-                net, base_renewable_p_mw, max_attempts=10, 
-                convergence_stats=convergence_stats, has_contingency=has_contingency,
-                case_name=case_name
-            )
-            
-            if curtailment_success:
-                convergence_successful = True
-                convergence_stats['successful'] += 1
-                convergence_stats['successful_timesteps'].append(t)
-                consecutive_failures = 0
+        if not success:
+            curtail_ok, scale, flags = apply_curtailment_with_retry(net, base_ren, 10, convergence_stats, has_contingency, case_name)
+            if curtail_ok:
+                success = True
+                method = ('curtailment_' + ('contingency' if has_contingency else 'normal')) if scale < 1.0 else ('strict_' + ('contingency' if has_contingency else 'normal'))
+                convergence_stats['resolution_methods']['strict_contingency' if has_contingency else 'strict_normal'] += 1
+            elif has_contingency:
+                # Try relaxed contingency
+                try:
+                    with SuppressPrints(): pp.runpp(net, numba=True, enforce_q_lims=False, algorithm='nr', tolerance_mva=1e-6, max_iteration=20)
+                    valid_r, _, flags_r = validate_power_flow_outputs(net, convergence_stats)
+                    if valid_r:
+                        success, method, flags = True, 'relaxed_contingency', flags_r
+                        convergence_stats['resolution_methods']['relaxed_contingency'] += 1
+                except: pass
                 
-                # CONVERGENCE STRATEGY: Record which method successfully solved this timestep
-                if has_contingency:
-                    # CASE 2: Strict (Contingency) - N-1 line outage helped convergence
-                    resolution_method = 'curtailment_contingency' if curtailment_scaling < 1.0 else 'strict_contingency'
-                    convergence_stats['resolution_methods']['strict_contingency'] += 1
-                    convergence_stats['contingencies_successful'] += 1
-                    convergence_stats['contingencies_resolved_strict'] += 1
-                else:
-                    # CASE 1: Strict (Normal) - Best case, no contingency needed
-                    resolution_method = 'curtailment_normal' if curtailment_scaling < 1.0 else 'strict_normal'
-                    convergence_stats['resolution_methods']['strict_normal'] += 1
-            else:
-                if has_contingency and dropped_line_idx is not None:
-                    line_key = f"line_{dropped_line_idx}"
-                    if line_key not in convergence_stats['critical_lines']:
-                        convergence_stats['critical_lines'][line_key] = {
-                            'line_id': int(dropped_line_idx),
-                            'failure_count': 0,
-                            'resolution_methods': {'relaxed_curtailment': 0, 'restored_curtailment': 0, 'trip': 0}
-                        }
-                    convergence_stats['critical_lines'][line_key]['failure_count'] += 1
+                if not success: # Restore line
+                    restore_contingency(net, dropped_line_idx)
+                    dropped_line_idx, has_contingency = None, False
+                    for i, p in base_ren.items(): net.sgen.at[i, 'p_mw'] = p
                     
-                    for i, base_p_mw in base_renewable_p_mw.items():
-                        net.sgen.at[i, 'p_mw'] = base_p_mw
-                    
-                    relaxed_success, relaxed_scaling, relaxed_violations = apply_curtailment_with_retry(
-                        net, base_renewable_p_mw, max_attempts=10,
-                        convergence_stats=convergence_stats, has_contingency=True
-                    )
-                    
-                    if relaxed_success:
-                        try:
-                            with SuppressPrints():
-                                pp.runpp(net, numba=True, enforce_q_lims=False, algorithm='nr', 
-                                        tolerance_mva=1e-6, max_iteration=20)
-                            relaxed_valid, _, relaxed_violations = validate_power_flow_outputs(net, convergence_stats)
-                            if relaxed_valid:
-                                convergence_successful = True
-                                violation_flags = relaxed_violations
-                                convergence_stats['successful'] += 1
-                                convergence_stats['successful_timesteps'].append(t)
-                                consecutive_failures = 0
-                                
-                                resolution_method = 'relaxed_curtailment_contingency'
-                                convergence_stats['resolution_methods']['relaxed_contingency'] += 1
-                                convergence_stats['contingencies_successful'] += 1
-                                convergence_stats['contingencies_resolved_relaxed'] += 1
-                                convergence_stats['critical_lines'][line_key]['resolution_methods']['relaxed_curtailment'] += 1
-                            else:
-                                relaxed_success = False
-                        except pp.LoadflowNotConverged:
-                            relaxed_success = False
-                    
-                    if not relaxed_success:
-                        restore_contingency(net, dropped_line_idx)
-                        dropped_line_idx = None
-                        has_contingency = False
-                        convergence_stats['critical_lines'][line_key]['resolution_methods']['restored_curtailment'] += 1
-                        
-                        for i, base_p_mw in base_renewable_p_mw.items():
-                            net.sgen.at[i, 'p_mw'] = base_p_mw
-                        
-                        restored_success, restored_scaling, restored_violations = apply_curtailment_with_retry(
-                            net, base_renewable_p_mw, max_attempts=10,
-                            convergence_stats=convergence_stats, has_contingency=False
-                        )
-                        
-                        if restored_success:
-                            convergence_successful = True
-                            violation_flags = restored_violations
-                            convergence_stats['successful'] += 1
-                            convergence_stats['successful_timesteps'].append(t)
-                            consecutive_failures = 0
-                            
-                            resolution_method = 'restored_curtailment'
-                            convergence_stats['resolution_methods']['restored_line'] += 1
-                            convergence_stats['contingencies_restored'] += 1
-                        else:
-                            if trip_renewable_generators(net, convergence_stats):
-                                convergence_successful = True
-                                _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats)
-                                convergence_stats['successful'] += 1
-                                convergence_stats['successful_timesteps'].append(t)
-                                consecutive_failures = 0
-                                resolution_method = 'trip_after_restore'
-                                convergence_stats['critical_lines'][line_key]['resolution_methods']['trip'] += 1
-                            else:
-                                consecutive_failures += 1
-                                max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
-                                convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
-                                convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
-                                convergence_stats['failed'] += 1
-                                convergence_stats['failed_with_contingency'].append(t)
-                                convergence_stats['contingencies_failed'] += 1
-                                resolution_method = 'failed_completely'
-                                print(f"  ERROR: Timestep {t} failed completely after all strategies")
-                                continue
-                else:
-                    if trip_renewable_generators(net, convergence_stats):
-                        convergence_successful = True
-                        _, _, violation_flags = validate_power_flow_outputs(net, convergence_stats)
-                        convergence_stats['successful'] += 1
-                        convergence_stats['successful_timesteps'].append(t)
-                        consecutive_failures = 0
-                        resolution_method = 'trip_normal'
-                    else:
-                        consecutive_failures += 1
-                        max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
-                        convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
-                        convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
-                        convergence_stats['failed'] += 1
-                        convergence_stats['failed_no_contingency'].append(t)
-                        resolution_method = 'failed'
-                        print(f"  ERROR: Timestep {t} failed completely (no contingency)")
-                        continue
-        
-        if not convergence_successful:
-            consecutive_failures += 1
-            max_consecutive_failures = max(max_consecutive_failures, consecutive_failures)
-            convergence_stats['validation_stats']['consecutive_failures'] = consecutive_failures
-            convergence_stats['validation_stats']['max_consecutive_failures'] = max_consecutive_failures
-            convergence_stats['failed'] += 1
-            if has_contingency:
-                convergence_stats['failed_with_contingency'].append(t)
-            else:
-                convergence_stats['failed_no_contingency'].append(t)
-            print(f"  ERROR: Timestep {t} failed - no successful path found")
-            continue
-        
-        if resolution_method:
-            convergence_stats['timestep_resolution'][str(t)] = resolution_method
-        
-        if violation_flags:
-            if violation_flags.get('voltage_violation', False):
-                convergence_stats['validation_stats']['voltage_violations'] += 1
-            if violation_flags.get('angle_violation', False):
-                convergence_stats['validation_stats']['angle_violations'] += 1
-            if violation_flags.get('line_loading_violation', False):
-                convergence_stats['validation_stats']['line_loading_violations'] += 1
-            if violation_flags.get('slack_power_violation', False):
-                convergence_stats['validation_stats']['slack_power_violations'] += 1
-            if violation_flags.get('generator_capacity_violation', False):
-                convergence_stats['validation_stats']['generator_capacity_violations'] += 1
-            if violation_flags.get('inverter_capability_violation', False):
-                convergence_stats['validation_stats']['inverter_capability_violations'] += 1
+                    restore_ok, _, flags_rest = apply_curtailment_with_retry(net, base_ren, 10, convergence_stats, False)
+                    if restore_ok:
+                        success, method, flags = True, 'restored_curtailment', flags_rest
+                        convergence_stats['resolution_methods']['restored_line'] += 1
+                    elif trip_renewable_generators(net, convergence_stats):
+                        success, method = True, 'trip_after_restore'
             
-            if any([violation_flags.get('voltage_violation', False), 
-                   violation_flags.get('angle_violation', False),
-                   violation_flags.get('line_loading_violation', False), 
-                   violation_flags.get('slack_power_violation', False)]):
-                convergence_stats['validation_stats']['valid_stressed_states'] += 1
-        
+            if not success and not has_contingency:
+                if trip_renewable_generators(net, convergence_stats):
+                    success, method = True, 'trip_normal'
+
+        if not success:
+            convergence_stats['validation_stats']['consecutive_failures'] += 1
+            convergence_stats['failed'] += 1
+            (convergence_stats['failed_with_contingency'] if has_contingency else convergence_stats['failed_no_contingency']).append(t)
+            print(f"  ERROR: Timestep {t} failed")
+            continue
+
+        convergence_stats['successful'] += 1
+        convergence_stats['validation_stats']['consecutive_failures'] = 0
+        if flags:
+            for k in ['voltage_violation', 'angle_violation', 'line_loading_violation']:
+                if flags.get(k): convergence_stats['validation_stats'][k+'s'] += 1
+
+        # Data Extraction
         vm_pu = net.res_bus.vm_pu.values
         va_rad = np.deg2rad(net.res_bus.va_degree.values)
+        bus_idx = net.bus.index
         
-        # Vectorized groupby operations (cache bus index for efficiency)
-        bus_index = net.bus.index
-        
-        # Use vectorized operations with fill_value=0 for missing buses
-        load_p_by_bus = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(bus_index, fill_value=0)
-        load_q_by_bus = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
-        p_load = load_p_by_bus.values
-        q_load = load_q_by_bus.values
+        load_p = net.res_load.groupby(net.load.bus).p_mw.sum().reindex(bus_idx, fill_value=0).values
+        load_q = net.res_load.groupby(net.load.bus).q_mvar.sum().reindex(bus_idx, fill_value=0).values
+        ext_p = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(bus_idx, fill_value=0).values
+        ext_q = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(bus_idx, fill_value=0).values
+        gen_p = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(bus_idx, fill_value=0).values
+        gen_q = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(bus_idx, fill_value=0).values
+        sgen_p = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(bus_idx, fill_value=0).values
+        sgen_q = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(bus_idx, fill_value=0).values
 
-        ext_grid_p_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).p_mw.sum().reindex(bus_index, fill_value=0)
-        ext_grid_q_by_bus = net.res_ext_grid.groupby(net.ext_grid.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
-        
-        gen_p_by_bus = net.res_gen.groupby(net.gen.bus).p_mw.sum().reindex(bus_index, fill_value=0)
-        gen_q_by_bus = net.res_gen.groupby(net.gen.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
-
-        sgen_p_by_bus = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(bus_index, fill_value=0)
-        sgen_q_by_bus = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(bus_index, fill_value=0)
-
-        current_ybus = calculate_ybus_from_net(net)
-        
-        if ybus_base is None:
-            ybus_base = current_ybus.copy()
+        ybus = calculate_ybus_from_net(net)
+        if ybus_base is None: ybus_base = ybus.copy()
         elif has_contingency:
             contingency_timesteps.append(t)
-            # Only copy if needed (avoid unnecessary memory allocation)
-            contingency_ybus_list.append(current_ybus.copy())
-        
+            contingency_ybus_list.append(ybus.copy())
+
         detailed_metrics.append({
-            'timestep': t,
-            'p_load_mw': p_load.sum(),
-            'q_load_mvar': q_load.sum(),
-            'p_gen_mw': (ext_grid_p_by_bus + gen_p_by_bus).sum(),
-            'q_gen_mvar': (ext_grid_q_by_bus + gen_q_by_bus).sum(),
-            'p_ren_mw': sgen_p_by_bus.sum(),
-            'q_ren_mvar': sgen_q_by_bus.sum(),
-            'v_min_pu': vm_pu.min(),
-            'v_max_pu': vm_pu.max(),
-            'v_mean_pu': vm_pu.mean(),
-            'v_std_pu': vm_pu.std(),
-            'angle_min_deg': np.rad2deg(va_rad).min(),
-            'angle_max_deg': np.rad2deg(va_rad).max(),
-            'max_line_loading_pct': net.res_line.loading_percent.max(),
-            'converged': 1 if convergence_successful else 0,
-            'resolution_method': resolution_method or 'Normal',
-            'violations': ";".join([k for k, v in violation_flags.items() if v]) if violation_flags else "None"
+            'timestep': t, 'p_load': load_p.sum(), 'p_gen': (ext_p+gen_p).sum(), 'p_ren': sgen_p.sum(),
+            'v_min': vm_pu.min(), 'v_max': vm_pu.max(), 'converged': 1, 'method': method or 'Normal'
         })
-        
-        renewable_util_frac = current_total_renewable_p_mw / max_total_renewable_mw
-        time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (renewable_util_frac * config['max_carbon_reduction_from_renewables'])
+
+        ren_util = cur_total_ren_p / max_total_ren_mw if max_total_ren_mw > 0 else 0
+        time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (ren_util * config['max_carbon_reduction_from_renewables'])
         
         bus_types = identify_bus_types(net)
         bus_types_array[t] = bus_types
+        target_matrix[t] = create_opf_targets(net, bus_types)
         
-        opf_targets = create_opf_targets(net, bus_types)
-        target_matrix[t] = opf_targets
+        rng = np.random.default_rng()
+        noise_vm = np.abs(rng.normal(0, config['voltage_error_std'], num_buses))
+        noise_va = np.abs(rng.normal(0, config['angle_error_std'], num_buses))
+        noise_p = np.abs(rng.normal(0, config['power_error_std'], num_buses))
         
-        # Batch random number generation (more efficient)
-        noise_rng = np.random.default_rng()
-        positive_noise_vm = np.abs(noise_rng.normal(0, config['voltage_error_std'], num_buses))
-        positive_noise_angle = np.abs(noise_rng.normal(0, config['angle_error_std'], num_buses))
-        positive_noise_power = np.abs(noise_rng.normal(0, config['power_error_std'], num_buses))
+        meas_data = [load_p, load_q, ext_p, ext_q, gen_p, gen_q, sgen_p, sgen_q]
+        meas_data = [d * (1 + noise_p) for d in meas_data]
         
-        meas_pl = p_load * (1 + positive_noise_power)
-        meas_ql = q_load * (1 + positive_noise_power)
-        meas_p_ext = ext_grid_p_by_bus.values * (1 + positive_noise_power)
-        meas_q_ext = ext_grid_q_by_bus.values * (1 + positive_noise_power)
-        meas_p_conv = gen_p_by_bus.values * (1 + positive_noise_power)
-        meas_q_conv = gen_q_by_bus.values * (1 + positive_noise_power)
-        meas_p_ren = sgen_p_by_bus.values * (1 + positive_noise_power)
-        meas_q_ren = sgen_q_by_bus.values * (1 + positive_noise_power)
-        
-        gen_indices = np.where(bus_types > 0)[0]
-        num_pmu_buses = max(1, int(num_buses * config.get('pmu_coverage', 0.3)))
-        pmu_indices = set(gen_indices)
-        remaining_slots = num_pmu_buses - len(pmu_indices)
-        if remaining_slots > 0:
-            pq_indices = np.where(bus_types == 0)[0]
-            if len(pq_indices) > 0:
-                chosen_pq = np.random.choice(pq_indices, size=min(len(pq_indices), remaining_slots), replace=False)
-                pmu_indices.update(chosen_pq)
-        
-        pmu_buses = np.array(list(pmu_indices))
         meas_vm = np.full(num_buses, np.nan)
         meas_va = np.full(num_buses, np.nan)
-        meas_vm[pmu_buses] = vm_pu[pmu_buses] * (1 + positive_noise_vm[pmu_buses])
-        meas_va[pmu_buses] = va_rad[pmu_buses] * (1 + positive_noise_angle[pmu_buses])
-        meas_vm = np.nan_to_num(meas_vm, nan=0.0)
-        meas_va = np.nan_to_num(meas_va, nan=0.0)
         
-        feature_matrix[t] = np.stack([
-            meas_pl, meas_ql,
-            meas_p_ext, meas_q_ext,
-            meas_p_conv, meas_q_conv,
-            meas_p_ren, meas_q_ren,
-            meas_vm, meas_va
-        ], axis=1)
+        gen_idx = np.where(bus_types > 0)[0]
+        n_pmu = max(1, int(num_buses * config.get('pmu_coverage', 0.3)))
+        pmu_idx = set(gen_idx)
+        if len(pmu_idx) < n_pmu:
+            pq_idx = np.where(bus_types == 0)[0]
+            if len(pq_idx) > 0: pmu_idx.update(np.random.choice(pq_idx, min(len(pq_idx), n_pmu-len(pmu_idx)), replace=False))
+        
+        pmu_buses = np.array(list(pmu_idx))
+        meas_vm[pmu_buses] = vm_pu[pmu_buses] * (1 + noise_vm[pmu_buses])
+        meas_va[pmu_buses] = va_rad[pmu_buses] * (1 + noise_va[pmu_buses])
+        
+        feature_matrix[t] = np.stack(meas_data + [np.nan_to_num(meas_vm), np.nan_to_num(meas_va)], axis=1)
         
         if chunked_mode and (t + 1) % chunk_size == 0:
-            feature_matrix.flush()
-            target_matrix.flush()
-            bus_types_array.flush()
-            topology_ids.flush()
-            time_carbon_coeffs.flush()
-            chunks_written += 1
-            # print(f"  [Chunked Writing] Flushed chunk {chunks_written} ({(t + 1)}/{time_steps} timesteps written)") # UI Cleanup
+            for arr in [feature_matrix, target_matrix, bus_types_array, topology_ids, time_carbon_coeffs]: arr.flush()
+
+    if chunked_mode:
+        for arr in [feature_matrix, target_matrix, bus_types_array, topology_ids, time_carbon_coeffs]: arr.flush()
+    
+    if ybus_base is None: raise RuntimeError("Ybus base is None")
+    
+    ybus_data = {"base": ybus_base, "contingency_timesteps": np.array(contingency_timesteps, dtype=np.int32),
+                 "contingency_matrices": np.array(contingency_ybus_list) if contingency_ybus_list else np.array([]).reshape(0, num_buses, num_buses)}
+    
+    ret_features = np.array(feature_matrix) if chunked_mode else feature_matrix
+    ret_targets = np.array(target_matrix) if chunked_mode else target_matrix
+    ret_bus_types = np.array(bus_types_array) if chunked_mode else bus_types_array
+    ret_topo = np.array(topology_ids) if chunked_mode else topology_ids
+    ret_carbon = np.array(time_carbon_coeffs) if chunked_mode else time_carbon_coeffs
     
     if chunked_mode:
-        feature_matrix.flush()
-        target_matrix.flush()
-        bus_types_array.flush()
-        topology_ids.flush()
-        time_carbon_coeffs.flush()
-        # print(f"  [Chunked Writing] All data flushed to disk ({time_steps}/{time_steps} timesteps)") # UI Cleanup
-    
-    convergence_stats['success_rate'] = (convergence_stats['successful'] / time_steps * 100) if time_steps > 0 else 0
-    
-    if ybus_base is None:
-        raise RuntimeError(
-            f"CRITICAL ERROR: ybus_base is None after {convergence_stats['successful']} successful power flows! "
-        )
-    else:
-        # print(f"  [DEBUG] *** YBUS_BASE VERIFIED *** shape={ybus_base.shape}, diagonal[0]={ybus_base[0,0]:.6f}")
-        convergence_stats['ybus_fallback_used'] = False
-    
-    ybus_data = {
-        "base": ybus_base,
-        "contingency_timesteps": np.array(contingency_timesteps, dtype=np.int32),
-        "contingency_matrices": np.array(contingency_ybus_list) if contingency_ybus_list else np.array([]).reshape(0, num_buses, num_buses).astype(np.complex128)
-    }
-    
-    if chunked_mode:
-        # print(f"  [Chunked Writing] Copying memmap arrays to regular arrays for cleanup...")
-        features_return = np.array(feature_matrix)
-        targets_return = np.array(target_matrix)
-        bus_types_return = np.array(bus_types_array)
-        topology_ids_return = np.array(topology_ids)
-        carbon_coeffs_return = np.array(time_carbon_coeffs)
-        
-        del feature_matrix, target_matrix, bus_types_array, topology_ids
-        del time_carbon_coeffs
+        del feature_matrix, target_matrix, bus_types_array, topology_ids, time_carbon_coeffs
         gc.collect()
-        
-        convergence_stats['_temp_dir'] = temp_dir
-        convergence_stats['_temp_files'] = {
-            'features': feature_file,
-            'targets': target_file,
-            'bus_types': bus_types_file,
-            'topology_ids': topology_ids_file,
-            'carbon_coeffs': carbon_coeffs_file
-        }
-    else:
-        features_return = feature_matrix
-        targets_return = target_matrix
-        bus_types_return = bus_types_array
-        topology_ids_return = topology_ids
-        carbon_coeffs_return = time_carbon_coeffs
-    
-    # Save detailed metrics CSV (skip if output_dir is None for in-memory tests)
-    if output_dir is not None:
-        try:
-            df_metrics = pd.DataFrame(detailed_metrics)
-            csv_filename = f"{case_name}_detailed_metrics_frac{renewable_fraction:.1f}_{timestamp}.csv"
-            csv_path = os.path.join(output_dir, csv_filename)
-            df_metrics.to_csv(csv_path, index=False)
-            # print(f"  [CSV] Saved detailed metrics to {csv_filename}")
-        except Exception as e:
-            raise RuntimeError(f"Could not save detailed metrics CSV: {e}")
+        convergence_stats.update({
+            '_temp_dir': temp_dir, 
+            '_temp_files': files,
+            '_shapes': {
+                'features': (time_steps, num_buses, 10),
+                'targets': (time_steps, num_buses, 10),
+                'bus_types': (time_steps, num_buses),
+                'topology_ids': (time_steps,),
+                'carbon_coeffs': (time_steps,)
+            }
+        })
+
+    if output_dir:
+        pd.DataFrame(detailed_metrics).to_csv(os.path.join(output_dir, f"{case_name}_detailed_metrics_frac{renewable_fraction:.1f}_{timestamp}.csv"), index=False)
 
     return {
-        "features": features_return,
-        "targets": targets_return,
-        "bus_types": bus_types_return,
-        "base_adjacency": base_adjacency_matrix,
-        "topology_ids": topology_ids_return,
-        "ybus_data": ybus_data,
-        "time_carbon_coeffs": carbon_coeffs_return,
+        "features": ret_features, "targets": ret_targets, "bus_types": ret_bus_types,
+        "base_adjacency": base_adjacency_matrix, "topology_ids": ret_topo,
+        "ybus_data": ybus_data, "time_carbon_coeffs": ret_carbon,
         "convergence_stats": convergence_stats
     }
 
-def save_data(data_dict: dict, case_name: str, renewable_fraction: float, output_dir: str, timestamp: str = None):
-    """
-    Saves generated data arrays.
-    """
-    os.makedirs(output_dir, exist_ok=True)
+def save_data(data: dict, case: str, frac: float, out_dir: str, ts: str = None):
+    os.makedirs(out_dir, exist_ok=True)
+    ts = ts or datetime.now().strftime("%Y%m%d_%H%M%S")
+    stats = data.get('convergence_stats', {})
+    temp_files = stats.get('_temp_files')
+    shapes = stats.get('_shapes', {})
     
-    if timestamp is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_map = {
+        'features': f"{case}_features_frac{frac:.1f}_{ts}.npy",
+        'targets': f"{case}_targets_frac{frac:.1f}_{ts}.npy",
+        'bus_types': f"{case}_bus_types_frac{frac:.1f}_{ts}.npy",
+        'topology_ids': f"{case}_topology_ids_frac{frac:.1f}_{ts}.npy",
+        'carbon_coeffs': f"{case}_time_carbon_coeffs_frac{frac:.1f}_{ts}.txt"
+    }
     
-    convergence_stats = data_dict.get('convergence_stats', {})
-    temp_files = convergence_stats.get('_temp_files', None)
-    use_temp_files = (temp_files is not None and os.path.exists(temp_files.get('features', '')))
-    
-    if use_temp_files:
-        # print(f"[Memory Optimization] Copying chunked data files to final location...")
-        
-        file_mappings = {
-            'features': f"{case_name}_features_frac{renewable_fraction:.1f}_{timestamp}.npy",
-            'targets': f"{case_name}_targets_frac{renewable_fraction:.1f}_{timestamp}.npy",
-            'bus_types': f"{case_name}_bus_types_frac{renewable_fraction:.1f}_{timestamp}.npy",
-            'topology_ids': f"{case_name}_topology_ids_frac{renewable_fraction:.1f}_{timestamp}.npy",
-            'carbon_coeffs': f"{case_name}_time_carbon_coeffs_frac{renewable_fraction:.1f}_{timestamp}.txt"
-        }
-        
-        for temp_key, final_filename in file_mappings.items():
-                final_path = os.path.join(output_dir, final_filename)
-                
-                if temp_key in ['carbon_coeffs']:
-                    coeff_key = 'time_carbon_coeffs'
-                    if coeff_key in data_dict:
-                        data = data_dict[coeff_key]
-                        if isinstance(data, np.memmap):
-                            data = np.array(data)
-                        np.savetxt(final_path, data)
-                        # print(f"  Copied {temp_key} -> {final_filename} (converted to .txt)")
+    if temp_files and os.path.exists(temp_files['features']):
+        for k, fname in file_map.items():
+            src = temp_files[k]
+            dst = os.path.join(out_dir, fname)
+            if k == 'carbon_coeffs':
+                np.savetxt(dst, np.array(np.memmap(src, mode='r', dtype=np.float32)))
+            else:
+                dtype = np.int32 if k in ['bus_types', 'topology_ids'] else np.float32
+                shape = shapes.get(k)
+                if shape:
+                    arr = np.memmap(src, mode='r', dtype=dtype, shape=shape)
+                    np.save(dst, np.array(arr), allow_pickle=False)
                 else:
-                    data_key_map = {
-                        'features': 'features',
-                        'targets': 'targets',
-                        'bus_types': 'bus_types',
-                        'topology_ids': 'topology_ids'
-                    }
-                    
-                    data_key = data_key_map.get(temp_key)
-                    if data_key and data_key in data_dict:
-                        data = data_dict[data_key]
-                        if isinstance(data, np.memmap):
-                            data = np.array(data)
-                        
-                        if temp_key == 'features':
-                            np.save(final_path, np.array(data, dtype=np.float32), allow_pickle=False)
-                        elif temp_key == 'targets':
-                            np.save(final_path, np.array(data, dtype=np.float32), allow_pickle=False)
-                        elif temp_key == 'bus_types':
-                            np.save(final_path, np.array(data, dtype=np.int32), allow_pickle=False)
-                        elif temp_key == 'topology_ids':
-                            np.save(final_path, np.array(data, dtype=np.int32), allow_pickle=False)
-                        else:
-                            np.save(final_path, np.array(data), allow_pickle=False)
-                        # print(f"  Copied {temp_key} -> {final_filename}")
-        
-        # print(f"[Memory Optimization] All chunked data files copied successfully")
+                    np.save(dst, np.array(np.memmap(src, mode='r', dtype=dtype)), allow_pickle=False)
     
-    for key, data in data_dict.items():
-        if use_temp_files and key in ['features', 'targets', 'bus_types', 'topology_ids', 
-                                      'time_carbon_coeffs']:
-            continue
-        if key == "ybus_data":
-            for sub_key, sub_data in data.items():
-                sub_filename = f"{case_name}_ybus_{sub_key}_frac{renewable_fraction:.1f}_{timestamp}.npy"
-                filepath = os.path.join(output_dir, sub_filename)
-                # print(f"Saving Ybus component '{sub_key}' to '{filepath}'...")
-                np.save(filepath, sub_data, allow_pickle=False)
-            continue
+    for k, v in data.items():
+        if temp_files and k in ['features', 'targets', 'bus_types', 'topology_ids', 'time_carbon_coeffs']: continue
         
-        if key == "convergence_stats":
-            stats_to_save = {k: v for k, v in data.items() if not k.startswith('_temp')}
-            # Optional: Transform convergence stats to audit format
-            # audit_data = transform_convergence_to_audit(stats_to_save, case_name, renewable_fraction, timestamp)
-            audit_data = stats_to_save  # Use raw stats if auditor not available
-            stats_filename = f"{case_name}_data_quality_audit_frac{renewable_fraction:.1f}_{timestamp}.json"
-            filepath = os.path.join(output_dir, stats_filename)
-            # print(f"Saving data quality audit to '{filepath}'...")
-            with open(filepath, 'w') as f:
-                json.dump(audit_data, f, indent=2)
-            continue
-        
-        base_filename = f"{case_name}_{key}_frac{renewable_fraction:.1f}_{timestamp}"
-        
-        if "coeffs" in key:
-            filename = os.path.join(output_dir, base_filename + ".txt")
-            # print(f"Saving coefficient data to '{filename}'...")
-            if isinstance(data, np.memmap):
-                np.savetxt(filename, np.array(data))
-            else:
-                np.savetxt(filename, data)
-        elif key == "topology_ids":
-            filename = os.path.join(output_dir, base_filename + ".npy")
-            # print(f"Saving topology IDs to '{filename}'...")
-            if isinstance(data, np.memmap):
-                np.save(filename, np.array(data), allow_pickle=False)
-            else:
-                np.save(filename, data, allow_pickle=False)
-        elif key == "base_adjacency":
-            if isinstance(data, np.memmap):
-                adj_data = np.array(data)
-            else:
-                adj_data = data
-            adj_sparse = sparse.coo_matrix(adj_data)
-            edge_index = np.array([adj_sparse.row, adj_sparse.col])
-            filename = os.path.join(output_dir, base_filename + ".npy")
-            # print(f"Saving base adjacency matrix to '{filename}'...")
-            np.save(filename, np.array([edge_index], dtype=object), allow_pickle=True)
+        base = f"{case}_{k}_frac{frac:.1f}_{ts}"
+        if k == 'ybus_data':
+            for sk, sv in v.items():
+                np.save(os.path.join(out_dir, f"{case}_ybus_{sk}_frac{frac:.1f}_{ts}.npy"), sv, allow_pickle=False)
+        elif k == 'convergence_stats':
+            clean_stats = {sk: sv for sk, sv in v.items() if not sk.startswith('_temp')}
+            with open(os.path.join(out_dir, f"{case}_data_quality_audit_frac{frac:.1f}_{ts}.json"), 'w') as f:
+                json.dump(clean_stats, f, indent=2)
+        elif 'coeffs' in k:
+            np.savetxt(os.path.join(out_dir, base+".txt"), v)
+        elif k == 'base_adjacency':
+            adj = sparse.coo_matrix(v)
+            np.save(os.path.join(out_dir, base+".npy"), np.array([[adj.row, adj.col]], dtype=object), allow_pickle=True)
         else:
-            filename = os.path.join(output_dir, base_filename + ".npy")
-            # print(f"Saving array data to '{filename}'...")
-            if isinstance(data, np.memmap):
-                np.save(filename, np.array(data), allow_pickle=True)
-            else:
-                np.save(filename, data, allow_pickle=True)
+            np.save(os.path.join(out_dir, base+".npy"), v, allow_pickle=True)
 
 if __name__ == "__main__":
-    
-    if CONFIG["random_seed"] is not None:
-        # print(f"\nSetting random seed: {CONFIG['random_seed']} (for reproducibility)")
+    if CONFIG["random_seed"]:
         np.random.seed(CONFIG["random_seed"])
         random.seed(CONFIG["random_seed"])
-    else:
-        raise ValueError("No random seed set - results will not be reproducible! Set CONFIG['seed'] or use --seed argument")
     
-    # Use the module-level data_mode that was already correctly set from Config/CLI args (line 105)
-    # Don't override it here
-    timesteps = None
-    cases_to_run = None
-
-    # Legacy positional argument parsing removed - now using argparse exclusively
-    # data_mode is already set from config_instance.DATA_MODE which respects CLI --mode argument
-
-    try:
-        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_path = os.path.join(parent_dir, "config.yaml")
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                yaml_config = yaml.safe_load(f)
-                if 'system' in yaml_config and 'test_cases' in yaml_config['system']:
-                    CONFIG['test_cases'] = yaml_config['system']['test_cases']
-                    # print(f"Loaded test_cases from config.yaml: {CONFIG['test_cases']}")
-    except Exception as e:
-        raise RuntimeError(f"Could not load config.yaml: {e}. Configuration file is required.")
-
-    if cases_to_run is None:
-        cases_to_run = CONFIG["test_cases"]
+    cases = CONFIG["test_cases"]
+    if args.buses and args.buses.lower() != 'all':
+        req_buses = [int(b) for b in args.buses.split(',')]
+        cases = [f"case{b}" for b in req_buses if f"case{b}" in cases]
+        if not cases: raise ValueError(f"No valid buses in {req_buses}")
     
-    # Filter cases based on --buses argument if provided
-    if args.buses is not None:
-        if args.buses.lower() == 'all':
-            # If 'all', use all available test cases (no filtering needed)
-            pass
-        else:
-            try:
-                bus_numbers = [int(b.strip()) for b in args.buses.split(',')]
-            except ValueError:
-                raise ValueError(f"Invalid --buses argument: '{args.buses}'. "
-                               f"Must be 'all' or comma-separated integers (e.g. '33,57').")
-            
-            filtered_cases = []
-            for bus_num in bus_numbers:
-                case_name = f"case{bus_num}"
-                if case_name in cases_to_run:
-                    filtered_cases.append(case_name)
-                else:
-                    print(f"Warning: {case_name} not found in test_cases. Available: {cases_to_run}")
-            if filtered_cases:
-                cases_to_run = filtered_cases
-            else:
-                raise ValueError(f"No valid bus systems found. Requested: {bus_numbers}, Available: {cases_to_run}")
+    # CLI args override config
+    timesteps_cli = args.timesteps
+    CONFIG['time_steps'] = timesteps_cli if timesteps_cli is not None else CONFIG['time_steps']
+    
+    # If no CLI arg and no config value, default based on mode
+    if CONFIG['time_steps'] is None:
+        CONFIG['time_steps'] = 10008 if data_mode == 'train' else 240
         
-    # print(f"Cases to run: {cases_to_run}")
+    gen_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    if timesteps is None:
-        # timesteps should already be set from CONFIG["time_steps"] which comes from config_instance
-        # This is just a safety fallback
-        timesteps = CONFIG["time_steps"]
-        if timesteps is None:
-            # Final fallback defaults
-            timesteps = 10008 if data_mode == 'train' else 240
+    print(f"\n[Data Gen] {data_mode.upper()} | {CONFIG['time_steps']} steps | Buses: {', '.join(cases)}")
+    
+    out_path = CONFIG['output_dir']
+    os.makedirs(out_path, exist_ok=True)
+    
+    # Cleanup old files only if explicitly requested
+    if getattr(config_instance, 'clear_results', False):
+        print("Cleaning up old data files...")
+        for c in cases:
+            for f in glob.glob(os.path.join(out_path, f"{c.replace('bw', '')}_*")):
+                try: os.remove(f)
+                except: pass
             
-    CONFIG['time_steps'] = timesteps
+    # Always cleanup old files for the specific cases being generated
+    # main.py is the explicit generator script, so running it implies "generate new data"
+    print(f"Cleaning old data files for: {', '.join(cases)}...")
     
-    generation_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Print concise summary
-    bus_list = ', '.join([case.replace('case', '') for case in cases_to_run])
-    print(f"\n[Data Generation] {data_mode.upper()} mode | {timesteps} timesteps | Buses: {bus_list}")
-    
-    # Auto-cleanup: Delete old data files for SPECIFIC bus systems only (safe for parallel execution)
-    output_path = CONFIG['output_dir']
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Only clean files for the bus systems we're about to generate
-    # This allows parallel execution without conflicts
-    if os.path.exists(output_path):
-        try:
-            files_to_delete = []
-            for case in cases_to_run:
-                save_case_name = case.replace('bw', '')
-                # Find all files matching this case name pattern
-                for filename in os.listdir(output_path):
-                    if filename.startswith(save_case_name + '_'):
-                        files_to_delete.append(os.path.join(output_path, filename))
+    # Preserve metadata for parallel execution safety
+    for c in cases:
+        for f in glob.glob(os.path.join(out_path, f"{c.replace('bw', '')}_*")):
+            try: os.remove(f)
+            except: pass
             
-            # Also clean up old per-process metadata files for these bus systems
-            # We'll regenerate metadata, so old ones should be removed
-            metadata_pattern = os.path.join(output_path, "data_generation_metadata_*.json")
-            for metadata_file in glob.glob(metadata_pattern):
-                try:
-                    # Read metadata to check if it's for the bus systems we're regenerating
-                    with open(metadata_file, 'r') as f:
-                        metadata = json.load(f)
-                    
-                    # Check if this metadata file contains any of the cases we're regenerating
-                    metadata_cases = set()
-                    if 'runs' in metadata and isinstance(metadata['runs'], list):
-                        for run in metadata['runs']:
-                            if 'test_cases' in run:
-                                if isinstance(run['test_cases'], list):
-                                    metadata_cases.update(run['test_cases'])
-                                else:
-                                    metadata_cases.add(run['test_cases'])
-                    elif 'test_cases' in metadata:
-                        if isinstance(metadata['test_cases'], list):
-                            metadata_cases.update(metadata['test_cases'])
-                        else:
-                            metadata_cases.add(metadata['test_cases'])
-                    
-                    # If this metadata file is for any case we're regenerating, delete it
-                    if any(case in metadata_cases for case in cases_to_run):
-                        files_to_delete.append(metadata_file)
-                except Exception:
-                    # If we can't read it, delete it anyway (corrupted or old format)
-                    files_to_delete.append(metadata_file)
-            
-            if files_to_delete:
-                case_list = ', '.join([case.replace('case', '') for case in cases_to_run])
-                print(f"[Cleanup] Removing {len(files_to_delete)} old files for buses: {case_list}")
-                for filepath in files_to_delete:
-                    try:
-                        if os.path.isfile(filepath):
-                            os.remove(filepath)
-                        elif os.path.isdir(filepath):
-                            shutil.rmtree(filepath)
-                    except Exception as e:
-                        # Silent cleanup - errors are non-critical
-                        pass
-        except Exception as e:
-            print(f"Warning: Auto-cleanup encountered an issue (non-critical): {e}")
-            # Don't fail the entire process if cleanup fails - parallel processes might be writing
-    
-    for case in cases_to_run:
+    for case in cases:
         try:
             base_net = load_network(case)
             for frac in CONFIG["renewable_fractions_to_run"]:
-                # print(f"\n{'='*60}\nProcessing {case} with {frac*100:.0f}% renewable fraction\n{'='*60}")
+                net = copy.deepcopy(base_net)
+                s_case = case.replace('bw', '')
+                net.name = f"{s_case}_frac{frac:.1f}"
+                configure_renewables(net, frac, CONFIG)
                 
-                net_for_run = copy.deepcopy(base_net)
-                save_case_name = case.replace('bw', '')
-                net_for_run.name = f"{save_case_name}_frac{frac:.1f}"
+                data = simulate_time_series(net, CONFIG, out_path, s_case, frac, gen_ts)
+                save_data(data, s_case, frac, out_path, gen_ts)
                 
-                net_with_renewables = configure_renewables(net_for_run, frac, CONFIG)
-                
-                # Use the configured output directory (respects CLI args and mode)
-                output_path = CONFIG['output_dir']
-                
-                os.makedirs(output_path, exist_ok=True)
-                
-                generated_data = simulate_time_series(
-                    net_with_renewables, CONFIG,
-                    output_dir=output_path,
-                    case_name=save_case_name,
-                    renewable_fraction=frac,
-                    timestamp=generation_timestamp
-                )
+                if '_temp_dir' in data.get('convergence_stats', {}):
+                    shutil.rmtree(data['convergence_stats']['_temp_dir'], ignore_errors=True)
                     
-                save_data(generated_data, save_case_name, frac, output_path, generation_timestamp)
-                
-                if '_temp_dir' in generated_data.get('convergence_stats', {}):
-                    temp_dir = generated_data['convergence_stats']['_temp_dir']
-                    if os.path.exists(temp_dir):
-                        max_retries = 3
-                        for retry in range(max_retries):
-                            try:
-                                shutil.rmtree(temp_dir)
-                                # print(f"  [Chunked Writing] Cleaned up temporary files")
-                                break
-                            except PermissionError as e:
-                                if retry < max_retries - 1:
-                                    time.sleep(0.1)
-                                    gc.collect()
-                                else:
-                                    raise RuntimeError(f"Could not delete temp directory {temp_dir}: {e}")
+        except Exception as e:
+            print(f"Error processing {case}: {e}")
+            traceback.print_exc()
 
-        except DataGenerationError as e:
-            print(f"\n{'='*80}")
-            print(f"SEVERE ERROR: Data generation cannot continue!")
-            print(f"{'='*80}")
-            print(f"Error details:")
-            traceback.print_exc()
-            sys.exit(1)
-        except Exception as e:
-            print(f"\nWARNING: An error occurred while processing {case}:")
-            print(f"Error type: {type(e).__name__}")
-            print(f"Error message: {str(e)}")
-            traceback.print_exc()
-            print(f"\nSkipping to the next test case.")
-            continue
-    
-    # Save metadata after all data generation is complete
+    # Metadata
     try:
-        # Use the configured output directory (respects CLI args and mode)
-        output_path = CONFIG['output_dir']
-        
-        # Ensure output directory exists
-        os.makedirs(output_path, exist_ok=True)
-        
-        # Always time-series mode
-        # Create metadata entry for this specific run (supports parallel execution)
-        # Import config hash function for metadata
-        try:
-            from utils.data_validation import compute_config_hash
-            config_hash = compute_config_hash(config_instance)
-        except Exception as e:
-            print(f"Warning: Could not compute config hash: {e}")
-            config_hash = None
-        
-        metadata_entry = {
-            'generation_mode': 'time_series',
-            'data_mode': data_mode,
-            'timesteps': timesteps,
-            'timestamp': generation_timestamp,
-            'hours_per_day': CONFIG.get('hours_per_day', 24),
-            'test_cases': cases_to_run,
-            'renewable_fractions': CONFIG["renewable_fractions_to_run"],
-            'generation_date': datetime.now().isoformat(),
-            'config_hash': config_hash  # Store config hash for validation
+        meta = {
+            'data_mode': data_mode, 'generation_mode': 'time_series',
+            'timesteps': CONFIG['time_steps'], 'ts': gen_ts,
+            'test_cases': cases, 'fracs': CONFIG["renewable_fractions_to_run"],
+            'date': datetime.now().isoformat(),
+            'config_hash': hashlib.md5(json.dumps({
+                'data_mode': data_mode,
+                'timesteps': CONFIG['time_steps'],
+                'hours_per_day': CONFIG.get('hours_per_day', 24),
+                'contingency_rate': CONFIG.get('contingency_rate', 0.05),
+                'pmu_coverage': CONFIG.get('pmu_coverage', 0.3)
+            }, sort_keys=True).encode()).hexdigest()
         }
-        
-        # PER-PROCESS METADATA APPROACH (Lock-free, race-condition free)
-        # Each process writes to its own metadata file, eliminating race conditions
-        # Files are merged on read by validation code
-        process_id = os.getpid()
-        per_process_metadata_file = os.path.join(output_path, f"data_generation_metadata_{process_id}_{generation_timestamp}.json")
-        
-        # # Debug: Print metadata file path
-        # print(f"\n[Metadata] Preparing to save metadata to: {per_process_metadata_file}")
-        # print(f"[Metadata] Output directory exists: {os.path.exists(output_path)}")
-        # print(f"[Metadata] Output directory: {output_path}")
-        
-        # Create metadata entry for this process
-        metadata_to_write = {
-            'runs': [metadata_entry],
-            'test_cases': cases_to_run,
-            'data_mode': data_mode,
-            'process_id': process_id,
-            'timestamp': generation_timestamp,
-            'last_update': datetime.now().isoformat()
-        }
-        
-        # Write per-process metadata file (no race condition - each process has unique filename)
-        try:
-            with open(per_process_metadata_file, 'w') as f:
-                json.dump(metadata_to_write, f, indent=2)
-            
-            # Verify the file was actually written
-            if os.path.exists(per_process_metadata_file) and os.path.getsize(per_process_metadata_file) > 0:
-                # Metadata saved successfully (no verbose message needed)
-                pass
-            else:
-                raise RuntimeError(
-                    f"Metadata file was not created or is empty: {per_process_metadata_file}\n"
-                    f"This is a critical error - metadata is required for data integrity and validation."
-                )
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not save per-process metadata file: {e}\n"
-                f"This is a critical error - metadata is required for data integrity and validation."
-            ) from e
-        
+        pid = os.getpid()
+        with open(os.path.join(out_path, f"data_generation_metadata_{pid}_{gen_ts}.json"), 'w') as f:
+            json.dump({'runs': [meta], 'pid': pid}, f, indent=2)
     except Exception as e:
-        raise RuntimeError(
-            f"Could not save metadata file: {e}\n"
-            f"This is a critical error - metadata is required for data integrity and validation."
-        ) from e
-    
-    # ============================================================================
-    # AUTOMATIC PLOT GENERATION
-    # ============================================================================
-    # Generate plots for the bus systems that were just generated
-    # This respects the same bus systems and mode as data generation
+        print(f"Metadata error: {e}")
+
+    # Plots
     try:
-        # Import plotting function
         from data.plot_consolidator import generate_all_data_plots
-        
-        # Determine plots directory based on mode
-        data_root = os.path.dirname(output_path)  # e.g., 'data' folder
-        plots_dir = os.path.join(data_root, f'plots_{data_mode}')
-        
-        # Clean up old plots for the bus systems being regenerated
-        if os.path.exists(plots_dir):
-            for case in cases_to_run:
-                save_case_name = case.replace('bw', '')
-                # Find and delete old plot files for this case
-                plot_patterns = [
-                    f'data_profile_*{save_case_name.replace("case", "")}bus.png',
-                    f'convergence_*{save_case_name.replace("case", "")}bus.png',
-                    f'physics_health_*{save_case_name.replace("case", "")}bus.png',
-                ]
-                for pattern in plot_patterns:
-                    for old_plot in glob.glob(os.path.join(plots_dir, pattern)):
-                        try:
-                            os.remove(old_plot)
-                        except Exception:
-                            pass
-        
-        os.makedirs(plots_dir, exist_ok=True)
-        
-        # Extract bus numbers from case names (e.g., "case33" -> 33)
-        bus_numbers = []
-        for case in cases_to_run:
-            save_case_name = case.replace('bw', '')
-            # Extract number from "case33" -> 33
-            if save_case_name.startswith('case'):
-                try:
-                    bus_num = int(save_case_name.replace('case', ''))
-                    bus_numbers.append(bus_num)
-                except ValueError:
-                    pass
-        
-        if bus_numbers:
-            bus_list_str = ', '.join(map(str, bus_numbers))
-            print(f"\n[Plots] Generating plots for buses: {bus_list_str}")
-            
-            # Generate plots with progress bar
-            plot_paths = generate_all_data_plots(
-                config=config_instance,
-                bus_systems=bus_numbers,
-                data_plots_dir=plots_dir
-            )
-            
-            # Print concise summary
-            total_plots = sum(len([p for p in plots.values() if p]) for plots in plot_paths.values())
-            successful_counts = [f"{bus_num}({len([p for p in plots.values() if p])})" for bus_num, plots in plot_paths.items()]
-            print(f"[Plots] Generated {total_plots} plots: {', '.join(successful_counts)}")
-            
+        plots_dir = os.path.join(os.path.dirname(out_path), f'plots_{data_mode}')
+        buses = [int(c.replace('case', '').replace('bw', '')) for c in cases]
+        if buses:
+            print(f"\nGenerating plots for: {buses}")
+            generate_all_data_plots(config_instance, buses, plots_dir)
     except Exception as e:
-        # Don't fail the entire process if plotting fails - it's not critical
-        print(f"[Warning] Could not generate plots: {e}")
+        print(f"Plot error: {e}")

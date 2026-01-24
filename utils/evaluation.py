@@ -4,8 +4,6 @@ import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import Dict, Tuple, List, Any
-from datetime import datetime
 from config import FeatureIndices
 from utils.visualization import create_model_comparison_plot
 from utils.metrics import compute_moopf_metrics
@@ -63,10 +61,13 @@ def evaluate_performance(model, data_loader, device, config, normalizer, is_sequ
             del out, targets, features, adj
     
     # Final metrics
-    # total_mse is sum(mean_batch_mse * batch_size), so dividing by total_samples gives global mean
-    mse = total_mse / total_samples
-    mae = total_mae / total_samples
-    rmse = np.sqrt(mse)
+    if total_samples == 0:
+        mse = mae = rmse = 0.0
+    else:
+        # total_mse is sum(mean_batch_mse * batch_size), so dividing by total_samples gives global mean
+        mse = total_mse / total_samples
+        mae = total_mae / total_samples
+        rmse = np.sqrt(mse)
     
     return {
         'mse': mse,
@@ -305,6 +306,13 @@ def evaluate_moopf_objectives_normalized(model, test_loader, config, device, nor
             del features, targets, adj, ybus, predictions, preds_phys, targets_phys
     
     # Convert to numpy (already on CPU)
+    if not all_mse_per_sample:
+        # Handle empty case
+        return {
+            'power_loss': 0.0, 'voltage_deviation': 0.0, 'carbon_emissions': 0.0,
+            'mse_per_sample': [], 'moopf_score': 0.0, 'mse_score': 0.0
+        }, pd.DataFrame()
+
     all_mse_per_sample = torch.cat(all_mse_per_sample, dim=0).numpy().tolist()
     all_renewable_fractions = torch.cat(all_renewable_fractions, dim=0).numpy().flatten() if all_renewable_fractions else []
     

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import copy
 import sys
+import time
 import yaml
 import signal
 import gc
@@ -309,6 +310,8 @@ def main():
                     print("\nShutdown signal received - exiting training")
                     raise KeyboardInterrupt("Training interrupted by user")
                 
+                start_time = time.time()
+                
                 params = process_optimization_params(param_keys, params_array)
 
                 run_config = copy.deepcopy(base_config)
@@ -398,11 +401,14 @@ def main():
                         else: print(f"  Model state too large ({state_size / 1024**2:.1f} MB), skipping save")
                     except Exception as e: print(f"  Could not save model state: {e}")
                     
+                    training_time = time.time() - start_time
+                    
                     run_results = {
                         'run_name': run_name, 'model_name': model_name, **params, **test_metrics,
                         'val_metrics': val_metrics, 'total_loss': total_loss, 'training_mse': val_metrics['mse'],
                         'physics_loss': training_history['val_physics_loss'][-1], 'safety_loss': training_history['val_safety_loss'][-1],
-                        'training_history': training_history, 'model_state': model_state, 'model_config': run_config  
+                        'training_history': training_history, 'model_state': model_state, 'model_config': run_config,
+                        'training_time': training_time
                     }
                     model_specific_results.append(run_results)
                     return total_loss
@@ -756,7 +762,8 @@ def main():
                 'moopf_score': moopf_results.get('moopf_score', 'N/A'),
                 'power_loss': moopf_results.get('power_loss', 'N/A'),
                 'voltage_deviation': moopf_results.get('voltage_deviation', 'N/A'),
-                'carbon_emissions': moopf_results.get('carbon_emissions', 'N/A')
+                'carbon_emissions': moopf_results.get('carbon_emissions', 'N/A'),
+                'training_time': best_run.get('training_time', 'N/A')
             }
             all_results.append(result_entry)
             

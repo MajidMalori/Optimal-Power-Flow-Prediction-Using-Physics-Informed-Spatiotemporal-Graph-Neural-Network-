@@ -1,7 +1,5 @@
 import os, torch, yaml, csv, json, inspect, shutil, argparse
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
 
 # --- Constants & Indices ---
 class FeatureIndices:
@@ -36,56 +34,70 @@ class Config:
     }
 
     class _ModelConfig:
-        INPUT_DIM=10; OUTPUT_DIM=10; FEATURE_DIM=10; DROPOUT=0.1; HIDDEN_DIM_RANGE=(16, 128); NUM_GC_LAYERS_RANGE=(1, 5)
+        INPUT_DIM=10; OUTPUT_DIM=10; FEATURE_DIM=10; DROPOUT=0.1
+        
         @staticmethod
         def _get_setting(num_buses, normal, medium, large):
             cap = getattr(Config, f'CAPACITY_{num_buses}_BUS', 'normal')
             return {'normal': normal, 'medium': medium, 'large': large}.get(cap, normal)
+            
         @classmethod
         def get_hidden_dim_range(cls, nb): return cls._get_setting(nb, (64, 128), (96, 192), (64, 256))
         @classmethod
         def get_num_gc_layers_range(cls, nb): return cls._get_setting(nb, (1, 2), (2, 3), (2, 3))
         @classmethod
         def get_embedding_dim_range(cls, nb): return cls._get_setting(nb, (64, 150), (100, 200), (100, 300))
+        
+        @classmethod
+        def get_phi_range(cls, nb): return (0.0, 1.0)
+        
+        @classmethod
+        def get_sequential_ranges(cls, nb):
+            if nb <= 33: return {'hidden_dim': (32, 64), 'sequence_length': (5, 10), 'rnn_layers': (1, 3)}
+            if nb <= 57: return {'hidden_dim': (16, 48), 'sequence_length': (3, 8), 'rnn_layers': (1, 2)}
+            return {'hidden_dim': (16, 32), 'sequence_length': (3, 5), 'rnn_layers': (1, 2)}
+
         @staticmethod
         def get_recommended_model(nb): return "PIGCGRU" if nb <= 33 else "AdaptivePIGCN"
+        
         @staticmethod
         def get_adaptive_mosoa_params(nb, config_instance=None):
-            # Check for config overrides first
+            # Strict config enforcement - no fallback defaults
             if config_instance:
                 num_seagulls = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_NUM_SEAGULLS', None)
                 max_iterations = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_MAX_ITERATIONS', None)
-                strategy = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_STRATEGY', None)
+                strategy = getattr(config_instance, f'OPTIMIZATION_CASE{nb}_STRATEGY', 'custom')
                 
                 if num_seagulls is not None and max_iterations is not None:
                      return {
                         'num_seagulls': num_seagulls,
                         'max_iterations': max_iterations,
-                        'strategy': strategy or ('thorough' if nb <= 33 else ('balanced' if nb <= 57 else 'quick')),
+                        'strategy': strategy,
                         'description': f'Configured via config.yaml ({strategy})'
                     }
+            
+            # If we reach here, it means configuration is missing
+            raise AttributeError(f"Missing optimization configuration for case{nb} in config.yaml. "
+                               f"Please ensure OPTIMIZATION_CASE{nb}_NUM_SEAGULLS and OPTIMIZATION_CASE{nb}_MAX_ITERATIONS are set.")
 
-            if nb <= 33: return {'num_seagulls': 1, 'max_iterations': 2, 'strategy': 'thorough', 'description': 'Extensive search'}
-            return {'num_seagulls': 1, 'max_iterations': 2, 'strategy': 'balanced' if nb <= 57 else 'quick', 'description': 'Balanced' if nb <= 57 else 'Fast'}
-
-    class _AdaptiveModelConfig(_ModelConfig):
-        @staticmethod
-        def get_embedding_dim_range(nb): return (8, 32)
-
-    GCNConfig = _ModelConfig()
-    AdaptivePIGCNConfig = _AdaptiveModelConfig(); AdaptivePIGCNConfig.EMBEDDING_DIM_RANGE=(8, 32); AdaptivePIGCNConfig.PHI_RANGE=(0.0, 1.0); AdaptivePIGCNConfig.NUM_GC_LAYERS_RANGE=(1, 6)
-    adaptiveGCNConfig = _AdaptiveModelConfig(); adaptiveGCNConfig.EMBEDDING_DIM_RANGE=(8, 32); adaptiveGCNConfig.PHI_RANGE=(0.0, 1.0)
+    # Single Unified Config Class - No more subclasses
+    # Individual instances can still override specific attributes if absolutely necessary
+    # but the base class provides EVERYTHING needed for consistency.
     
-    @staticmethod
-    def get_sequential_ranges(nb):
-        if nb <= 33: return {'hidden_dim': (32, 64), 'sequence_length': (5, 10), 'rnn_layers': (1, 3)}
-        if nb <= 57: return {'hidden_dim': (16, 48), 'sequence_length': (3, 8), 'rnn_layers': (1, 2)}
-        return {'hidden_dim': (16, 32), 'sequence_length': (3, 5), 'rnn_layers': (1, 2)}
-
-    PIGCLSTMConfig = _AdaptiveModelConfig(); PIGCLSTMConfig.RNN_LAYERS_RANGE=(1, 3); PIGCLSTMConfig.SEQUENCE_LENGTH_RANGE=(5, 10); PIGCLSTMConfig.EMBEDDING_DIM_RANGE=(8, 16); PIGCLSTMConfig.PHI_RANGE=(0.0, 1.0); PIGCLSTMConfig.DROPOUT=0.25; PIGCLSTMConfig.get_sequential_ranges=get_sequential_ranges
-    PIGCGRUConfig = _AdaptiveModelConfig(); PIGCGRUConfig.RNN_LAYERS_RANGE=(1, 3); PIGCGRUConfig.SEQUENCE_LENGTH_RANGE=(5, 10); PIGCGRUConfig.EMBEDDING_DIM_RANGE=(8, 16); PIGCGRUConfig.PHI_RANGE=(0.0, 1.0); PIGCGRUConfig.DROPOUT=0.25; PIGCGRUConfig.get_sequential_ranges=get_sequential_ranges
-    ResnetPIGCGRUConfig = _AdaptiveModelConfig(); ResnetPIGCGRUConfig.RNN_LAYERS_RANGE=(1, 3); ResnetPIGCGRUConfig.SEQUENCE_LENGTH_RANGE=(5, 10); ResnetPIGCGRUConfig.EMBEDDING_DIM_RANGE=(8, 16); ResnetPIGCGRUConfig.PHI_RANGE=(0.0, 1.0); ResnetPIGCGRUConfig.DROPOUT=0.25; ResnetPIGCGRUConfig.get_sequential_ranges=get_sequential_ranges
-    ResnetPIGCLSTMConfig = _AdaptiveModelConfig(); ResnetPIGCLSTMConfig.RNN_LAYERS_RANGE=(1, 3); ResnetPIGCLSTMConfig.SEQUENCE_LENGTH_RANGE=(5, 10); ResnetPIGCLSTMConfig.EMBEDDING_DIM_RANGE=(8, 16); ResnetPIGCLSTMConfig.PHI_RANGE=(0.0, 1.0); ResnetPIGCLSTMConfig.DROPOUT=0.25; ResnetPIGCLSTMConfig.get_sequential_ranges=get_sequential_ranges
+    GCNConfig = _ModelConfig()
+    
+    # Adaptive GCN just needs the base config (it will use PHI and EMBEDDING_DIM from base)
+    adaptiveGCNConfig = _ModelConfig()
+    
+    # AdaptivePIGCN overrides one specific range (GC Layers)
+    AdaptivePIGCNConfig = _ModelConfig()
+    
+    # Sequential models just need the base config (they will use get_sequential_ranges from base)
+    # We set DROPOUT=0.25 as the only override
+    PIGCLSTMConfig = _ModelConfig()
+    PIGCGRUConfig = _ModelConfig()
+    ResnetPIGCGRUConfig = _ModelConfig()
+    ResnetPIGCLSTMConfig = _ModelConfig()
 
     @property
     def CURRENT_RUN_DIR(self): return os.path.join(self.EXPERIMENTAL_RESULTS_DIR, f'run_{self._CURRENT_RUN_TIMESTAMP}')
@@ -231,9 +243,11 @@ class Config:
         
         log_entry = {'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}', 'status': 'completed', **(summary or {})}
         log_path = os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'experiment_log.csv')
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        file_exists = os.path.exists(log_path)
         with open(log_path, 'a', newline='') as f:
             w = csv.DictWriter(f, fieldnames=log_entry.keys())
-            if not os.path.exists(log_path): w.writeheader()
+            if not file_exists: w.writeheader()
             w.writerow(log_entry)
             
     def get_run_info(self): return {'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}', 'timestamp': self._CURRENT_RUN_TIMESTAMP, 'dir': self.CURRENT_RUN_DIR}

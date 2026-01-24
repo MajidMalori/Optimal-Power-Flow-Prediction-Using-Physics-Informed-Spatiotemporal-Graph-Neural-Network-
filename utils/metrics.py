@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Dict, Optional
+from typing import Tuple
 from config import FeatureIndices
 
 def calculate_power_flow(vm_pu: torch.Tensor, va_rad: torch.Tensor, ybus_batch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

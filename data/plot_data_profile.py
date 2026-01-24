@@ -7,7 +7,6 @@ import os
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from config import FeatureIndices
 
 # Set professional style

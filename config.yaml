@@ -11,7 +11,7 @@ experimental:
   gradient_checkpointing: false
   save_checkpoints: true
   enable_logging: false
-  clear_results: true
+  clear_results: false
 
 system:
   device: "cuda"
@@ -37,7 +37,7 @@ training:
   batch_size: 256
   learning_rate: 0.0005
   max_grad_norm: 1.0
-  num_epochs: 3
+  num_epochs: 50
   early_stopping_patience: 5
   gradient_accumulation_steps: 1
   use_learning_rate_scheduler: true
@@ -60,14 +60,14 @@ data:
 
 optimization:
   case33:
-    num_seagulls: 1
-    max_iterations: 2
+    num_seagulls: 4
+    max_iterations: 5
   case57:
-    num_seagulls: 1
-    max_iterations: 2
+    num_seagulls: 4
+    max_iterations: 5
   case118:
-    num_seagulls: 1
-    max_iterations: 2
+    num_seagulls: 4
+    max_iterations: 5
 
 model_capacity:
   bus_33: 'large'

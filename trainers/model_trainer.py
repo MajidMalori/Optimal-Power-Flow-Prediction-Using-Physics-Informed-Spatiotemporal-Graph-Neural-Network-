@@ -1,5 +1,6 @@
-import torch, os, logging
 from datetime import datetime
+import os
+import torch
 from tqdm import tqdm
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -48,6 +49,9 @@ class PowerSystemTrainer:
                 if self.is_physics_informed: desc += f" P={metrics['physics_loss']/(i+1):.6f} S={metrics['safety_loss']/(i+1):.6f}"
                 pbar.set_postfix_str(desc)
 
+        if len(loader) == 0:
+            return {k: 0.0 for k in metrics}
+            
         res = {k: v / len(loader) for k, v in metrics.items()}
         res['weights'] = last_weights
         return res

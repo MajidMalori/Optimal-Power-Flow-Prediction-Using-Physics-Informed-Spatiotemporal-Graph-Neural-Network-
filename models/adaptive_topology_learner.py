@@ -6,7 +6,6 @@ Contains shared logic for adaptive adjacency matrix computation.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 from utils.contingency_ybus import normalize_adjacency
 
 

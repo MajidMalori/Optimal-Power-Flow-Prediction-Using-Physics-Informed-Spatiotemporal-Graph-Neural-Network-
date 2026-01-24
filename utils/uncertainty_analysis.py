@@ -12,12 +12,11 @@ matplotlib.use('Agg')  # Use non-interactive backend for faster plotting
 import matplotlib.pyplot as plt
 # Optimize matplotlib for performance
 plt.ioff()  # Turn off interactive mode (faster)
-import matplotlib.patches as mpatches
 from matplotlib.gridspec import GridSpec
 import networkx as nx
 import pandapower as pp
 import pandapower.networks as pn
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
 import torch
 
 

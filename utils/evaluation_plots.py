@@ -14,12 +14,10 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for faster plotting
 import matplotlib.pyplot as plt
-# Optimize matplotlib for performance
 plt.ioff()  # Turn off interactive mode (faster)
-from typing import Dict, Tuple, Optional, Any
+from typing import Any
 import warnings
 from scipy.stats import linregress, norm
-from config import FeatureIndices, ModelOutputIndices
 
 warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='matplotlib')
