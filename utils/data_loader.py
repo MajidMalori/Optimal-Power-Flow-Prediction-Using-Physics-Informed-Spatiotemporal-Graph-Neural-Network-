@@ -73,16 +73,6 @@ class PowerSystemNormalizer:
         
         result = np.zeros_like(data_np)
         
-        # Check dimensions
-        if data_np.shape[-1] != 10:
-            # Fallback for partial data or 2-dim targets (legacy support or error?)
-            # If legacy 2-dim targets [V, theta] or [P, Q] etc., this scaler might not apply correctly
-            # without knowing WHAT the columns are.
-            # But we assume 10-dim now.
-            # If 2-dim (OPF unknowns), we can't easily apply this global scaling without bus types.
-            # Assuming data is 10-dim.
-            pass
-            
         # Apply scaling
         # Cols 0-7: Power (P/Q) -> val / base_mva
         result[..., 0:8] = data_np[..., 0:8] * self.power_scale
@@ -149,7 +139,7 @@ class PowerSystemLazyDataset(Dataset):
     This is the scalable, memory-efficient approach for large datasets.
     """
     def __init__(self, file_metadata, adjacency_matrix, normalizer, ybus_metadata, 
-                 is_static, sequence_length=1, hours_per_day=24, topology_cache=None, topology_ids=None):
+                 is_static, sequence_length=None, hours_per_day=24, topology_cache=None, topology_ids=None):
         """
         Args:
             file_metadata: List of dicts, each containing file paths and metadata for one sample
@@ -157,7 +147,7 @@ class PowerSystemLazyDataset(Dataset):
             normalizer: PowerSystemNormalizer instance
             ybus_metadata: Dict with 'base_path' etc.
             is_static: Whether this is a static model (single timestep) or sequential
-            sequence_length: Length of input sequence
+            sequence_length: Length of input sequence (REQUIRED if is_static=False, IGNORED if is_static=True)
             hours_per_day: Number of hours per day
             topology_cache: Dict mapping topology_id -> pre-normalized adjacency tensor
             topology_ids: Array mapping sample index -> topology_id
@@ -167,7 +157,7 @@ class PowerSystemLazyDataset(Dataset):
         self.normalizer = normalizer
         self.ybus_metadata = ybus_metadata
         self.is_static = is_static
-        self.sequence_length = sequence_length
+        self.sequence_length = sequence_length if not is_static else 1
         self.hours_per_day = hours_per_day
         
         # Load base Ybus matrix (REQUIRED) - Use mmap for memory efficiency
@@ -532,12 +522,19 @@ def _collate_sequential_padded(batch):
 
 def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, config, is_static, 
                         topology_cache=None, topology_ids=None):
-    seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
+    # Enforce NO FALLBACK for sequence_length
+    if is_static:
+        seq_len = None # Explicitly pass None to indicate it's not needed
+    else:
+        if not hasattr(config, 'SEQUENCE_LENGTH'):
+            raise AttributeError("SEQUENCE_LENGTH is missing from config but required for sequential models.")
+        seq_len = config.SEQUENCE_LENGTH
+    
     hours_per_day = getattr(config, 'HOURS_PER_DAY', 24)
     
     dataset = PowerSystemLazyDataset(
         file_metadata, adjacency, normalizer, ybus_metadata,
-        is_static, seq_len, hours_per_day=hours_per_day,
+        is_static, sequence_length=seq_len, hours_per_day=hours_per_day,
         topology_cache=topology_cache, topology_ids=topology_ids
     )
     dataset_size = len(dataset)

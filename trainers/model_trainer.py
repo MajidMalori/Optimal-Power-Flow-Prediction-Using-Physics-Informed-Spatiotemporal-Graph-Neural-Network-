@@ -63,7 +63,16 @@ class PowerSystemTrainer:
             self.log_file = open(log_path, 'a', encoding='utf-8')
             self.log_file.write(f"\n{'#'*80}\n# Run Started: {datetime.now()}\n{'#'*80}\n")
         
-        scheduler = CosineAnnealingLR(self.optimizer, T_max=self.config.NUM_EPOCHS, eta_min=1e-5) if getattr(self.config, 'USE_LEARNING_RATE_SCHEDULER', True) else None
+        if getattr(self.config, 'USE_LEARNING_RATE_SCHEDULER', True):
+            # Rule #2: Use config values, do not hardcode.
+            t_max = getattr(self.config, 'COSINEANNEALINGLR_T_MAX', None)
+            if t_max is None:
+                t_max = self.config.NUM_EPOCHS
+                
+            eta_min = getattr(self.config, 'COSINEANNEALINGLR_ETA_MIN', 1e-5)
+            scheduler = CosineAnnealingLR(self.optimizer, T_max=t_max, eta_min=eta_min)
+        else:
+            scheduler = None
         
         for epoch in range(1, self.config.NUM_EPOCHS + 1):
             self.current_epoch = epoch
