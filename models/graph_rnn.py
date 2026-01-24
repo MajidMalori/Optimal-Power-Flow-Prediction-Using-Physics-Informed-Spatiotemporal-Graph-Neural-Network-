@@ -83,16 +83,6 @@ class GraphRNN(GraphRNNBase):
             self.layer_norms = nn.ModuleList([
                 nn.LayerNorm(feature_dim if i == 0 else hidden_dim) for i in range(rnn_layers)
             ])
-        
-                
-        # Forensic logging state
-        self.forensic_logger = None
-        self.forward_count = 0
-    
-        
-    def set_logger(self, logger):
-        """Attach a forensic logger."""
-        self.forensic_logger = logger
     
     def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -107,18 +97,6 @@ class GraphRNN(GraphRNNBase):
             Output [batch_size, num_nodes, 4]
         """
 
-        # FORENSIC: Log input
-        self.forward_count += 1
-        if self.forensic_logger and self.forward_count % self.forensic_logger.log_interval == 1:
-            self.forensic_logger.log_model_forward(
-                f"{self.__class__.__name__}_INPUT",
-                {'features': x, 'adjacency': adj, 'bus_types': bus_types},
-                None
-            )
-            self.forensic_logger.logger.debug(f"\n  {self.__class__.__name__} FORWARD PASS #{self.forward_count}:")
-            self.forensic_logger.log_tensor_stats("Input features", x, indent=2)
-            
-        
         batch_size, seq_len, num_nodes, _ = x.shape
         
         # Compute adaptive adjacency matrix (shared across all timesteps)
@@ -189,15 +167,6 @@ class GraphRNN(GraphRNNBase):
       
         output = self.apply_output_transformation(last_step_per_node)
           
-        # FORENSIC: Log output
-        if self.forensic_logger and self.forward_count % self.forensic_logger.log_interval == 1:
-            self.forensic_logger.log_tensor_stats("Final output", output, indent=2)
-            output_std = output.std().item()
-            if output_std < 1e-6:
-                self.forensic_logger.log_diagnosis(
-                    f"MODEL COLLAPSE in forward pass #{self.forward_count}: Output std = {output_std:.2e}"
-                )
-        
         return output
 
 # ==============================================================================

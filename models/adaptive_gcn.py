@@ -69,14 +69,6 @@ class AdaptiveGCN(BaseModel, AdaptiveTopologyLearner):
         
         self.dropout_layer = nn.Dropout(dropout)
         
-        # Forensic logging state
-        self.forensic_logger = None
-        self.forward_count = 0
-
-    def set_logger(self, logger):
-        """Attach a forensic logger."""
-        self.forensic_logger = logger   
-
     def forward(self, x: torch.Tensor, static_adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None):
         """
         Forward pass.
@@ -88,14 +80,6 @@ class AdaptiveGCN(BaseModel, AdaptiveTopologyLearner):
         Returns:
             Predicted state [batch, num_buses, 10]
         """
-        # FORENSIC: Log input
-        self.forward_count += 1
-        if self.forensic_logger and self.forensic_logger.log_interval > 0 and self.forward_count % self.forensic_logger.log_interval == 1:
-            self.forensic_logger.log_model_forward(
-                f"{self.__class__.__name__}_INPUT",
-                {'features': x, 'adjacency': static_adj},
-                None
-            )
         
         batch_size = x.size(0)
 

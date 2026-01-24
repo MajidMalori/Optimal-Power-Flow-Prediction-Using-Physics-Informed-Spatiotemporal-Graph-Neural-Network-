@@ -40,7 +40,7 @@ training:
   batch_size: 256
   learning_rate: 0.0005
   max_grad_norm: 1.0  # Gradient clipping
-  num_epochs: 10
+  num_epochs: 3
   early_stopping_patience: 5
   gradient_accumulation_steps: 1  # Memory optimization: accumulate gradients over N batches before updating weights (reduces effective batch size memory)
   use_learning_rate_scheduler: true
@@ -123,9 +123,6 @@ experimental:
 # --- Debug Configuration ---
 debug:
   train:
-    enable_forensic_logging: false
     show_detailed_progress: false
   test:
-    enable_forensic_logging: true
     show_detailed_progress: true
-  log_interval: 100  # Log every N forward passes

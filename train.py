@@ -36,7 +36,6 @@ from utils.evaluation_summary_funcs import (print_model_summary,
                                            save_model_results_csv,
                                            print_comprehensive_summary)
 from trainers.model_trainer import PowerSystemTrainer
-from utils.forensic_logger import init_forensic_logger, close_logger
 from utils.shutdown_flag import set_shutdown, get_shutdown
 from config import Config
 
@@ -146,181 +145,78 @@ def enable_gradient_checkpointing(model):
 def main():
     global _config_instance
     
-    # Setup logging
+    # Setup logging and signal handlers
     logger = setup_logging()
-    logger.info("Starting training session with memory optimizations")
-
-        
-    # Clean up old debug logs if forensic logging is enabled
-    if os.environ.get('FORENSIC_DEBUG', 'false').lower() == 'true':
-        debug_logs_dir = os.path.join(os.path.dirname(__file__), 'debug_logs')
-        if os.path.exists(debug_logs_dir):
-            try:
-                shutil.rmtree(debug_logs_dir)
-                logger.info(f"Cleaned up old debug logs: {debug_logs_dir}")
-            except Exception as e:
-                logger.warning(f"Could not delete debug logs: {e}")
+    logger.info("Starting training session")
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # Set up signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
-    
-    # Set PyTorch CUDA memory allocation configuration to prevent fragmentation
+    # Environment setup
     if torch.cuda.is_available():
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-        print("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to prevent memory fragmentation")
     
-    # Parse command line arguments using unified CLI
+    # Config setup
     cli_args = Config.parse_cli_args()
-    
-    # Pass CLI overrides to Config (CLI args override YAML)
-    base_config = Config(
-        cli_args=cli_args,
-        data_mode='train', # Default, will be overridden by cli_args.mode if provided
-        load_yaml=True
-    )
-    
-    # Explicitly create run directories for training
+    base_config = Config(cli_args=cli_args, data_mode='train', load_yaml=True)
     base_config.create_run_directories()
-    
-    _config_instance = base_config  # Store for signal handler
+    _config_instance = base_config
     
     # Parse bus systems to test (from Config, not Args)
     def parse_bus_systems(bus_systems_arg):
-        """Parse bus systems argument and return list of bus numbers to test."""
-        # Handle list (from YAML)
+        """Parse bus systems argument."""
         if isinstance(bus_systems_arg, list):
             return [int(b) for b in bus_systems_arg]
-        
-        # Handle string
+        if isinstance(bus_systems_arg, int):
+            return [bus_systems_arg]
         if isinstance(bus_systems_arg, str):
             if bus_systems_arg.lower() == 'all':
                 return base_config.NUM_BUSES
-            else:
-                # Parse comma-separated values
-                bus_list = []
-                for bus_str in bus_systems_arg.split(','):
-                    bus_str = bus_str.strip()
-                    try:
-                        bus_num = int(bus_str)
-                        if bus_num in base_config.NUM_BUSES:
-                            bus_list.append(bus_num)
-                        else:
-                            print(f"WARNING: {bus_num}-bus system not available. Available: {base_config.NUM_BUSES}")
-                    except ValueError:
-                        print(f"WARNING: Invalid bus system '{bus_str}'. Skipping.")
+            try:
+                bus_list = [int(b.strip()) for b in bus_systems_arg.split(',') if int(b.strip()) in base_config.NUM_BUSES]
+                if not bus_list: print(f"WARNING: No valid bus systems found in '{bus_systems_arg}'. Defaulting to all.")
                 return bus_list if bus_list else base_config.NUM_BUSES
-        
-        # Handle single integer
-        if isinstance(bus_systems_arg, int):
-            return [bus_systems_arg]
-        
-        # Fallback
+            except ValueError:
+                print(f"WARNING: Invalid bus system string '{bus_systems_arg}'. Defaulting to all.")
         return base_config.NUM_BUSES
     
     bus_systems_to_test = parse_bus_systems(getattr(Config, 'bus_systems', 'all'))
-    
-    # Track all results for comprehensive summary
     all_results = []
     
-    # STEP 1: Concise run information (one line)
-    run_info = base_config.get_run_info()
-    data_mode = getattr(Config, 'data_mode', 'test')
-    
-    # STEP 2: Validate data before training
     if not validate_data_before_training(base_config, bus_systems_to_test):
-        raise RuntimeError(
-            "Data validation failed! Required data files are missing or invalid.\n"
-            "Run data generation first: python data/main.py"
-        )
+        raise RuntimeError("Data validation failed. Run data/main.py first.")
     
-    # Get seed from config (loaded from YAML) for reproducibility
+    # Reproducibility
     seed = getattr(base_config, 'SEED', 42)
-    
-    # IMPORTANT: Set environment variables BEFORE any other operations for full reproducibility
-    # These must be set before PyTorch operations to ensure determinism
     os.environ['PYTHONHASHSEED'] = str(seed)
-    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'  # For CUDA deterministic operations
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+    print(f"\n[Seed] {seed}")
+    torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+    torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
+    try: torch.use_deterministic_algorithms(True, warn_only=True)
+    except AttributeError: pass
     
-    # Set all random seeds for full reproducibility
-    print(f"\n[Seed] {seed} (for reproducibility)")
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    
-    # Enable deterministic mode for PyTorch (slower but fully reproducible)
-    # Note: This may reduce performance but ensures exact reproducibility
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Enable deterministic algorithms in PyTorch (if available)
-    # This ensures operations like matrix multiplication are deterministic
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except AttributeError:
-        # Older PyTorch versions (<1.8) don't have this function
-        pass
-    
-    # === DEVICE AND PARALLEL CONFIGURATION ===
+    # Device setup
     device, _ = get_device()
-    
-    # Store Config attributes for later use (replaces args object)
-    # Use instance values (YAML has been loaded by now)
-    _config_attrs = {
-
-        'clear_results': getattr(Config, 'clear_results', False),
-    }
     clear_gpu_memory()
     
-    # Ensure NUM_WORKERS is an integer (from config)
-    base_config.NUM_WORKERS = int(getattr(base_config, 'NUM_WORKERS', 0))
+    base_config.NUM_WORKERS = int(getattr(base_config, 'NUM_WORKERS', 0)) if getattr(base_config, 'EXPERIMENTAL_PARALLEL_DATA_LOADING', True) else 0
     
-    # Ensure parallel_data_loading setting is respected
-    parallel_data_loading = getattr(base_config, 'EXPERIMENTAL_PARALLEL_DATA_LOADING', True)
-    if not parallel_data_loading:
-        base_config.NUM_WORKERS = 0
-    
-    # Get GPU info for startup printout
-    if device.type == 'cuda' and torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        device_info = f"CUDA ({gpu_name}, {gpu_memory_gb:.1f}GB)"
-    else:
-        device_info = "CPU"
-    
-    # Single concise line with all startup info (enhanced with GPU details)
-    test_config = getattr(Config, 'test_config', 'all')
-    print(f"RUN: {run_info['run_id']} | Config: {test_config} | Mode: {data_mode.upper()} | Buses: {bus_systems_to_test} | Device: {device_info} | Workers: {base_config.NUM_WORKERS}")
+    device_info = f"CUDA ({torch.cuda.get_device_name(0)}, {torch.cuda.get_device_properties(0).total_memory / (1024**3):.1f}GB)" if device.type == 'cuda' else "CPU"
+    print(f"RUN: {base_config.get_run_info()['run_id']} | Config: {getattr(Config, 'test_config', 'all')} | Mode: {getattr(Config, 'data_mode', 'test').upper()} | Buses: {bus_systems_to_test} | Device: {device_info} | Workers: {base_config.NUM_WORKERS}")
 
-    # Get model configurations from config
+    # Model selection
     model_class_map = base_config.get_model_class_map()
     model_config_map = base_config.model_config_map
-    
-    # Hierarchical model selection:
-    # 1. If models_to_train is specified and not "all" → Use those (override test_config)
-    # 2. Otherwise → Use test_config
     models_to_train = getattr(Config, 'models_to_train', None)
     
     if models_to_train and models_to_train != "all":
-        # User specified exact models → Override test_config
-        if isinstance(models_to_train, str):
-            models_to_test = [m.strip() for m in models_to_train.split(',')]
-        elif isinstance(models_to_train, list):
-            models_to_test = models_to_train
-        else:
-            models_to_test = [models_to_train]
-        print(f"[Models] Explicit selection: {models_to_test}")
+        models_to_test = [m.strip() for m in models_to_train.split(',')] if isinstance(models_to_train, str) else (models_to_train if isinstance(models_to_train, list) else [models_to_train])
+        print(f"[Models] Explicit: {models_to_test}")
     else:
-        # Use test_config presets
-        models_to_test = base_config.get_models_to_test(test_config)
-        print(f"[Models] test_config '{test_config}': {models_to_test}")
+        models_to_test = base_config.get_models_to_test(getattr(Config, 'test_config', 'all'))
+        print(f"[Models] Config: {models_to_test}")
     
-    if not models_to_test:
-        raise ValueError(
-            f"No models selected for training!\n"
-            f"Available test_config options: quick, core, comprehensive, physics_only, non_physics_only, sequential_only, all\n"
-            f"Or set models_to_train to specific models like: ['GCN', 'adaptiveGCN']"
-        )
+    if not models_to_test: raise ValueError("No models selected for training.")
 
     # === MAIN TRAINING EXECUTION ===
     for num_buses in bus_systems_to_test:
@@ -455,150 +351,61 @@ def main():
                         is_physics_informed=is_physics_informed
                     )
                     
-                    # Create model with error handling for OOM
+                    # Create model
                     try:
                         model = model_class_map[model_name](**model_kwargs).to(device)
-                        # Enable gradient checkpointing if requested (saves memory, but slower)
-                        if getattr(run_config, 'GRADIENT_CHECKPOINTING', False):
-                            enable_gradient_checkpointing(model)
+                        if getattr(run_config, 'GRADIENT_CHECKPOINTING', False): enable_gradient_checkpointing(model)
                     except RuntimeError as e:
-                        if "out of memory" in str(e).lower():
-                            print(f"CUDA OOM during model creation: {e}")
-                            clear_gpu_memory()
-                            # Try with smaller batch size
-                            run_config.BATCH_SIZE = max(1, run_config.BATCH_SIZE // 2)
-                            print(f"Retrying with reduced batch size: {run_config.BATCH_SIZE}")
-                            # Recreate loaders with smaller batch size
-                            loaders = create_data_loaders(
-                                _file_metadata, _adjacency, _ybus_metadata, _normalizer, run_config, 
-                                is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids
-                            )
-                            train_loader, val_loader, test_loader = loaders
-                            model = model_class_map[model_name](**model_kwargs).to(device)
-                            # Apply collapse prevention initialization
-                        else:
-                            raise e
-                    
-                    # Use appropriate loss function based on whether model is physics-informed
-                    criterion = PowerSystemLoss(
-                        config=run_config, 
-                        normalizer=_normalizer, 
-                        is_gcn=(not is_physics_informed)
-                    ).to(device)
-                    
-                    # Golden Configuration: Use AdamW optimizer
-                    # AdamW decouples weight decay from gradient updates (better generalization than Adam)
-                    learning_rate = run_config.LEARNING_RATE
-                    weight_decay = getattr(run_config, 'WEIGHT_DECAY', 0.0001)  # L2 regularization from config
-                    # Combine model and criterion parameters for optimization
-                    all_params = list(model.parameters()) + list(criterion.parameters())
-                    optimizer = torch.optim.AdamW(all_params, lr=learning_rate, weight_decay=weight_decay)
+                        if "out of memory" not in str(e).lower(): raise e
+                        print(f"CUDA OOM: {e}. Retrying with batch size {run_config.BATCH_SIZE // 2}")
+                        clear_gpu_memory()
+                        run_config.BATCH_SIZE = max(1, run_config.BATCH_SIZE // 2)
+                        loaders = create_data_loaders(_file_metadata, _adjacency, _ybus_metadata, _normalizer, run_config, is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids)
+                        train_loader, val_loader, test_loader = loaders
+                        model = model_class_map[model_name](**model_kwargs).to(device)
 
-                    # Initialize forensic logger if debug mode is enabled
-                    # Controlled by config.yaml (automatically picks train/test setting)
-                    debug_config = getattr(run_config, 'DEBUG_ENABLE', False)
-                    
-                    if debug_config:
-                        # Get log_interval from config (default to 10 if not set)
-                        log_interval = getattr(run_config, 'DEBUG_LOG_INTERVAL', 10)
-                        
-                        forensic_logger = init_forensic_logger(
-                            log_dir="debug_logs",
-                            model_name=model_name,
-                            bus_system=str(num_buses),
-                            enabled=True,
-                            log_interval=log_interval
-                        )
-                        # Attach logger to model if it's a ForensicGCN
-                        if hasattr(model, 'set_logger'):
-                            model.set_logger(forensic_logger)
-
+                    criterion = PowerSystemLoss(config=run_config, normalizer=_normalizer, is_gcn=(not is_physics_informed)).to(device)
+                    optimizer = torch.optim.AdamW(list(model.parameters()) + list(criterion.parameters()), lr=run_config.LEARNING_RATE, weight_decay=getattr(run_config, 'WEIGHT_DECAY', 0.0001))
                     trainer = PowerSystemTrainer(model, criterion, optimizer, run_config, device, is_physics_informed)
                     
-                    # Prepare configuration parameters for logging
+                    # Config logging
                     config_params = {
-                        'learning_rate': learning_rate,
-                        'batch_size': run_config.BATCH_SIZE,
-                        'gradient_accumulation_steps': getattr(run_config, 'GRADIENT_ACCUMULATION_STEPS', 1),
-                        'num_epochs': run_config.NUM_EPOCHS,
-                        'early_stopping_patience': getattr(run_config, 'EARLY_STOPPING_PATIENCE', 10),
+                        'lr': run_config.LEARNING_RATE, 'batch': run_config.BATCH_SIZE, 
+                        'accum': getattr(run_config, 'GRADIENT_ACCUMULATION_STEPS', 1), 'epochs': run_config.NUM_EPOCHS,
+                        'patience': getattr(run_config, 'EARLY_STOPPING_PATIENCE', 10), **params
                     }
-                    # Add model-specific parameters
-                    for key, value in params.items():
-                        config_params[key] = value
+                    config_str = ", ".join([f"{k}={v:.6f}" if isinstance(v, float) else f"{k}={v}" for k, v in sorted(config_params.items())])
+                    iter_info = f" [Iter {mosoa_iter[0]}/{mosoa_max_iter} | Run {((mosoa_run_total[0] - 1) % mosoa_runs_per_iter) + 1}/{mosoa_runs_per_iter}]"
+                    print(f"  Config: {config_str}{iter_info}\n")
                     
-                    config_str = ", ".join([f"{k}={v:.6f}" if isinstance(v, float) else f"{k}={v}" 
-                                           for k, v in sorted(config_params.items())])
-                    current_run = ((mosoa_run_total[0] - 1) % mosoa_runs_per_iter) + 1
-                    iter_info = f" [MoSOA Iter {mosoa_iter[0]}/{mosoa_max_iter} | Run {current_run}/{mosoa_runs_per_iter}]"
-                    print(f"  Config: {config_str}{iter_info}")
-                    print()  # Space before epochs
-                    
-                    # Train the model 
                     trainer.train(train_loader, val_loader, model_name=model_name, num_buses=num_buses, config_params=config_params)
-                    
-                    print()  # Space after epochs (before next config)
+                    print()
 
-                    # Get training history with validation total loss (includes physics)
                     training_history = trainer.get_training_history()
                     
-                    # For physics-informed models: Use the TOTAL LOSS (MSE + Physics + Safety)
-                    # For non-physics models: Use MSE only
                     if is_physics_informed and 'val_total_loss' in training_history:
-                        # Use the final validation total loss (last epoch)
-                        # This includes MSE + weighted physics + weighted safety with Kendall balancing
-                        final_val_loss = training_history['val_total_loss'][-1]
-                        final_val_loss = final_val_loss.item() if hasattr(final_val_loss, 'item') else float(final_val_loss)
-                        
-                        val_metrics = {
-                            'total_loss': float(final_val_loss),
-                            'mse': float(training_history['val_mse'][-1])
-                        }
+                        val_metrics = {'total_loss': float(training_history['val_total_loss'][-1]), 'mse': float(training_history['val_mse'][-1])}
                     else:
-                        # Non-physics: Just use MSE
                         val_metrics = evaluate_performance(model, val_loader, device, run_config, _normalizer, is_sequential, return_denormalized=False)
                     
-                    # Get test metrics for final evaluation (use normalized MSE for consistency)
                     test_metrics = evaluate_performance(model, test_loader, device, run_config, _normalizer, is_sequential, return_denormalized=False)
-
-                    # Calculate objective score for MoSOA optimization
                     total_loss = calculate_objective_score(val_metrics, run_config, is_physics_informed)
 
-                    # Store the training history with the results
-                    # Only store model state if it's not too large (to prevent memory issues)
+                    # Store results
                     model_state = None
                     try:
-                        model_state = model.state_dict()
-                        # Check if model state is too large (> 100MB)
-                        state_size = sum(p.numel() * p.element_size() for p in model_state.values())
-                        if state_size > 100 * 1024 * 1024:  # 100MB
-                            print(f"  Model state too large ({state_size / 1024**2:.1f} MB), not storing for memory efficiency")
-                            model_state = None
-                    except Exception as e:
-                        print(f"  Could not save model state: {e}")
-                        model_state = None
-                    
-                    # Extract final physics_loss and safety_loss from training history
-                    training_history = trainer.get_training_history()
-                    final_physics_loss = training_history['val_physics_loss'][-1]
-                    final_safety_loss = training_history['val_safety_loss'][-1]
+                        state_size = sum(p.numel() * p.element_size() for p in model.parameters())
+                        if state_size <= 100 * 1024 * 1024: model_state = model.state_dict()
+                        else: print(f"  Model state too large ({state_size / 1024**2:.1f} MB), skipping save")
+                    except Exception as e: print(f"  Could not save model state: {e}")
                     
                     run_results = {
-                        'run_name': run_name, 
-                        'model_name': model_name, 
-                        **params, 
-                        **test_metrics,  # Final test performance for reporting
-                        'val_metrics': val_metrics,  # Validation metrics used for optimization
-                        'total_loss': total_loss,  # Based on validation metrics
-                        'training_mse': val_metrics['mse'],
-                        'physics_loss': final_physics_loss,  # Final validation physics loss
-                        'safety_loss': final_safety_loss,  # Final validation safety loss
-                        'training_history': training_history,
-                        'model_state': model_state,  # May be None for large models
-                        'model_config': run_config  
+                        'run_name': run_name, 'model_name': model_name, **params, **test_metrics,
+                        'val_metrics': val_metrics, 'total_loss': total_loss, 'training_mse': val_metrics['mse'],
+                        'physics_loss': training_history['val_physics_loss'][-1], 'safety_loss': training_history['val_safety_loss'][-1],
+                        'training_history': training_history, 'model_state': model_state, 'model_config': run_config  
                     }
                     model_specific_results.append(run_results)
-
                     return total_loss
                     
                 except KeyboardInterrupt:
@@ -925,14 +732,11 @@ def main():
                 traceback.print_exc()
             
             # Calculate final test performance metric for comparison
-            # FIX: Always use MOOPF Score for comparison to ensure fair ranking between Physics and Non-Physics models
-            # This penalizes non-physics models for physical violations, which is the correct scientific comparison.
+            # Use MOOPF Score for comparison to ensure fair ranking
             if moopf_results:
-                # Use MOOPF score for ALL models
                 final_test_score = moopf_results.get('moopf_score', best_run.get('mse', 0.0))
                 final_metric_name = "MOOPF Score"
             else:
-                # Fallback if MOOPF failed (shouldn't happen now)
                 final_test_score = best_run.get('mse', best_run.get('test_score', 0.0))
                 final_metric_name = "Test MSE"
             
@@ -1086,55 +890,24 @@ def main():
         # Clean up data between bus systems
         cleanup_bus_system_data()
     
-    # Print comprehensive final summary
-    print_comprehensive_summary(all_results, base_config)
-    
-    # Finalize the run with summary
+    # Final summary
     if all_results:
-        successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]
-        
-        # Find the actual best model by sorting by final_test_score (lower is better)
-        if successful_results:
-            best_result = min(successful_results, key=lambda x: x['final_test_score'])
-            best_model_name = f"{best_result['model_name']} ({best_result['num_buses']}-bus)"
-            best_score_val = best_result['final_test_score']
-        else:
-            best_model_name = 'None'
-            best_score_val = float('inf')
-        
-        run_summary = {
-            'models_tested': [r['model_name'] for r in all_results],
-            'total_models': len(all_results),
-            'successful_models': len(successful_results),
-            'test_config': test_config,
-            'best_model': best_model_name,
-            'best_score': best_score_val,
-            'bus_systems_tested': list(set(r['num_buses'] for r in all_results))
-        }
-        
-        base_config.finalize_run(run_summary)
+        successful = [r for r in all_results if r['final_test_score'] != float('inf')]
+        best = min(successful, key=lambda x: x['final_test_score']) if successful else None
+        base_config.finalize_run({
+            'models_tested': [r['model_name'] for r in all_results], 'total': len(all_results), 'success': len(successful),
+            'test_config': test_config, 'best_model': f"{best['model_name']} ({best['num_buses']}b)" if best else 'None',
+            'best_score': best['final_test_score'] if best else float('inf'), 'buses': list(set(r['num_buses'] for r in all_results))
+        })
     else:
-        test_config = getattr(base_config, 'test_config', 'all')
-        base_config.finalize_run({'status': 'no_results', 'test_config': test_config})
-
+        base_config.finalize_run({'status': 'no_results', 'test_config': getattr(base_config, 'test_config', 'all')})
 
 if __name__ == '__main__':
-    # Set up signal handlers for clean exit (use flag-based approach)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nTraining interrupted by user")
-    except Exception as e:
-        print(f"\nTraining failed with error: {e}")
-        import traceback
-        traceback.print_exc()
+    signal.signal(signal.SIGINT, signal_handler); signal.signal(signal.SIGTERM, signal_handler)
+    try: main()
+    except KeyboardInterrupt: print("\nTraining interrupted by user")
+    except Exception as e: print(f"\nTraining failed with error: {e}"); import traceback; traceback.print_exc()
     finally:
-        gc.collect()  # OK at final exit
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()  # OK at final exit
-        print("\nTraining script completed\n")
-        close_logger() # Close forensic logger
-        sys.exit(0)
+        gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+        print("\nTraining script completed\n"); sys.exit(0)

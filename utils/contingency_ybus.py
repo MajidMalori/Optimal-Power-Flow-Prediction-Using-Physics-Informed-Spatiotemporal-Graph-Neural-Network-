@@ -230,12 +230,16 @@ def normalize_adjacency(adj: torch.Tensor) -> torch.Tensor:
     degree_inv_sqrt = torch.clamp(degree_inv_sqrt, min=0.0, max=1e10)
     
     # Create diagonal matrix from vector
-    degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
+    # degree_matrix_inv_sqrt = torch.diag_embed(degree_inv_sqrt)  # [batch_size, num_nodes, num_nodes]
     
     # 4. Symmetric normalization: D^(-0.5) * A_hat * D^(-0.5)
-    # Use bmm (batch matrix multiplication)
-    # (D * A) * D
-    adj_norm = torch.bmm(torch.bmm(degree_matrix_inv_sqrt, adj_hat), degree_matrix_inv_sqrt)
+    # OPTIMIZED: Use broadcasting instead of matrix multiplication
+    # D^(-0.5) * A * D^(-0.5) is equivalent to element-wise multiplication: A_ij * d_i * d_j
+    # shape: [batch, nodes, 1] * [batch, nodes, nodes] * [batch, 1, nodes]
+    degree_inv_sqrt_col = degree_inv_sqrt.unsqueeze(2) # [batch, nodes, 1]
+    degree_inv_sqrt_row = degree_inv_sqrt.unsqueeze(1) # [batch, 1, nodes]
+    
+    adj_norm = adj_hat * degree_inv_sqrt_col * degree_inv_sqrt_row
     
     # Return in original shape
     if was_unbatched:

@@ -36,25 +36,11 @@ class GCN(BaseModel):
         from .physics_layer import PhysicsInformedOutput
         self.output_layer = PhysicsInformedOutput(hidden_dim, output_features_per_bus)
         
-        self.forensic_logger = None
-        self.forward_count = 0
-
-    def set_logger(self, logger):
-        self.forensic_logger = logger
-
     def forward(self, x: torch.Tensor, adj: torch.Tensor, bus_types: Optional[torch.Tensor] = None):
         if adj.dim() == 2:
             batch_size = x.shape[0]
             adj = adj.unsqueeze(0).expand(batch_size, -1, -1)
         
-        self.forward_count += 1
-        if self.forensic_logger and self.forensic_logger.log_interval > 0 and self.forward_count % self.forensic_logger.log_interval == 1:
-            self.forensic_logger.log_model_forward(
-                "GCN_INPUT",
-                {'features': x, 'adjacency': adj},
-                None
-            )
-
         # Standard GCN needs to normalize adjacency internally if not pre-normalized
         # In Suspect #2 fix, we disabled pre-normalization in loader.
         # So we need to normalize here.
