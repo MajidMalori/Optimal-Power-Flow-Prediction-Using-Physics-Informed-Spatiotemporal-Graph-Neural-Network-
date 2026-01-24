@@ -54,7 +54,6 @@ physics:
 
 data:
   hours_per_day: 24
-  sequence_length: 10
   contingency_rate: 0.05
   pmu_coverage: 0.3
 

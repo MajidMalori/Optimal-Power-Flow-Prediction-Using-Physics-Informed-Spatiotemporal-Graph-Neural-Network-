@@ -214,7 +214,11 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
                     if valid_r:
                         success, method, flags = True, 'relaxed_contingency', flags_r
                         convergence_stats['resolution_methods']['relaxed_contingency'] += 1
-                except: pass
+                except pp.LoadflowNotConverged:
+                    # Expected failure mode for relaxed contingency; just continue to restoration
+                    pass
+                except Exception as e:
+                     print(f"Warning: Unexpected error in relaxed contingency: {e}")
                 
                 if not success: # Restore line
                     restore_contingency(net, dropped_line_idx)
@@ -423,8 +427,7 @@ if __name__ == "__main__":
         print("Cleaning up old data files...")
         for c in cases:
             for f in glob.glob(os.path.join(out_path, f"{c.replace('bw', '')}_*")):
-                try: os.remove(f)
-                except: pass
+                if os.path.exists(f): os.remove(f)
             
     # Always cleanup old files for the specific cases being generated
     # main.py is the explicit generator script, so running it implies "generate new data"
@@ -433,8 +436,7 @@ if __name__ == "__main__":
     # Preserve metadata for parallel execution safety
     for c in cases:
         for f in glob.glob(os.path.join(out_path, f"{c.replace('bw', '')}_*")):
-            try: os.remove(f)
-            except: pass
+            if os.path.exists(f): os.remove(f)
             
     for case in cases:
         try:
