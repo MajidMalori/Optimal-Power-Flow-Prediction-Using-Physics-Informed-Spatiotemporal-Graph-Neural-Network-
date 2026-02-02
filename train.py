@@ -290,7 +290,8 @@ def main():
             # Setup hyperparameter bounds
             param_bounds = setup_hyperparameter_bounds(
                 model_name, model_config, num_buses, 
-                is_physics_informed, is_sequential, uses_adaptive_graph
+                is_physics_informed, is_sequential, uses_adaptive_graph,
+                config_instance=base_config
             )
 
             param_keys = list(param_bounds.keys())
@@ -317,6 +318,14 @@ def main():
                 run_config = copy.deepcopy(base_config)
                 for key, value in params.items(): 
                     setattr(run_config, key.upper(), value)
+                
+                # Update configuration with optimization parameters
+                if 'SEQUENCE_LENGTH' in params:
+                    run_config.SEQUENCE_LENGTH = int(params['SEQUENCE_LENGTH'])
+                    
+                if 'HIDDEN_DIM' in params: run_config.HIDDEN_DIM = int(params['HIDDEN_DIM'])
+                if 'NUM_GC_LAYERS' in params: run_config.NUM_GC_LAYERS = int(params['NUM_GC_LAYERS'])
+                
                 run_config.NUM_BUSES = num_buses
 
                 run_name = generate_run_name(model_name, params, num_buses, is_sequential)
@@ -340,8 +349,9 @@ def main():
                             run_config.BATCH_SIZE = max_safe_batch
                     
                     
+                    # Initialize data loaders with run-specific configuration
                     loaders = create_data_loaders(
-                        _file_metadata, _adjacency, _ybus_metadata, _normalizer, base_config, 
+                        _file_metadata, _adjacency, _ybus_metadata, _normalizer, run_config, 
                         is_static=(not is_sequential), topology_cache=_topology_cache, topology_ids=_topology_ids
                     )
                     train_loader, val_loader, test_loader = loaders

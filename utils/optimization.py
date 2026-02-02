@@ -59,18 +59,18 @@ def mosoa_optimizer(num_agents: int, max_iter: int, lb: np.ndarray, ub: np.ndarr
         
     return best_score, best_pos, curve, details
 
-def setup_hyperparameter_bounds(model_name: str, cfg: Any, nb: int, is_pi: bool, is_seq: bool, use_adapt: bool) -> Dict[str, Tuple[float, float]]:
-    hr = cfg.get_hidden_dim_range(nb)
+def setup_hyperparameter_bounds(model_name: str, cfg: Any, nb: int, is_pi: bool, is_seq: bool, use_adapt: bool, config_instance: Any = None) -> Dict[str, Tuple[float, float]]:
+    hr = cfg.get_hidden_dim_range(nb, config_instance)
     sr, rr = (None, None)
     if is_seq:
         r = cfg.get_sequential_ranges(nb)
         hr, sr, rr = r['hidden_dim'], r['sequence_length'], r['rnn_layers']
     
-    gcr = cfg.get_num_gc_layers_range(nb)
+    gcr = cfg.get_num_gc_layers_range(nb, config_instance)
     bounds = {'HIDDEN_DIM': hr, 'NUM_GC_LAYERS': gcr}
     if is_seq: bounds.update({'SEQUENCE_LENGTH': sr, 'RNN_LAYERS': rr})
     if use_adapt:
-        er = cfg.get_embedding_dim_range(nb)
+        er = cfg.get_embedding_dim_range(nb, config_instance)
         pr = cfg.get_phi_range(nb)
         bounds.update({'EMBEDDING_DIM': er, 'PHI': pr})
     return bounds

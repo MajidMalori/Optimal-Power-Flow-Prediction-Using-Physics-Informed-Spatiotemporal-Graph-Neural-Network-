@@ -532,7 +532,13 @@ def _collate_sequential_padded(batch):
 
 def create_data_loaders(file_metadata, adjacency, ybus_metadata, normalizer, config, is_static, 
                         topology_cache=None, topology_ids=None):
-    seq_len = 1 if is_static else getattr(config, 'SEQUENCE_LENGTH', 1)
+    if not is_static:
+        if not hasattr(config, 'SEQUENCE_LENGTH'):
+             raise AttributeError("SEQUENCE_LENGTH is missing from config but required for sequential models.")
+        seq_len = config.SEQUENCE_LENGTH
+    else:
+        seq_len = 1
+        
     hours_per_day = getattr(config, 'HOURS_PER_DAY', 24)
     
     dataset = PowerSystemLazyDataset(

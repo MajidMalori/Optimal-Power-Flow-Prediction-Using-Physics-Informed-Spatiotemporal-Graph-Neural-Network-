@@ -37,16 +37,19 @@ class Config:
         INPUT_DIM=10; OUTPUT_DIM=10; FEATURE_DIM=10; DROPOUT=0.1
         
         @staticmethod
-        def _get_setting(num_buses, normal, medium, large):
-            cap = getattr(Config, f'CAPACITY_{num_buses}_BUS', 'normal')
+        def _get_setting(num_buses, normal, medium, large, config_instance=None):
+            # Look up setting on the instance if provided, otherwise default to 'normal'
+            cap = 'normal'
+            if config_instance:
+                cap = getattr(config_instance, f'CAPACITY_{num_buses}_BUS', 'normal')
             return {'normal': normal, 'medium': medium, 'large': large}.get(cap, normal)
             
         @classmethod
-        def get_hidden_dim_range(cls, nb): return cls._get_setting(nb, (64, 128), (96, 192), (64, 256))
+        def get_hidden_dim_range(cls, nb, config_instance=None): return cls._get_setting(nb, (64, 128), (96, 192), (64, 256), config_instance)
         @classmethod
-        def get_num_gc_layers_range(cls, nb): return cls._get_setting(nb, (1, 2), (2, 3), (2, 3))
+        def get_num_gc_layers_range(cls, nb, config_instance=None): return cls._get_setting(nb, (1, 2), (2, 3), (2, 3), config_instance)
         @classmethod
-        def get_embedding_dim_range(cls, nb): return cls._get_setting(nb, (64, 150), (100, 200), (100, 300))
+        def get_embedding_dim_range(cls, nb, config_instance=None): return cls._get_setting(nb, (64, 150), (100, 200), (100, 300), config_instance)
         
         @classmethod
         def get_phi_range(cls, nb): return (0.0, 1.0)
@@ -169,12 +172,28 @@ class Config:
         }
         for k, v in flat.items():
             if v is None: continue
-            if isinstance(v, str) and '.' not in v and 'e' not in v.lower() and v.replace('-','').isdigit(): v = int(v)
-            elif isinstance(v, str) and v.replace('.','',1).replace('-','').isdigit(): v = float(v)
+            
+            # Robust number parsing handling scientific notation (e.g., 1e-4)
+            if isinstance(v, str):
+                try:
+                    f_val = float(v)
+                    if f_val.is_integer() and '.' not in v and 'e' not in v.lower():
+                        v = int(v)
+                    else:
+                        v = f_val
+                except ValueError:
+                    pass
+
             attr = key_map.get(k, k.upper().replace('-', '_'))
-            target = Config if hasattr(Config, attr) else self
+            
+            # Set attributes on the instance (self), not the class (Config)
+            # This prevents global state pollution and race conditions in parallel runs
+            target = self
             setattr(target, attr, v)
-            if 'model_capacity_bus_' in k: setattr(Config, f'CAPACITY_{k.split("_")[-1]}_BUS', v)
+            
+            # Store capacity settings on instance as well
+            if 'model_capacity_bus_' in k: 
+                setattr(self, f'CAPACITY_{k.split("_")[-1]}_BUS', v)
             
         if hasattr(self, 'CASE_NAME') and self.CASE_NAME and 'system_limits' in yml:
             lim = yml['system_limits'].get(self.CASE_NAME.lower(), {})

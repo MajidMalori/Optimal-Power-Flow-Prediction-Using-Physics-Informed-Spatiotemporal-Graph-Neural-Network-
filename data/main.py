@@ -35,7 +35,6 @@ from data.validation import (
     SuppressPrints, validate_power_flow_inputs, validate_power_flow_outputs,
     apply_curtailment_with_retry, hard_reset_system, trip_renewable_generators
 )
-from utils.contingency_ybus import DataGenerationError
 from config import Config
 
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -426,7 +425,6 @@ if __name__ == "__main__":
                 try: os.remove(f)
                 except: pass
             
-    # Always cleanup old files for the specific cases being generated
     # main.py is the explicit generator script, so running it implies "generate new data"
     print(f"Cleaning old data files for: {', '.join(cases)}...")
     
