@@ -192,8 +192,10 @@ def main():
     print(f"\n[Seed] {seed}")
     torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
     torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
-    try: torch.use_deterministic_algorithms(True, warn_only=True)
-    except AttributeError: pass
+    
+    # Check if deterministic algorithms are available (PyTorch > 1.7)
+    if hasattr(torch, 'use_deterministic_algorithms'):
+        torch.use_deterministic_algorithms(True, warn_only=True)
     
     # Device setup
     device, _ = get_device()
@@ -322,6 +324,9 @@ def main():
                 # Update configuration with optimization parameters
                 if 'SEQUENCE_LENGTH' in params:
                     run_config.SEQUENCE_LENGTH = int(params['SEQUENCE_LENGTH'])
+                elif is_sequential:
+                    raise ValueError(f"Optimizer failed to provide SEQUENCE_LENGTH for sequential model {model_name}. "
+                                     f"Check hyperparameter bounds configuration.")
                     
                 if 'HIDDEN_DIM' in params: run_config.HIDDEN_DIM = int(params['HIDDEN_DIM'])
                 if 'NUM_GC_LAYERS' in params: run_config.NUM_GC_LAYERS = int(params['NUM_GC_LAYERS'])

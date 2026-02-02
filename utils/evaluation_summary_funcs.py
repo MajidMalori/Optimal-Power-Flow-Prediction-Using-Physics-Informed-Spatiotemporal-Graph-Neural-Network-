@@ -129,12 +129,9 @@ def print_comprehensive_summary(all_results: List[Dict[str, Any]], config: Any =
     
     # Save to CSV
     if config and hasattr(config, 'CURRENT_RUN_DIR'):
-        try:
-            csv_path = os.path.join(config.CURRENT_RUN_DIR, "comprehensive_summary.csv")
-            pd.DataFrame(summary_data).to_csv(csv_path, index=False)
-            print(f"\n [INFO] Comprehensive summary saved to: {csv_path}")
-        except Exception as e:
-            print(f"\n [WARNING] Failed to save comprehensive summary CSV: {e}")
+        csv_path = os.path.join(config.CURRENT_RUN_DIR, "comprehensive_summary.csv")
+        pd.DataFrame(summary_data).to_csv(csv_path, index=False)
+        print(f"\n [INFO] Comprehensive summary saved to: {csv_path}")
     
     # Find best performers
     successful_results = [r for r in all_results if r['final_test_score'] != float('inf')]

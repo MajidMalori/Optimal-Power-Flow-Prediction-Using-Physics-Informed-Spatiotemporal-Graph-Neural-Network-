@@ -107,7 +107,7 @@ class Config:
     @property
     def model_config_map(self): return {'GCN': self.GCNConfig, 'adaptiveGCN': self.adaptiveGCNConfig, 'AdaptivePIGCN': self.AdaptivePIGCNConfig, 'PIGCLSTM': self.PIGCLSTMConfig, 'PIGCGRU': self.PIGCGRUConfig, 'ResnetPIGCGRU': self.ResnetPIGCGRUConfig, 'ResnetPIGCLSTM': self.ResnetPIGCLSTMConfig}
 
-    def __init__(self, data_mode='train', train_timesteps=None, test_timesteps=None, clear_results=False, hours_per_day=24, sequence_length=5, yaml_config_path=None, load_yaml=True, cli_args=None):
+    def __init__(self, data_mode='train', train_timesteps=None, test_timesteps=None, clear_results=False, hours_per_day=24, sequence_length=None, yaml_config_path=None, load_yaml=True, cli_args=None):
         if not load_yaml: raise ValueError("load_yaml=False not allowed.")
         yaml_path = yaml_config_path or (cli_args.config if cli_args else 'config.yaml')
         yaml_full_path = yaml_path if os.path.isabs(yaml_path) else os.path.join(self.ROOT_DIR, yaml_path)
@@ -123,7 +123,7 @@ class Config:
             if cli_args.timesteps: train_timesteps = test_timesteps = cli_args.timesteps
             if cli_args.mode: data_mode = cli_args.mode
             if cli_args.clear_results is not None: clear_results = cli_args.clear_results
-
+            
         if hasattr(Config, 'clear_results'): clear_results = Config.clear_results
         # Check instance attribute (from YAML) if not found on class
         if hasattr(self, 'clear_results'): clear_results = self.clear_results
@@ -132,7 +132,15 @@ class Config:
         
         self.DATA_MODE_TIMESTEPS = {'train': train_timesteps or getattr(self, 'train_timesteps'), 'test': test_timesteps or getattr(self, 'test_timesteps')}
         self.DATA_MODE = data_mode
-        self.HOURS_PER_DAY = hours_per_day; self.SEQUENCE_LENGTH = sequence_length
+        self.HOURS_PER_DAY = hours_per_day
+        
+        # Only set SEQUENCE_LENGTH if explicitly provided or found in YAML (via _merge_yaml)
+        # NO FALLBACK allowed here.
+        if sequence_length is not None:
+            self.SEQUENCE_LENGTH = sequence_length
+        # If it wasn't in YAML and wasn't in args, it remains unset.
+        # Accessing it later will raise AttributeError, satisfying "fail fast".
+        
         self.DATA_DIR = os.path.join(self.ROOT_DIR, 'data', data_mode)
         
         # Determine debug settings
@@ -244,10 +252,9 @@ class Config:
     
     def _update_latest_run_link(self):
         os.makedirs(self.EXPERIMENTAL_RESULTS_DIR, exist_ok=True)
-        try:
-            with open(os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run_info.txt'), 'w') as f:
-                f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\nDirectory: {self.CURRENT_RUN_DIR}\nStarted: {datetime.now()}")
-        except Exception as e: print(f"Warning: Could not create latest_run_info.txt: {e}")
+        # Rule #2: No silent warning. If we can't write metadata, it's a permission/disk error.
+        with open(os.path.join(self.EXPERIMENTAL_RESULTS_DIR, 'latest_run_info.txt'), 'w') as f:
+            f.write(f"Latest run: run_{self._CURRENT_RUN_TIMESTAMP}\nDirectory: {self.CURRENT_RUN_DIR}\nStarted: {datetime.now()}")
 
     def _create_run_metadata(self):
         meta = {'run_id': f'run_{self._CURRENT_RUN_TIMESTAMP}', 'start_time': datetime.now().isoformat(), 'config': {'device': self.DEVICE, 'num_buses': getattr(self, 'NUM_BUSES', 'auto')}}
