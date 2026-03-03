@@ -1,9 +1,12 @@
+import os
+import sys
+
 import numpy as np
 import pandapower as pp
-import sys
-import os
 from data.profiles import calculate_renewable_reactive_power
 from data.topology import restore_contingency
+from constants import MAX_SLACK_MULTIPLIER, MAX_SLACK_WARNING_MULTIPLIER, MAX_LINE_LOADING_PERCENT, WARNING_LINE_LOADING_PERCENT
+
 
 class SuppressPrints:
     def __enter__(self):
@@ -16,10 +19,11 @@ class SuppressPrints:
         self._devnull.close()
 
 def validate_power_flow_inputs(net: pp.pandapowerNet) -> tuple[bool, str]:
+    from constants import GENERATOR_CAPACITY_MARGIN, INVERTER_CAPACITY_MARGIN, NEGATIVE_LOAD_CUTOFF
     if not net.gen.empty:
         gen_p, gen_max = net.gen.p_mw.values, net.gen.max_p_mw.values
-        if np.any(gen_p > gen_max * 1.01):
-            idx = np.where(gen_p > gen_max * 1.01)[0][0]
+        if np.any(gen_p > gen_max * GENERATOR_CAPACITY_MARGIN):
+            idx = np.where(gen_p > gen_max * GENERATOR_CAPACITY_MARGIN)[0][0]
             return False, f"Generator capacity violation at gen {idx}"
     
     if not net.sgen.empty and 'sn_mva' in net.sgen.columns:
@@ -28,10 +32,10 @@ def validate_power_flow_inputs(net: pp.pandapowerNet) -> tuple[bool, str]:
         valid = sgen_s_rated > 0
         if np.any(valid):
             sgen_s = np.sqrt(sgen_p[valid]**2 + sgen_q[valid]**2)
-            if np.any(sgen_s > sgen_s_rated[valid] * 1.01):
+            if np.any(sgen_s > sgen_s_rated[valid] * INVERTER_CAPACITY_MARGIN):
                 return False, "Inverter capability violation"
     
-    if not net.load.empty and np.any(net.load.p_mw.values < -1e-6):
+    if not net.load.empty and np.any(net.load.p_mw.values < NEGATIVE_LOAD_CUTOFF):
         return False, "Negative load detected"
     
     return True, "Input validation passed"
@@ -42,7 +46,7 @@ from constants import (
     SYSTEM_PHYSICS
 )
 
-def validate_power_flow_outputs(net: pp.pandapowerNet, convergence_stats: dict, case_name: str = None, config: dict = None) -> tuple[bool, str, dict]:
+def validate_power_flow_outputs(net: pp.pandapowerNet, _convergence_stats: dict, case_name: str = None, _config: dict = None) -> tuple[bool, str, dict]:
     flags = {k: False for k in ['voltage_violation', 'angle_violation', 'line_loading_violation', 
                                 'slack_power_violation', 'generator_capacity_violation', 'inverter_capability_violation']}
     
@@ -68,20 +72,20 @@ def validate_power_flow_outputs(net: pp.pandapowerNet, convergence_stats: dict, 
     if not net.res_ext_grid.empty:
         slack_p = net.res_ext_grid.p_mw.values
         max_load = net.load.p_mw.sum() if not net.load.empty else 0
-        limit = 5 * max_load if max_load > 0 else 10000
+        limit = MAX_SLACK_MULTIPLIER * max_load if max_load > 0 else 10000
         if np.any(np.abs(slack_p) > limit): return False, "Slack power unrealistic (garbage)", flags
-        if np.any(np.abs(slack_p) > 2 * max_load): flags['slack_power_violation'] = True
+        if np.any(np.abs(slack_p) > MAX_SLACK_WARNING_MULTIPLIER * max_load): flags['slack_power_violation'] = True
     
     if not net.res_line.empty:
         loading = net.res_line.loading_percent.values
-        if np.any(loading > 1000): return False, "Line loading > 1000% (garbage)", flags
-        if np.any(loading > 100): flags['line_loading_violation'] = True
+        if np.any(loading > MAX_LINE_LOADING_PERCENT): return False, f"Line loading > {MAX_LINE_LOADING_PERCENT}% (garbage)", flags
+        if np.any(loading > WARNING_LINE_LOADING_PERCENT): flags['line_loading_violation'] = True
         
     return True, "Valid", flags
 
 def apply_curtailment_with_retry(net: pp.pandapowerNet, base_renewable_p_mw: dict, 
                                   max_attempts: int = 10, convergence_stats: dict = None,
-                                  has_contingency: bool = False, case_name: str = None, config: dict = None) -> tuple[bool, float, dict]:
+                                  _has_contingency: bool = False, case_name: str = None, config: dict = None) -> tuple[bool, float, dict]:
     scaling = 1.0
     for attempt in range(max_attempts):
         if attempt > 0:

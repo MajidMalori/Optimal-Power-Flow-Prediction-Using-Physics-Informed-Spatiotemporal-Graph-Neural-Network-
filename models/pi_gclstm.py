@@ -1,7 +1,6 @@
 import torch
-import torch.nn as nn
+from torch import nn
 from torch_geometric.nn import GCNConv
-from .layers import PhysicsInformedLoss
 
 class PIGCLSTM(nn.Module):
     """
@@ -24,7 +23,7 @@ class PIGCLSTM(nn.Module):
         self.lstm = nn.LSTM(input_size=gcn_hidden, hidden_size=lstm_hidden, batch_first=True)
         
         self.output_layer = nn.Linear(lstm_hidden, out_channels)
-        self.physics_constraint = PhysicsInformedLoss(weight=physics_weight)
+
 
     def forward(self, x_seq, dynamic_edge_idx_seq, p_inj_final, q_inj_final, y_bus_final):
         """
@@ -48,7 +47,7 @@ class PIGCLSTM(nn.Module):
         spatial_seq = torch.stack(spatial_embeddings, dim=1)
         
         # 2. Process Temporal dimension
-        lstm_out, (hn, cn) = self.lstm(spatial_seq)
+        lstm_out, _ = self.lstm(spatial_seq)
         
         # Take the last hidden state output for prediction
         last_out = lstm_out[:, -1, :] # [batch*nodes, lstm_hidden]
@@ -58,10 +57,4 @@ class PIGCLSTM(nn.Module):
         # Reshape back to [batch, nodes, out_channels]
         preds = preds.reshape(batch_size, num_nodes, -1)
         
-        # Calculate Physics Loss Penalty on the final predicted timestep
-        pred_v = preds[:, :, 0]
-        pred_theta = preds[:, :, 1]
-        
-        physics_loss = self.physics_constraint(pred_v, pred_theta, p_inj_final, q_inj_final, y_bus_final)
-        
-        return preds, physics_loss
+        return preds

@@ -9,6 +9,10 @@ class TargetIndices:
     P_LOAD=0; Q_LOAD=1; P_EXT_GRID=2; Q_EXT_GRID=3; P_CONV=4; Q_CONV=5; P_REN=6; Q_REN=7; VM=8; VA=9
     NUM_TARGETS = 10
 
+class PredictionIndices:
+    VM = 0
+    VA = 1
+
 # --- Training / Split Constants ---
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
@@ -17,6 +21,16 @@ TEST_RATIO = 0.15
 # --- Physical & Validation Constants ---
 V_GARBAGE_LOW = 0.5
 V_GARBAGE_HIGH = 1.5
+# Validation Margin Constants
+GENERATOR_CAPACITY_MARGIN = 1.01
+INVERTER_CAPACITY_MARGIN = 1.01
+NEGATIVE_LOAD_CUTOFF = -1e-6
+MAX_SLACK_MULTIPLIER = 5.0
+MAX_SLACK_WARNING_MULTIPLIER = 2.0
+MAX_LINE_LOADING_PERCENT = 1000
+WARNING_LINE_LOADING_PERCENT = 100
+
+# Physical Bounds Constants
 ANGLE_GARBAGE_THRESHOLD = 1.57079632679  # pi/2 (90 deg)
 ANGLE_WARNING_THRESHOLD = 0.78539816339  # 45 deg
 

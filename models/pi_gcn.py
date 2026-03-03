@@ -1,7 +1,6 @@
-import torch
-import torch.nn as nn
+from torch import nn
 from torch_geometric.nn import GCNConv
-from .layers import PhysicsInformedLoss
+
 
 class PIGCN(nn.Module):
     """
@@ -22,7 +21,7 @@ class PIGCN(nn.Module):
         self.relu = nn.ReLU()
         
         # Instantiate the Physics Loss constraint block
-        self.physics_constraint = PhysicsInformedLoss(weight=physics_weight)
+
 
     def forward(self, x, dynamic_edge_index, p_inj, q_inj, y_bus):
         """
@@ -34,12 +33,4 @@ class PIGCN(nn.Module):
             
         preds = self.output_layer(out)
         
-        # Assuming preds output contains [voltage_magnitude, voltage_angle] predictions
-        # Note: the exact indices for `pred_v` and `pred_theta` depend on training config targets
-        pred_v = preds[:, 0]
-        pred_theta = preds[:, 1]
-        
-        # Calculate Physics Loss Penalty
-        physics_loss = self.physics_constraint(pred_v, pred_theta, p_inj, q_inj, y_bus)
-        
-        return preds, physics_loss
+        return preds

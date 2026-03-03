@@ -1,5 +1,5 @@
 # Python project Makefile
-.PHONY: test test-fast test-physics test-models clean
+.PHONY: test test-fast test-physics test-models clean pylint
 
 # The default Python interpreter to use
 PYTHON = python
@@ -23,6 +23,38 @@ test-models:
 # Runs only the data preprocessing tests
 test-preprocessing:
 	pytest tests/test_preprocessing.py
+
+# Runs pylint on all Python files (full check)
+pylint:
+	pylint data/*.py models/*.py tests/*.py
+
+# Categorized Linting
+lint-imports:
+	pylint --disable=all --enable=imports,wrong-import-order,unused-import,reimported,cyclic-import data/*.py models/*.py tests/*.py
+
+lint-unused:
+	pylint --disable=all --enable=unused-variable,unused-argument,unused-import,unused-wildcard-import data/*.py models/*.py tests/*.py
+
+lint-duplication:
+	pylint --disable=all --enable=duplicate-code data/*.py models/*.py tests/*.py
+
+lint-naming:
+	pylint --disable=all --enable=invalid-name,blacklisted-name data/*.py models/*.py tests/*.py
+
+lint-complexity:
+	pylint --disable=all --enable=too-many-branches,too-many-statements,too-many-locals,too-many-arguments data/*.py models/*.py tests/*.py
+
+# Generate 120 timestep data for all cases
+main120:
+	python data/main.py --case all --timestep 120
+
+# Generate 96 timestep data for case 33:
+mainTest:
+	python data/main.py --case 33 --timestep 96
+
+# Preprocess data for case 33:
+preTest:
+	python data/preprocess_data.py --case 33
 
 # Clean up temporary Python files and cache
 clean:

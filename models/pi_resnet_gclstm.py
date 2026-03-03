@@ -1,6 +1,6 @@
 import torch
-import torch.nn as nn
-from .layers import ResidualGCNBlock, PhysicsInformedLoss
+from torch import nn
+from .layers import ResidualGCNBlock
 
 class PIResnetGCLSTM(nn.Module):
     """
@@ -18,7 +18,7 @@ class PIResnetGCLSTM(nn.Module):
             
         self.lstm = nn.LSTM(input_size=gcn_hidden, hidden_size=lstm_hidden, batch_first=True)
         self.output_layer = nn.Linear(lstm_hidden, out_channels)
-        self.physics_constraint = PhysicsInformedLoss(weight=physics_weight)
+
 
     def forward(self, x_seq, dynamic_edge_idx_seq, p_inj_final, q_inj_final, y_bus_final):
         batch_size, seq_len, num_nodes, num_features = x_seq.shape
@@ -35,16 +35,11 @@ class PIResnetGCLSTM(nn.Module):
             spatial_embeddings.append(out_t)
             
         spatial_seq = torch.stack(spatial_embeddings, dim=1)
-        lstm_out, (hn, cn) = self.lstm(spatial_seq)
+        lstm_out, _ = self.lstm(spatial_seq)
         
         last_out = lstm_out[:, -1, :] 
         preds = self.output_layer(last_out) 
         
         preds = preds.reshape(batch_size, num_nodes, -1)
         
-        pred_v = preds[:, :, 0]
-        pred_theta = preds[:, :, 1]
-        
-        physics_loss = self.physics_constraint(pred_v, pred_theta, p_inj_final, q_inj_final, y_bus_final)
-        
-        return preds, physics_loss
+        return preds

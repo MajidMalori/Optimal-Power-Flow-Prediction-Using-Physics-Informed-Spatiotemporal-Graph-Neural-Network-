@@ -1,6 +1,8 @@
+# pylint: disable=duplicate-code
+import json
 import os
 import sys
-import json
+
 import pytest
 import torch
 
@@ -9,7 +11,7 @@ parent_dir = os.path.dirname(script_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from constants import (
+from constants import (  # pylint: disable=wrong-import-position
     FeatureIndices, TargetIndices, 
     TRAIN_RATIO, VAL_RATIO, TEST_RATIO
 )
@@ -68,8 +70,8 @@ def test_per_unit_voltage_range(case_path, case_name):
     path = case_path
     name = case_name
     feats = torch.load(os.path.join(path, 'train_features.pt'), weights_only=True)
-    # VM_PU index = 8, should be ~0.9-1.1 p.u.
-    vm = feats[:, :, 8]
+    # VM index, should be ~0.9-1.1 p.u.
+    vm = feats[:, :, FeatureIndices.VM]
     valid_vm = vm[vm > 0.1]  # exclude unobserved (0.0)
     if valid_vm.numel() > 0:
         assert valid_vm.min() > 0.7, f"{name} voltage too low: {valid_vm.min():.3f}"

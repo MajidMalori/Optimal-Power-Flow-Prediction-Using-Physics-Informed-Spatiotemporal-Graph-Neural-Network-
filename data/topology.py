@@ -1,11 +1,13 @@
+import warnings
+
+import networkx as nx
 import numpy as np
 import pandas as pd
-import warnings
 import pandapower as pp
 import pandapower.networks as pn
 import pandapower.topology as top
-import networkx as nx
-from constants import FeatureIndices
+from constants import TargetIndices
+
 
 def load_network(case_name: str) -> pp.pandapowerNet:
     with warnings.catch_warnings():
@@ -15,7 +17,7 @@ def load_network(case_name: str) -> pp.pandapowerNet:
         if case_name == "case118": return pn.case118()
     raise ValueError(f"Unknown test case: {case_name}")
 
-def configure_renewables(net: pp.pandapowerNet, renewable_fraction_for_run: float, config: dict) -> pp.pandapowerNet:
+def configure_renewables(net: pp.pandapowerNet, renewable_fraction_for_run: float, _config: dict = None) -> pp.pandapowerNet:
     num_buses = len(net.bus)
     num_renewables = int(num_buses * renewable_fraction_for_run)
     slack_buses = set(net.ext_grid.bus)
@@ -56,12 +58,13 @@ def calculate_ybus_from_net(net: pp.pandapowerNet) -> np.ndarray:
     if net._ppc is None or 'internal' not in net._ppc or 'Ybus' not in net._ppc['internal']:
         try:
             pp.runpp(net, algorithm='nr', calculate_voltage_angles=True)
-        except:
+        except Exception: # Catch any exception from runpp
+            # If runpp fails, try to manually create Ybus
             from pandapower.pd2ppc import _pd2ppc
             from pandapower.pf.makeYbus import makeYbus
-            _pd2ppc(net)
-            baseMVA, bus, gen, branch = net._ppc["baseMVA"], net._ppc["bus"], net._ppc["gen"], net._ppc["branch"]
-            Ybus, Yf, Yt = makeYbus(baseMVA, bus, branch)
+            
+            ppc, ppci = _pd2ppc(net)
+            Ybus, _, _ = makeYbus(ppci["baseMVA"], ppci["bus"], ppci["branch"])
             net._ppc['internal']['Ybus'] = Ybus
 
     ppc = net._ppc
@@ -104,7 +107,7 @@ def identify_bus_types(net: pp.pandapowerNet) -> np.ndarray:
     
     return bus_types
 
-def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarray:
+def create_opf_targets(net: pp.pandapowerNet, _bus_types: np.ndarray) -> np.ndarray:
     num_buses = len(net.bus)
     targets = np.zeros((num_buses, 10), dtype=np.float32)
     
@@ -117,15 +120,15 @@ def create_opf_targets(net: pp.pandapowerNet, bus_types: np.ndarray) -> np.ndarr
     sgen_p = net.res_sgen.groupby(net.sgen.bus).p_mw.sum().reindex(net.bus.index, fill_value=0).values
     sgen_q = net.res_sgen.groupby(net.sgen.bus).q_mvar.sum().reindex(net.bus.index, fill_value=0).values
     
-    targets[:, 0] = load_p
-    targets[:, 1] = load_q
-    targets[:, 2] = ext_p
-    targets[:, 3] = ext_q
-    targets[:, 4] = gen_p
-    targets[:, 5] = gen_q
-    targets[:, 6] = sgen_p
-    targets[:, 7] = sgen_q
-    targets[:, 8] = net.res_bus.vm_pu.values
-    targets[:, 9] = np.deg2rad(net.res_bus.va_degree.values)
+    targets[:, TargetIndices.P_LOAD] = load_p
+    targets[:, TargetIndices.Q_LOAD] = load_q
+    targets[:, TargetIndices.P_EXT_GRID] = ext_p
+    targets[:, TargetIndices.Q_EXT_GRID] = ext_q
+    targets[:, TargetIndices.P_CONV] = gen_p
+    targets[:, TargetIndices.Q_CONV] = gen_q
+    targets[:, TargetIndices.P_REN] = sgen_p
+    targets[:, TargetIndices.Q_REN] = sgen_q
+    targets[:, TargetIndices.VM] = net.res_bus.vm_pu.values
+    targets[:, TargetIndices.VA] = np.deg2rad(net.res_bus.va_degree.values)
     
     return targets

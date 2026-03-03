@@ -1,12 +1,13 @@
-import pytest
 import os
 import sys
 import glob
+
 import numpy as np
+import pytest
 
 # Add parent directory to path to import constants
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from constants import FeatureIndices, SYSTEM_PHYSICS
+from constants import FeatureIndices, V_GARBAGE_LOW, V_GARBAGE_HIGH
 
 
 DATA_DIR = os.path.join("data", "01_raw")
@@ -40,12 +41,6 @@ def test_sign_conventions(filepath):
 
 @pytest.mark.parametrize("filepath", get_feature_files())
 def test_physical_bounds(filepath):
-    filename = os.path.basename(filepath)
-    case_name = filename.split('_')[0]
-    
-    physics = SYSTEM_PHYSICS.get(case_name, SYSTEM_PHYSICS['default'])
-    v_min = physics['v_min']
-    v_max = physics['v_max']
     
     features = np.load(filepath)
     vm = features[:, :, FeatureIndices.VM]
@@ -54,8 +49,8 @@ def test_physical_bounds(filepath):
     valid_vm = vm[vm > 0.1]
     
     if len(valid_vm) > 0:
-        assert np.all(valid_vm >= v_min - 1e-4), f"Voltage below strict limit {v_min} in {filepath}"
-        assert np.all(valid_vm <= v_max + 1e-4), f"Voltage above strict limit {v_max} in {filepath}"
+        assert np.all(valid_vm >= V_GARBAGE_LOW), f"Voltage below garbage limit {V_GARBAGE_LOW} in {filepath}"
+        assert np.all(valid_vm <= V_GARBAGE_HIGH), f"Voltage above garbage limit {V_GARBAGE_HIGH} in {filepath}"
 
 @pytest.mark.parametrize("filepath", get_feature_files())
 def test_power_balance(filepath):

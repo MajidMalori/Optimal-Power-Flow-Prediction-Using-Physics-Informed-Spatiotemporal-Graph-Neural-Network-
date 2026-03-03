@@ -7,7 +7,6 @@ time-based train/val/test splits, and saves .pt tensors to 03_processed.
 import os
 import sys
 import json
-import json
 import glob
 import yaml
 import numpy as np
@@ -165,7 +164,7 @@ def preprocess_case(case_name: str, raw_dir: str, processed_dir: str, config: di
         targets = np.load(tf)
         topology_ids = np.load(topf)
 
-        n_samples, n_buses, n_feats = features.shape
+        n_samples, _, n_feats = features.shape
         if n_feats != NUM_FEATURES:
             print(f"  Warning: {ff} has {n_feats} features, but expected {NUM_FEATURES}. Skipping.")
             continue
@@ -240,7 +239,7 @@ def preprocess_case(case_name: str, raw_dir: str, processed_dir: str, config: di
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Preprocess Spatio-Temporal Data")
-    parser.add_argument('--case', type=str, default=None, 
+    parser.add_argument('--case', '--cases', '--buses', type=str, dest='case', default=None, 
                         help="Comma separated list of cases (e.g., '33,57' or 'all')")
     args = parser.parse_args()
 
@@ -248,13 +247,10 @@ if __name__ == "__main__":
     config = load_config()
 
     # Determine cases to process
-    if args.case:
-        if args.case.lower() == 'all':
-            cases = config.get('test_cases', ["case33", "case57", "case118"])
-        else:
-            # Handle '33, 57' or 'case33, case57'
-            cases = [c.strip() if c.strip().startswith('case') else f"case{c.strip()}" 
-                     for c in args.case.split(',')]
+    if args.case and args.case.lower() != 'all':
+        # Handle '33, 57' or 'case33, case57'
+        cases = [c.strip() if c.strip().startswith('case') else f"case{c.strip()}" 
+                 for c in args.case.split(',')]
     else:
         cases = config.get('test_cases', ["case33", "case57", "case118"])
 

@@ -1,5 +1,4 @@
 import numpy as np
-import warnings
 import pandapower as pp
 from constants import HOURLY_LOAD_PATTERN
 try:
@@ -9,10 +8,10 @@ except ImportError:
         """Fallback exception if utils is missing."""
         pass
 
-def get_daily_load_profile(hour: int, season: str = 'summer') -> float:
+def get_daily_load_profile(hour: int, _season: str = 'summer') -> float:
     return HOURLY_LOAD_PATTERN.get(hour, 0.5) * np.random.uniform(0.95, 1.05)
 
-def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_state: str = None) -> float:
+def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_state: str = None, config: dict = None) -> float:
     if hour < 5 or hour > 19: return 0.0
     
     hour_from_noon = abs(hour - 12)
@@ -23,8 +22,8 @@ def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_stat
     season_factor = 0.85 + 0.15 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
     
     if weather_state is None:
-        weather_state = np.random.choice(['clear', 'partly_cloudy', 'cloudy', 'storm'], 
-                                        p=[0.3, 0.4, 0.25, 0.05])
+        p = config.get('solar_weather_weights', [0.3, 0.4, 0.25, 0.05]) if config else [0.3, 0.4, 0.25, 0.05]
+        weather_state = np.random.choice(['clear', 'partly_cloudy', 'cloudy', 'storm'], p=p)
     
     cloud_factors = {
         'clear': (0.90, 1.0),
@@ -37,11 +36,11 @@ def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_stat
     
     return base_solar * cloud_factor * season_factor
 
-def get_wind_generation_profile(hour: int, day: int = 0, weather_state: str = None) -> float:
+def get_wind_generation_profile(hour: int, day: int = 0, weather_state: str = None, config: dict = None) -> float:
     if weather_state is None:
         day_seed = np.random.RandomState(day)
-        weather_state = day_seed.choice(['calm', 'breezy', 'windy', 'storm'], 
-                                       p=[0.15, 0.45, 0.30, 0.10])
+        p = config.get('wind_weather_weights', [0.15, 0.45, 0.30, 0.10]) if config else [0.15, 0.45, 0.30, 0.10]
+        weather_state = day_seed.choice(['calm', 'breezy', 'windy', 'storm'], p=p)
     
     wind_ranges = {
         'calm': (0.0, 0.20),
@@ -57,7 +56,7 @@ def get_wind_generation_profile(hour: int, day: int = 0, weather_state: str = No
     
     return np.clip(base_wind * thermal_factor * micro_variation, 0.0, 1.0)
 
-def simulate_weather_sequence(timesteps: int, hours_per_day: int = 24, seed: int = None) -> list:
+def simulate_weather_sequence(timesteps: int, _hours_per_day: int = 24, seed: int = None, _config: dict = None) -> list:
     if seed is not None: np.random.seed(seed)
     
     solar_transitions = {

@@ -1,8 +1,9 @@
-import sys
 import os
-import torch
-import pytest
+import sys
 import warnings
+
+import pytest
+import torch
 
 # Suppress the PyTorch Geometric Python 3.13 typing DeprecationWarning
 warnings.filterwarnings('ignore', category=DeprecationWarning, module='torch_geometric.inspector')
@@ -87,10 +88,9 @@ def test_pi_gcn(dummy_data):
     in addition to predicting V_m and V_theta arrays.
     """
     m = PIGCN(dummy_data["in_channels"], dummy_data["hidden_channels"], dummy_data["out_channels"])
-    out, loss = m(dummy_data["x_static"], dummy_data["edge_index"], 
+    out = m(dummy_data["x_static"], dummy_data["edge_index"], 
                   dummy_data["p_inj_final"].view(-1), dummy_data["q_inj_final"].view(-1), dummy_data["y_bus_final"])
     assert out.shape == (dummy_data["batch_size"] * dummy_data["num_nodes"], dummy_data["out_channels"])
-    assert loss.requires_grad
 
 def test_pi_gclstm(dummy_data):
     """
@@ -101,10 +101,9 @@ def test_pi_gclstm(dummy_data):
     """
     m = PIGCLSTM(dummy_data["in_channels"], dummy_data["hidden_channels"], 
                  dummy_data["hidden_channels"], dummy_data["out_channels"])
-    out, loss = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
+    out = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
                   dummy_data["p_inj_final"], dummy_data["q_inj_final"], dummy_data["y_bus_final"])
     assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
-    assert loss.requires_grad
 
 def test_pi_gcgru(dummy_data):
     """
@@ -114,10 +113,9 @@ def test_pi_gcgru(dummy_data):
     """
     m = PIGCGRU(dummy_data["in_channels"], dummy_data["hidden_channels"], 
                 dummy_data["hidden_channels"], dummy_data["out_channels"])
-    out, loss = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
+    out = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
                   dummy_data["p_inj_final"], dummy_data["q_inj_final"], dummy_data["y_bus_final"])
     assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
-    assert loss.requires_grad
 
 def test_pi_resnet_gclstm(dummy_data):
     """
@@ -127,10 +125,9 @@ def test_pi_resnet_gclstm(dummy_data):
     """
     m = PIResnetGCLSTM(dummy_data["in_channels"], dummy_data["hidden_channels"], 
                       dummy_data["hidden_channels"], dummy_data["out_channels"])
-    out, loss = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
+    out = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
                   dummy_data["p_inj_final"], dummy_data["q_inj_final"], dummy_data["y_bus_final"])
     assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
-    assert loss.requires_grad
 
 def test_pi_resnet_gcgru(dummy_data):
     """
@@ -140,7 +137,6 @@ def test_pi_resnet_gcgru(dummy_data):
     """
     m = PIResnetGCGRU(dummy_data["in_channels"], dummy_data["hidden_channels"], 
                      dummy_data["hidden_channels"], dummy_data["out_channels"])
-    out, loss = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
+    out = m(dummy_data["x_seq"], dummy_data["dynamic_edge_idx_seq"], 
                   dummy_data["p_inj_final"], dummy_data["q_inj_final"], dummy_data["y_bus_final"])
     assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
-    assert loss.requires_grad

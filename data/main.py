@@ -5,13 +5,10 @@ import json
 import argparse
 import warnings
 import copy
-import gc
-import shutil
-import tempfile
 import random
 import glob
-import hashlib
-from datetime import datetime
+import shutil
+import tempfile
 import numpy as np
 import pandas as pd
 import pandapower as pp
@@ -33,9 +30,6 @@ from data.topology import (
     restore_contingency, calculate_ybus_from_net, calculate_adjacency_matrix,
     identify_bus_types, create_opf_targets
 )
-from constants import (
-    FeatureIndices, TargetIndices, HOURLY_LOAD_PATTERN
-)
 from data.validation import (
     SuppressPrints, validate_power_flow_inputs, validate_power_flow_outputs,
     apply_curtailment_with_retry, hard_reset_system, trip_renewable_generators
@@ -49,8 +43,8 @@ def load_data_config(config_path='data/data_generation.yaml'):
 
 # CLI Parser
 parser = argparse.ArgumentParser(description="Generate Spatio-Temporal Data")
-parser.add_argument('--case', '--buses', type=str, dest='buses', default=None, help="Cases (e.g., '33,57')")
-parser.add_argument('--timesteps', type=int, default=None, help="Number of timesteps")
+parser.add_argument('--case', '--cases', '--buses', type=str, dest='buses', default=None, help="Cases (e.g., '33,57' or 'all')")
+parser.add_argument('--timesteps', '--timestep', type=int, default=None, help="Number of timesteps")
 args = parser.parse_args()
 
 # Load YAML
@@ -175,8 +169,8 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         cur_total_ren_p = 0
         if not net.sgen.empty and 'type' in net.sgen.columns:
             solar_w, wind_w = weather_seq[t] if weather_seq else (None, None)
-            solar_prof = get_solar_generation_profile(cur_hour, 180 + cur_day % 180, solar_w)
-            wind_prof = get_wind_generation_profile(cur_hour, cur_day, wind_w)
+            solar_prof = get_solar_generation_profile(cur_hour, 180 + cur_day % 180, solar_w, config)
+            wind_prof = get_wind_generation_profile(cur_hour, cur_day, wind_w, config)
             
             mask_s, mask_w = net.sgen.type == 'solar', net.sgen.type == 'wind'
             net.sgen.loc[mask_s, 'p_mw'] = solar_prof * max_solar_mw
@@ -213,7 +207,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
 
         base_ren = {i: net.sgen.at[i, 'p_mw'] for i in net.sgen.index} if not success else {}
         if not success:
-            curtail_ok, scale, flags = apply_curtailment_with_retry(net, base_ren, 10, convergence_stats, has_contingency, case_name, config)
+            curtail_ok, _, flags = apply_curtailment_with_retry(net, base_ren, 10, convergence_stats, has_contingency, case_name, config)
             if curtail_ok:
                 success, method = True, ('strict_' + ('contingency' if has_contingency else 'normal'))
                 convergence_stats['resolution_methods']['strict_contingency' if has_contingency else 'strict_normal'] += 1
@@ -353,7 +347,7 @@ def save_data(data: dict, case: str, frac: float, out_dir: str):
 
 if __name__ == "__main__":
     cases = CONFIG["test_cases"]
-    if args.buses:
+    if args.buses and args.buses.lower() != 'all':
         req = [int(b) for b in args.buses.split(',')]
         cases = [f"case{b}" for b in req if f"case{b}" in cases]
     

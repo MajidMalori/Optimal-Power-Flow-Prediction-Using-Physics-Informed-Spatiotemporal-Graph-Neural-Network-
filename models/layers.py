@@ -1,30 +1,7 @@
 import torch
-import torch.nn as nn
+from torch import nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
-
-class PhysicsInformedLoss(nn.Module):
-    """
-    Computes a physics-informed loss penalty based on Kirchhoff's laws or Power Flow equations.
-    This acts as a soft constraint during training.
-    """
-    def __init__(self, weight=0.1):
-        super().__init__()
-        self.weight = weight
-
-    def forward(self, pred_v, pred_theta, p_inj, q_inj, y_bus):
-        """
-        Calculates the mismatch in active (P) and reactive (Q) power injections.
-        Expected inputs:
-        - pred_v: Predicted voltage magnitudes [batch, nodes]
-        - pred_theta: Predicted voltage angles [batch, nodes]
-        - p_inj, q_inj: True power injections (from features)
-        - y_bus: Admittance matrix (complex/split real and imag)
-        """
-        # Placeholder for exact physics equations (will depend on exact y_bus formatting)
-        # mismatch = (calc_p - p_inj)**2 + (calc_q - q_inj)**2
-        physics_penalty = torch.tensor(0.0, device=pred_v.device, requires_grad=True)
-        return self.weight * physics_penalty
 
 
 class ResidualGCNBlock(nn.Module):

@@ -1,5 +1,4 @@
-import torch
-import torch.nn as nn
+from torch import nn
 from torch_geometric.nn import GCNConv
 
 class DynamicGCN(nn.Module):
