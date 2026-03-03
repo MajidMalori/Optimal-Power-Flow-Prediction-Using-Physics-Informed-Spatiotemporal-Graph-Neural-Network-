@@ -1,0 +1,39 @@
+# Directories
+output_dir: "data/01_raw"
+reports_dir: "reports/figures/01_raw_data"
+
+# Simulation Core
+random_seed: 42
+test_cases:
+  - case33
+  - case57
+  - case118
+time_steps: 10008
+renewable_fractions_to_run: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+# Network Dynamics
+contingency_rate: 0.05
+pmu_coverage: 0.3
+hours_per_day: 24
+
+# Sensor Noise (Zero-mean Gaussian std)
+voltage_error_std: 0.005
+power_error_std: 0.01
+angle_error_std: 0.02
+
+# Operational Physics
+max_energy_utilization_coeff: 0.98
+loss_sensitivity: 0.01
+
+# Sustainability / Carbon
+base_carbon_intensity_grid: 0.55
+max_carbon_reduction_from_renewables: 0.30
+
+# Validation & Control
+curtailment_max_attempts: 10
+curtailment_decay: 0.90
+voltage_control_enabled: true
+
+# Weather Model Weights
+solar_weather_weights: [0.3, 0.4, 0.25, 0.05]  # clear, partly_cloudy, cloudy, storm
+wind_weather_weights: [0.15, 0.45, 0.30, 0.10]  # calm, breezy, windy, storm
