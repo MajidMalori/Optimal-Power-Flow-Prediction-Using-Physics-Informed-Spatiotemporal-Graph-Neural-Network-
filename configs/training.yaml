@@ -1,0 +1,39 @@
+data:
+  data_dir: "src/data/03_processed"
+  case_name: "case33"
+  batch_size: 32
+  seq_len: 4
+
+model:
+  name: "PIResnetGCLSTM"  # Options: StandardGCN, DynamicGCN, PIGCN, PIGCLSTM, PIGCGRU, PIResnetGCLSTM, PIResnetGCGRU
+  in_channels: 11
+  gcn_hidden: 64
+  lstm_hidden: 64
+  gru_hidden: 64
+  out_channels: 2
+  num_layers: 4  # Used for standard models (num_gcn_layers or num_res_blocks depending on model)
+  learning_rate: 0.001
+  lr_patience: 10
+  lr_factor: 0.5
+
+trainer:
+  max_epochs: 100
+  accelerator: "auto"
+  devices: "auto"
+  log_every_n_steps: 10
+
+logger:
+  save_dir: "tb_logs"
+  name: "powerflow_models"
+
+callbacks:
+  early_stopping:
+    monitor: "val_loss"
+    patience: 20
+    mode: "min"
+  model_checkpoint:
+    monitor: "val_loss"
+    dirpath: "checkpoints"
+    filename: "{epoch:02d}-{val_loss:.4f}"
+    save_top_k: 3
+    mode: "min"

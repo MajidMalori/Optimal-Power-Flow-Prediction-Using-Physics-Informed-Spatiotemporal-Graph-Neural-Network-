@@ -26,7 +26,7 @@ test-preprocessing:
 
 # Runs pylint on all Python files (full check)
 pylint:
-	pylint data/*.py models/*.py tests/*.py
+	pylint src/data/*.py src/models/*.py tests/*.py
 
 # Categorized Linting
 lint-imports:
@@ -46,15 +46,15 @@ lint-complexity:
 
 # Generate 120 timestep data for all cases
 main120:
-	python data/main.py --case all --timestep 120
+	python src/data/main.py --case all --timestep 120
 
 # Generate 96 timestep data for case 33:
 mainTest:
-	python data/main.py --case 33 --timestep 96
+	python src/data/main.py --case 33 --timestep 96
 
 # Preprocess data for case 33:
 preTest:
-	python data/preprocess_data.py --case 33
+	python src/data/preprocess_data.py --case 33
 
 # Clean up temporary Python files and cache
 clean:

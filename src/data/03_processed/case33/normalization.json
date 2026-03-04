@@ -1,0 +1,33 @@
+{
+  "s_base": 10.0,
+  "max_degree": 3.0,
+  "vm_nominal": 1.0,
+  "num_features": 11,
+  "num_targets": 10,
+  "power_feature_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "power_target_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "splits": {
+    "train": 402,
+    "val": 84,
+    "test": 90
+  },
+  "num_fractions": 6
+}

@@ -6,10 +6,6 @@ import sys
 import pytest
 import torch
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(script_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
 
 from constants import (  # pylint: disable=wrong-import-position
     FeatureIndices, TargetIndices, 
@@ -19,7 +15,8 @@ from constants import (  # pylint: disable=wrong-import-position
 NUM_FEATURES = FeatureIndices.NUM_FEATURES
 NUM_TARGETS = TargetIndices.NUM_TARGETS
 
-PROCESSED_DIR = os.path.join(parent_dir, 'data', '03_processed')
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROCESSED_DIR = os.path.join(parent_dir, 'src', 'data', '03_processed')
 
 
 @pytest.fixture
@@ -66,16 +63,18 @@ def test_no_nans(case_path, case_name):
 
 
 def test_per_unit_voltage_range(case_path, case_name):
-    """Verify voltage magnitudes in targets are in reasonable per-unit range (0.8 - 1.2)."""
+    """Verify voltage magnitudes (mean-centered around 1.0 p.u.) are in reasonable range."""
     path = case_path
     name = case_name
     feats = torch.load(os.path.join(path, 'train_features.pt'), weights_only=True)
-    # VM index, should be ~0.9-1.1 p.u.
-    vm = feats[:, :, FeatureIndices.VM]
-    valid_vm = vm[vm > 0.1]  # exclude unobserved (0.0)
-    if valid_vm.numel() > 0:
-        assert valid_vm.min() > 0.7, f"{name} voltage too low: {valid_vm.min():.3f}"
-        assert valid_vm.max() < 1.3, f"{name} voltage too high: {valid_vm.max():.3f}"
+    # VM is centered: actual_vm = stored_vm + 1.0
+    # So stored values should be roughly in [-0.3, +0.3] (i.e. 0.7–1.3 p.u.)
+    # Exclude unobserved buses where original vm was 0 (now -1.0 after centering)
+    vm_centered = feats[:, :, FeatureIndices.VM]
+    observed = vm_centered[vm_centered > -0.9]
+    if observed.numel() > 0:
+        assert observed.min() > -0.3, f"{name} voltage deviation too low: {observed.min():.3f}"
+        assert observed.max() < 0.3, f"{name} voltage deviation too high: {observed.max():.3f}"
 
 
 def test_normalization_metadata(case_path, case_name):

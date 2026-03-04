@@ -5,12 +5,10 @@ import glob
 import numpy as np
 import pytest
 
-# Add parent directory to path to import constants
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from constants import FeatureIndices, V_GARBAGE_LOW, V_GARBAGE_HIGH
 
 
-DATA_DIR = os.path.join("data", "01_raw")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "data", "01_raw")
 
 def get_feature_files():
     pattern = os.path.join(DATA_DIR, "*_features_frac*.npy")
