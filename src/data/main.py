@@ -94,22 +94,32 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
     
     if chunked_mode:
         temp_dir = tempfile.mkdtemp(prefix='gen_data_chunks_')
-        files = {k: os.path.join(temp_dir, f'{k}_temp.npy') for k in ['features', 'targets', 'bus_types', 'topology_ids', 'carbon_coeffs']}
+        files = {k: os.path.join(temp_dir, f'{k}_temp.npy') for k in ['features', 'targets', 'bus_types', 'topology_ids']}
         
         feature_matrix = np.memmap(files['features'], mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 11))
         target_matrix = np.memmap(files['targets'], mode='w+', dtype=np.float32, shape=(time_steps, num_buses, 10))
         bus_types_array = np.memmap(files['bus_types'], mode='w+', dtype=np.int32, shape=(time_steps, num_buses))
         topology_ids = np.memmap(files['topology_ids'], mode='w+', dtype=np.int32, shape=(time_steps,))
-        time_carbon_coeffs = np.memmap(files['carbon_coeffs'], mode='w+', dtype=np.float32, shape=(time_steps,))
     else:
         feature_matrix = np.zeros((time_steps, num_buses, 11), dtype=np.float32)
         target_matrix = np.zeros((time_steps, num_buses, 10), dtype=np.float32)
         bus_types_array = np.zeros((time_steps, num_buses), dtype=np.int32)
         topology_ids = np.zeros(time_steps, dtype=np.int32)
-        time_carbon_coeffs = np.zeros(time_steps, dtype=np.float32)
         temp_dir, files = None, {}
 
     base_adjacency_matrix = calculate_adjacency_matrix(net)
+    
+    # Pre-extract physical branch limits and indices for Physics-Informed Neural Network constraints
+    branch_from = net.line.from_bus.values.astype(np.int64)
+    branch_to = net.line.to_bus.values.astype(np.int64)
+    branch_max_i_ka = net.line.max_i_ka.values.astype(np.float32)
+
+    # Calculate branch base current (kA) for per-unit conversion: i_base = s_base / (sqrt(3) * v_base_kv)
+    # We use the 'from' bus kV as the reference voltage for the branch.
+    v_base_kv = net.bus.vn_kv.loc[branch_from].values
+    branch_i_base = (config.get('physics', {}).get('base_mva', 100.0)) / (np.sqrt(3) * v_base_kv)
+    branch_i_base = branch_i_base.astype(np.float32)
+    
     ybus_base = None
     contingency_timesteps = []
     contingency_ybus_list = []
@@ -269,11 +279,6 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         elif has_contingency:
             contingency_timesteps.append(t)
             contingency_ybus_list.append(ybus.copy())
-
-        detailed_metrics.append({'timestep': t, 'p_load': load_p.sum(), 'v_min': vm_pu.min(), 'v_max': vm_pu.max(), 'converged': 1, 'method': method})
-
-        ren_util = cur_total_ren_p / max_total_ren_mw if max_total_ren_mw > 0 else 0
-        time_carbon_coeffs[t] = config['base_carbon_intensity_grid'] - (ren_util * config['max_carbon_reduction_from_renewables'])
         
         bus_types = identify_bus_types(net)
         bus_types_array[t] = bus_types
@@ -312,36 +317,39 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
         if pbar is not None:
             pbar.update(1)
         if chunked_mode and (t + 1) % chunk_size == 0:
-            for arr in [feature_matrix, target_matrix, bus_types_array, topology_ids, time_carbon_coeffs]: arr.flush()
+            for arr in [feature_matrix, target_matrix, bus_types_array, topology_ids]: arr.flush()
 
     if chunked_mode:
-        for arr in [feature_matrix, target_matrix, bus_types_array, topology_ids, time_carbon_coeffs]: arr.flush()
+        for arr in [feature_matrix, target_matrix, bus_types_array, topology_ids]: arr.flush()
     
     ybus_data = {"base": ybus_base, "contingency_timesteps": np.array(contingency_timesteps, dtype=np.int32),
-                 "contingency_matrices": np.array(contingency_ybus_list) if contingency_ybus_list else np.array([]).reshape(0, num_buses, num_buses)}
+                 "contingency_matrices": np.array(contingency_ybus_list) if contingency_ybus_list else np.array([]).reshape(0, num_buses, num_buses),
+                 "branch_from": branch_from, "branch_to": branch_to, 
+                 "branch_max_i_ka": branch_max_i_ka, "branch_i_base": branch_i_base}
     
     ret = { "features": np.array(feature_matrix) if chunked_mode else feature_matrix, 
             "targets": np.array(target_matrix) if chunked_mode else target_matrix, 
             "bus_types": np.array(bus_types_array) if chunked_mode else bus_types_array,
             "base_adjacency": base_adjacency_matrix, "topology_ids": np.array(topology_ids) if chunked_mode else topology_ids,
-            "ybus_data": ybus_data, "time_carbon_coeffs": np.array(time_carbon_coeffs) if chunked_mode else time_carbon_coeffs,
-            "convergence_stats": convergence_stats }
+            "ybus_data": ybus_data, "convergence_stats": convergence_stats }
 
     if chunked_mode:
         shutil.rmtree(temp_dir, ignore_errors=True)
-    if output_dir:
-        pd.DataFrame(detailed_metrics).to_csv(os.path.join(output_dir, f"{case_name}_detailed_metrics_frac{renewable_fraction:.1f}.csv"), index=False)
     return ret
 
 def save_data(data: dict, case: str, frac: float, out_dir: str):
     os.makedirs(out_dir, exist_ok=True)
     for k, v in data.items():
         base = f"{case}_{k}_frac{frac:.1f}"
+        
+        # Skip writing large info dicts we don't need on disk for PINN
+        if k == 'convergence_stats':
+            continue
+            
         if k == 'ybus_data':
-            for sk, sv in v.items(): np.save(os.path.join(out_dir, f"{case}_ybus_{sk}_frac{frac:.1f}.npy"), sv)
-        elif k == 'convergence_stats':
-            with open(os.path.join(out_dir, f"{case}_data_quality_audit_frac{frac:.1f}.json"), 'w') as f: json.dump(v, f, indent=2)
-        elif 'coeffs' in k: np.savetxt(os.path.join(out_dir, base+".txt"), v)
+            for sk, sv in v.items(): 
+                # sk will be 'base', 'contingency_timesteps', 'contingency_matrices', 'branch_from', 'branch_to', 'branch_max_i_ka', 'branch_i_base'
+                np.save(os.path.join(out_dir, f"{case}_ybus_{sk}_frac{frac:.1f}.npy"), sv)
         elif k == 'base_adjacency':
             adj = sparse.coo_matrix(v)
             np.save(os.path.join(out_dir, base+".npy"), np.array([[adj.row, adj.col]], dtype=object), allow_pickle=True)

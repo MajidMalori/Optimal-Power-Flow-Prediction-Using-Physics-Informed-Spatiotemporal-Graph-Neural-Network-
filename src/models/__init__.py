@@ -6,6 +6,7 @@ from .pi_gcgru import PIGCGRU
 from .pi_resnet_gclstm import PIResnetGCLSTM
 from .pi_resnet_gcgru import PIResnetGCGRU
 from .data_module import PowerFlowDataModule
+from .physics_loss import PhysicsLoss
 
 __all__ = [
     "StandardGCN",
@@ -15,5 +16,6 @@ __all__ = [
     "PIGCGRU",
     "PIResnetGCLSTM",
     "PIResnetGCGRU",
-    "PowerFlowDataModule"
+    "PowerFlowDataModule",
+    "PhysicsLoss",
 ]

@@ -1,7 +1,11 @@
 import os
 import argparse
+import sys
 import yaml
 import torch
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
@@ -76,53 +80,110 @@ def build_model(config):
     
     return ModelClass(**kwargs)
 
+import copy
+
 def main():
     parser = argparse.ArgumentParser(description="Train Power Flow Models")
     parser.add_argument("--config", type=str, default="configs/training.yaml", help="Path to training config")
+    parser.add_argument("--case", type=str, default=None, help="Comma separated list of cases (e.g., '33,57' or 'all')")
+    parser.add_argument("--models", type=str, default=None, help="Comma separated list of models to train or 'all'")
     args = parser.parse_args()
 
     config = load_config(args.config)
     
-    # 1. Setup Data
-    L.seed_everything(42)
-    dm = PowerFlowDataModule(
-        data_dir=config['data']['data_dir'],
-        case_name=config['data']['case_name'],
-        batch_size=config['data']['batch_size'],
-        seq_len=config['data']['seq_len']
-    )
-    
-    # 2. Setup Model
-    model = build_model(config)
-    print(f"Initialized {config['model']['name']}")
-    
-    # 3. Setup Callbacks & Logger
-    tb_logger = TensorBoardLogger(
-        save_dir=config['logger']['save_dir'],
-        name=config['logger']['name'],
-        version=f"{config['model']['name']}_{config['data']['case_name']}"
-    )
-    
-    checkpoint_callback = ModelCheckpoint(**config['callbacks']['model_checkpoint'])
-    early_stop_callback = EarlyStopping(**config['callbacks']['early_stopping'])
-    
-    # 4. Setup Trainer
-    trainer = L.Trainer(
-        logger=tb_logger,
-        callbacks=[checkpoint_callback, early_stop_callback],
-        max_epochs=config['trainer']['max_epochs'],
-        accelerator=config['trainer']['accelerator'],
-        devices=config['trainer']['devices'],
-        log_every_n_steps=config['trainer']['log_every_n_steps']
-    )
-    
-    # 5. Train
-    print("Starting training...")
-    trainer.fit(model, datamodule=dm)
-    
-    # 6. Test
-    print("Starting testing...")
-    trainer.test(model, datamodule=dm, ckpt_path="best")
+    # Determine cases to process
+    if args.case:
+        if args.case.lower() == 'all':
+            # Default known datasets
+            cases = ['case33', 'case57', 'case118']
+        else:
+            cases = [c.strip() if c.strip().startswith('case') else f"case{c.strip()}" for c in args.case.split(',')]
+    else:
+        cases = [config['data']['case_name']]
+        
+    # Determine models to train
+    if args.models:
+        if args.models.lower() == 'all':
+            models = list(MODEL_REGISTRY.keys())
+        else:
+            models = [m.strip() for m in args.models.split(',')]
+    else:
+        models = [config['model']['name']]
+
+    for case_name in cases:
+        for model_name in models:
+            print(f"\n{'='*50}")
+            print(f"Training {model_name} on {case_name}")
+            print(f"{'='*50}\n")
+            
+            run_config = copy.deepcopy(config)
+            run_config['data']['case_name'] = case_name
+            run_config['model']['name'] = model_name
+            
+            # Spatial models only support seq_len = 1
+            is_recurrent = model_name in ["PIGCLSTM", "PIGCGRU", "PIResnetGCLSTM", "PIResnetGCGRU"]
+            actual_seq_len = run_config['data']['seq_len'] if is_recurrent else 1
+            
+            # 1. Setup Data
+            L.seed_everything(42)
+            dm = PowerFlowDataModule(
+                data_dir=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "data", "03_processed"),
+                case_name=case_name,
+                batch_size=run_config['data']['batch_size'],
+                seq_len=actual_seq_len
+            )
+            
+            # 2. Setup Model
+            try:
+                model = build_model(run_config)
+                print(f"Initialized {model_name}")
+            except Exception as e:
+                print(f"Failed to initialize {model_name}: {e}")
+                continue
+            
+            # 3. Setup Callbacks & Logger
+            tb_logger = TensorBoardLogger(
+                save_dir=run_config['logger']['save_dir'],
+                name=run_config['logger']['name'],
+                version=f"{model_name}_{case_name}"
+            )
+            
+            # Ensure unique checkpoint directory to avoid overwriting between runs
+            ckpt_dir = os.path.join(run_config['logger']['save_dir'], run_config['logger']['name'], f"{model_name}_{case_name}", "checkpoints")
+            
+            checkpoint_callback = ModelCheckpoint(
+                dirpath=ckpt_dir,
+                monitor=run_config['callbacks']['model_checkpoint']['monitor'],
+                filename="{epoch:02d}-{val_loss:.4f}",
+                save_top_k=run_config['callbacks']['model_checkpoint']['save_top_k'],
+                mode=run_config['callbacks']['model_checkpoint']['mode']
+            )
+            early_stop_callback = EarlyStopping(**run_config['callbacks']['early_stopping'])
+            
+            # 4. Setup Trainer
+            trainer = L.Trainer(
+                logger=tb_logger,
+                callbacks=[checkpoint_callback, early_stop_callback],
+                max_epochs=run_config['trainer']['max_epochs'],
+                accelerator=run_config['trainer']['accelerator'],
+                devices=run_config['trainer']['devices'],
+                log_every_n_steps=run_config['trainer']['log_every_n_steps']
+            )
+            
+            # 5. Train
+            print("Starting training...")
+            try:
+                trainer.fit(model, datamodule=dm)
+            except Exception as e:
+                print(f"Training failed for {model_name} on {case_name}: {e}")
+                continue
+            
+            # 6. Test
+            print("Starting testing...")
+            try:
+                trainer.test(model, datamodule=dm, ckpt_path="best")
+            except Exception as e:
+                print(f"Testing failed for {model_name} on {case_name}: {e}")
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 # Directories
-output_dir: "data/01_raw"
+output_dir: "src/data/01_raw"
 reports_dir: "reports/figures/01_raw_data"
 
 # Simulation Core

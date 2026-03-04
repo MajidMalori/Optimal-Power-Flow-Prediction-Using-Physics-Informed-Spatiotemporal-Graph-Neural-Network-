@@ -16,6 +16,12 @@ model:
   lr_patience: 10
   lr_factor: 0.5
 
+# Physics-Informed Loss Weights (only used by PI models)
+physics_loss:
+  lambda_power_balance: 0.1     # Weight for AC power flow equation violation
+  lambda_voltage_limit: 0.01    # Weight for voltage bound violations
+  lambda_branch_capacity: 0.01  # Weight for branch thermal limit violations
+
 trainer:
   max_epochs: 100
   accelerator: "auto"

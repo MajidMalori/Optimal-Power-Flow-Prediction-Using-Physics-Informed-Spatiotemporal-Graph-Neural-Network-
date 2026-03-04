@@ -36,7 +36,9 @@ class DynamicGCN(L.LightningModule):
         return self.output_layer(x)
 
     def _shared_step(self, batch, stage):
-        x, edge_index, targets = batch["features"], batch["edge_index"], batch["targets"]
+        x, edge_index = batch["features"], batch["edge_index"]
+        # Slice targets to VM=8, VA=9 for data loss (baseline — no physics)
+        targets = batch["targets"][..., 8:10]
         preds = self(x, edge_index)
         loss = self.loss_fn(preds, targets)
         self.log(f"{stage}_loss", loss, prog_bar=True, batch_size=x.size(0))

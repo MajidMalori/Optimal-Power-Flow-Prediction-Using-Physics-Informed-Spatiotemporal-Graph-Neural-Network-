@@ -20,6 +20,10 @@ test-physics:
 test-models:
 	pytest tests/test_models.py
 
+# Runs only the end-to-end training tests
+test-e2e:
+	pytest tests/test_training_e2e.py
+
 # Runs only the data preprocessing tests
 test-preprocessing:
 	pytest tests/test_preprocessing.py

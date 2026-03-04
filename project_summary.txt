@@ -1,0 +1,67 @@
+Physics-guided GCN for AC-OPF with topology-aware adjacency matrices exists, but existing approaches struggle to balance sufficient extraction of data features with physical property learning, resulting in limited generalization. ScienceDirect
+A physics-guided GCNN for OPF under varying topologies has been proposed, but topology change dramatically increases learning difficulties and sample demands. Semantic Scholar
+A DDA-PIGCN model that captures spatiotemporal dependencies using dynamic domain adaptation exists, achieving MAEs from 0.0011 to 0.0624 and constraint satisfaction rates between 99.6% and 100% — but this is still single-model, not an ensemble of architectures. ResearchGate
+Multi-agent DRL with GNN for spatiotemporal OPF under renewable uncertainty has been explored, but these focus on reinforcement learning agents rather than your supervised + metaheuristic optimization framing. MDPI
+What makes your project genuinely novel:
+
+Systematic renewable penetration sweeps (0%, 20%, 40%, 60%, 80%, 100%) as a structured training variable — not seen in this combination
+Running six architectures in parallel (GCN → DynGCN → PI-GCN → PI-CNN-LSTM → PI-CNN-GRU → ResNet) as a comparative ensemble
+A metaheuristic optimizer on top of the AI predictions targeting carbon emissions + power loss + voltage deviation simultaneously as a tri-objective problem
+Using pandapower as the full data generation backbone across all penetration levels
+
+
+What to Call This Project
+Project Name: STPF-OPF — Spatiotemporal Physics-Informed Optimal Power Flow
+or more distinctively:
+
+"GRAPHOPF" — Graph-Reinforced Adaptive Physics-informed Hybrid Optimal Power Flow
+
+For the models specifically:
+ModelSuggested NameBaseline GCNGCN-OPFDynamic Topology GCNDynGCN-OPFPhysics-Informed GCNPI-GCN-OPFPhysics-Informed CNN-LSTMPI-ConvLSTM-OPFPhysics-Informed CNN-GRUPI-ConvGRU-OPFResNet (Residual)ResNet-OPFFull systemSTGRAPH-OPF or SpatioTemporal-OPF
+
+
+
+
+PHASE 2 — Metaheuristic Optimization Layer
+This sits on top of the trained AI models. The AI predicts the operating state (V, θ), and the optimizer finds optimal generator dispatch.
+Tri-objective problem:
+
+Minimize: Carbon emissions (f₁)
+Minimize: Active power losses (f₂)
+Minimize: Voltage deviation from nominal (f₃)
+
+Recommended metaheuristic algorithms (compare them):
+AlgorithmReasonNSGA-IIIMulti-objective, Pareto front generationMOPSOFast, good for continuous dispatch variablesGrey Wolf Optimizer (GWO)Strong exploitation, works well on power systemsWhale Optimization Algorithm (WOA)Recent, strong benchmark results in OPFSHADE / L-SHADEDifferential evolution variant, very competitive
+The optimizer takes AI-predicted V and θ as warm-start state estimates and optimizes generator set points (P_g) subject to:
+
+Power balance constraints
+Generator capacity limits
+Voltage magnitude limits [0.95, 1.05] p.u.
+Line thermal limits
+
+
+PHASE 3 — Evaluation & Comparison
+Compare all 6 models on:
+
+Prediction accuracy (MAE on V and θ)
+Robustness under topology changes (performance drop % vs. baseline)
+Robustness across penetration levels (0–100%)
+Constraint feasibility rate
+Inference speed vs. pandapower AC-OPF solver
+
+Then evaluate the full AI + Metaheuristic pipeline vs. traditional OPF on:
+
+Carbon reduction (%)
+Power loss reduction (%)
+Voltage deviation improvement
+
+
+PHASE 4 — Visualization Dashboard
+Build an interactive dashboard showing:
+
+Grid topology with node voltage color map
+Penetration level slider (0–100%)
+Real-time prediction vs. true OPF comparison
+Pareto front plots for the tri-objective optimization
+Model comparison radar charts
+Convergence curves for the metaheuristic optimizer

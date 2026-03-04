@@ -29,12 +29,15 @@ def dummy_data():
     in_channels = 11       # 8 power + V_m + V_a + degree
     hidden_channels = 16
     out_channels = 2       # V_m, V_theta
+    num_targets = 10       # Full target tensor width
+    num_branches = 5       # Dummy branch count
     
     # Feature Inputs
     x_static = torch.rand(batch_size * num_nodes, in_channels)
     x_seq = torch.rand(batch_size, seq_len, num_nodes, in_channels)
-    targets = torch.rand(batch_size * num_nodes, out_channels)
-    targets_seq = torch.rand(batch_size, num_nodes, out_channels)
+    # Full 10-column targets matching data_module collate format
+    targets = torch.rand(batch_size * num_nodes, num_targets)
+    targets_seq = torch.rand(batch_size, num_nodes, num_targets)
     
     # Graph Topologies
     edge_index = torch.tensor([
@@ -44,17 +47,31 @@ def dummy_data():
     
     dynamic_edge_idx_seq = [edge_index for _ in range(seq_len)]
     
+    # Physics tensors (dummy Ybus and branch data)
+    ybus = torch.randn(num_nodes, num_nodes, dtype=torch.complex128)
+    branch_from = torch.tensor([0, 1, 2, 3, 4], dtype=torch.int64)
+    branch_to = torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64)
+    branch_max_s_pu = torch.full((num_branches,), 10.0, dtype=torch.float32)
+    
     # Dummy batches for Lightning steps
     static_batch = {
         "features": x_static,
         "edge_index": edge_index,
-        "targets": targets
+        "targets": targets,
+        "ybus": ybus,
+        "branch_from": branch_from,
+        "branch_to": branch_to,
+        "branch_max_s_pu": branch_max_s_pu,
     }
     
     seq_batch = {
         "features": x_seq,
         "edge_index_seq": dynamic_edge_idx_seq,
-        "targets": targets_seq
+        "targets": targets_seq,
+        "ybus": ybus,
+        "branch_from": branch_from,
+        "branch_to": branch_to,
+        "branch_max_s_pu": branch_max_s_pu,
     }
 
     return {

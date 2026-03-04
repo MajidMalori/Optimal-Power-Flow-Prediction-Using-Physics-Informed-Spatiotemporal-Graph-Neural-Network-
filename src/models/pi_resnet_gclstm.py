@@ -3,12 +3,15 @@ import torch
 from torch import nn
 from .layers import ResidualGCNBlock
 
+from src.models.physics_loss import PhysicsLoss
+
 
 class PIResnetGCLSTM(L.LightningModule):
     """
     Model 6: PIResnetGCLSTM (Physics-Informed ResNet GCN + LSTM)
     Uses Residual GCN blocks to build deeper spatial networks without oversmoothing,
     then processes the temporal sequence through an LSTM.
+    Physics-informed: power balance + voltage limit + branch capacity losses.
     Input: (batch, seq_len, num_nodes, num_features) with edge_index per step.
     Output: (batch, num_nodes, out_channels) — prediction for the last timestep.
     """
@@ -21,6 +24,12 @@ class PIResnetGCLSTM(L.LightningModule):
         self.patience = kwargs.get('lr_patience', 10)
         self.factor = kwargs.get('lr_factor', 0.5)
 
+        # Physics loss weights
+        self.lambda_power = kwargs.get('lambda_power_balance', 0.1)
+        self.lambda_voltage = kwargs.get('lambda_voltage_limit', 0.01)
+        self.lambda_branch = kwargs.get('lambda_branch_capacity', 0.01)
+        self._physics_loss = None
+
         self.res_blocks = nn.ModuleList()
         self.res_blocks.append(ResidualGCNBlock(in_channels, gcn_hidden))
         for _ in range(num_res_blocks - 1):
@@ -28,7 +37,20 @@ class PIResnetGCLSTM(L.LightningModule):
 
         self.lstm = nn.LSTM(input_size=gcn_hidden, hidden_size=lstm_hidden, batch_first=True)
         self.output_layer = nn.Linear(lstm_hidden, out_channels)
-        self.loss_fn = nn.MSELoss()
+        self.data_loss_fn = nn.MSELoss()
+
+    def _get_physics_loss(self, batch):
+        if self._physics_loss is None:
+            self._physics_loss = PhysicsLoss(
+                ybus=batch["ybus"].to(self.device),
+                branch_from=batch["branch_from"].to(self.device),
+                branch_to=batch["branch_to"].to(self.device),
+                branch_max_s_pu=batch["branch_max_s_pu"].to(self.device),
+                lambda_power=self.lambda_power,
+                lambda_voltage=self.lambda_voltage,
+                lambda_branch=self.lambda_branch,
+            )
+        return self._physics_loss
 
     def forward(self, x_seq, edge_idx_seq):
         """
@@ -56,11 +78,26 @@ class PIResnetGCLSTM(L.LightningModule):
     def _shared_step(self, batch, stage):
         x_seq = batch["features"]
         edge_idx_seq = batch["edge_index_seq"]
-        targets = batch["targets"]
+        full_targets = batch["targets"]
+        targets_vm_va = full_targets[..., 8:10]
+
         preds = self(x_seq, edge_idx_seq)
-        loss = self.loss_fn(preds, targets)
-        self.log(f"{stage}_loss", loss, prog_bar=True, batch_size=x_seq.size(0))
-        return loss
+        data_loss = self.data_loss_fn(preds, targets_vm_va)
+
+        # Physics-informed loss
+        physics = self._get_physics_loss(batch)
+        vm_pred = preds[..., 0]
+        va_pred = preds[..., 1]
+        physics_result = physics(vm_pred, va_pred, full_targets)
+
+        total_loss = data_loss + physics_result["physics_loss"]
+
+        self.log(f"{stage}_loss", total_loss, prog_bar=True, batch_size=x_seq.size(0))
+        self.log(f"{stage}_data_loss", data_loss, batch_size=x_seq.size(0))
+        self.log(f"{stage}_power_balance", physics_result["power_balance_loss"], batch_size=x_seq.size(0))
+        self.log(f"{stage}_voltage_limit", physics_result["voltage_limit_loss"], batch_size=x_seq.size(0))
+        self.log(f"{stage}_branch_capacity", physics_result["branch_capacity_loss"], batch_size=x_seq.size(0))
+        return total_loss
 
     def training_step(self, batch, _batch_idx):
         return self._shared_step(batch, "train")

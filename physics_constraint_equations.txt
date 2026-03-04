@@ -1,0 +1,20 @@
+System Equality and Inequality Constraints
+
+Since ACOPF and DNR work in the same environment, they use the same constraints. In tackling the ACOPF–DNR problem, simplifying the constraint model as much as possible is crucial because the constraint conditions increase the complexity of the problem. The problem must satisfy the following constraints:
+
+Flow Equation Constraint: The distribution network must satisfy the ﬂow constraint shown in Equation (3.8) during operation:
+{PiDG+Pi=Piload+Vis=1BnVs(Giscos is+Bissin is  ) QiDG+Qi=Qiload+Vis=1BnVs(Gissin is-Biscos is  )                  (3.8)
+
+where PiDG and QiDG are the active and reactive power of DG at the ith node, respectively; (Pi) and (Qi) are the active and reactive power injected at the ith node, respectively; Piload and Qiload are the active and reactive power of the load at the ith node, respectively; Vi and Vs are the node voltages at the ith and sthnodes, respectively; Gis and Bis are the branch conductance and susceptance between the ith and sthnodes, respectively; and is is the power factor angle of the branch between the ith and sth nodes.
+                                                                      
+Voltage Constraints
+After reconﬁguration, the voltage of each node in the network must satisfy the constraints shown in Equation (7):
+
+VnminVnVnmax     , n=1,2,3, …, Bn                                                               (3.10)    
+
+where Vn is the voltage of the nth node, and Vnmin and Vnmax are the lower and upper voltage limits for the nthnode, respectively.
+
+Branch Capacity Constraint
+After reconﬁguration, the currents of each branch in the network must be within the speciﬁed range. This constraint is mathematically described in Equation (3.11):
+  SkSkmax, k=1,2,3,…,Ln                                                                     (3.11)               
+Where Sk is the capacity of the kth branch, Skmax is the maximum capacity of the  kth branch, and Skmax is the total number of branches in the distribution network.

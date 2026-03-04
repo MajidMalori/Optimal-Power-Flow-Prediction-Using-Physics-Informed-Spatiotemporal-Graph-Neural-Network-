@@ -107,6 +107,14 @@ class PowerFlowDataModule(L.LightningDataModule):
         ts_path = os.path.join(self.data_dir, 'ybus_contingency_timesteps.pt')
         self.cont_timesteps = torch.load(ts_path, weights_only=True) if os.path.exists(ts_path) else torch.tensor([])
 
+        # Load branch constraint data for physics-informed loss
+        bf_path = os.path.join(self.data_dir, 'branch_from.pt')
+        bt_path = os.path.join(self.data_dir, 'branch_to.pt')
+        bm_path = os.path.join(self.data_dir, 'branch_max_s_pu.pt')
+        self.branch_from = torch.load(bf_path, weights_only=True) if os.path.exists(bf_path) else torch.tensor([], dtype=torch.int64)
+        self.branch_to = torch.load(bt_path, weights_only=True) if os.path.exists(bt_path) else torch.tensor([], dtype=torch.int64)
+        self.branch_max_s_pu = torch.load(bm_path, weights_only=True) if os.path.exists(bm_path) else torch.tensor([], dtype=torch.float32)
+
         if stage == 'fit' or stage is None:
             train_f = torch.load(os.path.join(self.data_dir, 'train_features.pt'), weights_only=True)
             train_t = torch.load(os.path.join(self.data_dir, 'train_targets.pt'), weights_only=True)
@@ -136,24 +144,28 @@ class PowerFlowDataModule(L.LightningDataModule):
     def collate_fn(self, batch):
         """Custom collate function to handle variable-sized edge indices."""
         features = torch.stack([item["features"] for item in batch])
-        # Models predict out_channels=2 (VM=8, VA=9 from the 10 target features)
-        targets = torch.stack([item["targets"] for item in batch])[..., 8:10]
+        # Pass FULL targets (all 10 columns) — physics loss needs P/Q columns
+        # Individual models will slice to [8:10] for their data loss internally
+        full_targets = torch.stack([item["targets"] for item in batch])
+        
+        result = {
+            "features": features,
+            "targets": full_targets,
+            "ybus": self.ybus_base,
+            "branch_from": self.branch_from,
+            "branch_to": self.branch_to,
+            "branch_max_s_pu": self.branch_max_s_pu,
+        }
         
         if self.seq_len > 1:
             edge_index_seq = []
             for t in range(self.seq_len):
-                # For batched PyG without a Batch object, we need block diagonal edge indices
-                # or just pass the first graph's edge_index if topology is uniform in the batch
-                # To keep it simple and match standard PyG batching behavior natively:
-                
-                # Currently simple implementation: we just pass the first item's edge index
-                # This assumes topology doesn't change *within* a mini-batch (which is true 99% of time)
-                # But to be safe, we should really construct a proper PyG Batch.
-                # Since the models currently don't use PyG Batch objects, we just send a list.
                 edge_index_seq.append(batch[0]["edge_index_seq"][t])
-            return {"features": features, "targets": targets, "edge_index_seq": edge_index_seq}
+            result["edge_index_seq"] = edge_index_seq
         else:
-            return {"features": features, "targets": targets, "edge_index": batch[0]["edge_index"]}
+            result["edge_index"] = batch[0]["edge_index"]
+        
+        return result
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=self.collate_fn)

@@ -138,7 +138,17 @@ def load_ybus_data(raw_dir: str, case_name: str):
     contingency_matrices = np.concatenate(all_cont_matrices) if all_cont_matrices else np.array([])
     contingency_timesteps = np.concatenate(all_cont_timesteps) if all_cont_timesteps else np.array([])
 
-    return ybus_base, contingency_matrices, contingency_timesteps
+    branch_from_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_from_frac*.npy")))
+    branch_to_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_to_frac*.npy")))
+    branch_cap_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_max_i_ka_frac*.npy")))
+    branch_ibase_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_i_base_frac*.npy")))
+
+    branch_from = np.load(branch_from_files[0]) if branch_from_files else None
+    branch_to = np.load(branch_to_files[0]) if branch_to_files else None
+    branch_max_i_ka = np.load(branch_cap_files[0]) if branch_cap_files else None
+    branch_i_base = np.load(branch_ibase_files[0]) if branch_ibase_files else None
+
+    return ybus_base, contingency_matrices, contingency_timesteps, branch_from, branch_to, branch_max_i_ka, branch_i_base
 
 
 def load_adjacency(raw_dir: str, case_name: str):
@@ -230,14 +240,23 @@ def preprocess_case(case_name: str, raw_dir: str, processed_dir: str, config: di
         torch.save(torch.from_numpy(targs), os.path.join(case_dir, f'{split_name}_targets.pt'))
         torch.save(torch.from_numpy(topos), os.path.join(case_dir, f'{split_name}_topology_ids.pt'))
 
-    # Save Ybus data
-    ybus_base, cont_matrices, cont_timesteps = load_ybus_data(raw_dir, case_name)
+    # Save Ybus data & Branch Data
+    ybus_base, cont_matrices, cont_timesteps, b_from, b_to, b_max, b_ibase = load_ybus_data(raw_dir, case_name)
     if ybus_base is not None:
-        # Normalize Ybus by S_base (convert to per-unit admittance)
-        torch.save(torch.from_numpy(ybus_base / s_base), os.path.join(case_dir, 'ybus_base.pt'))
+        # Pandapower's internal Ybus is ALREADY in per-unit. 
+        # We do NOT divide by s_base here to avoid double-normalization.
+        torch.save(torch.from_numpy(ybus_base), os.path.join(case_dir, 'ybus_base.pt'))
         if cont_matrices.size > 0:
-            torch.save(torch.from_numpy(cont_matrices / s_base), os.path.join(case_dir, 'ybus_contingencies.pt'))
+            torch.save(torch.from_numpy(cont_matrices), os.path.join(case_dir, 'ybus_contingencies.pt'))
             torch.save(torch.from_numpy(cont_timesteps), os.path.join(case_dir, 'ybus_contingency_timesteps.pt'))
+            
+    if b_max is not None and b_ibase is not None:
+        torch.save(torch.from_numpy(b_from.astype(np.int64)), os.path.join(case_dir, 'branch_from.pt'))
+        torch.save(torch.from_numpy(b_to.astype(np.int64)), os.path.join(case_dir, 'branch_to.pt'))
+        # Convert thermal current limit (kA) to per-unit power limit (S_max_pu)
+        # S_max_pu approx I_max_pu = I_max_ka / I_base_ka (assuming V approx 1.0)
+        b_max_pu = b_max / b_ibase
+        torch.save(torch.from_numpy(b_max_pu.astype(np.float32)), os.path.join(case_dir, 'branch_max_s_pu.pt'))
 
     # Save adjacency edge index
     adj = load_adjacency(raw_dir, case_name)
