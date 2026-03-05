@@ -49,19 +49,45 @@ lint-complexity:
 	pylint --disable=all --enable=too-many-branches,too-many-statements,too-many-locals,too-many-arguments data/*.py models/*.py tests/*.py
 
 # Generate 120 timestep data for all cases
-main120:
+main-120:
 	python src/data/main.py --case all --timestep 120
 
 # Generate 96 timestep data for case 33:
-mainTest:
+main-test:
 	python src/data/main.py --case 33 --timestep 96
 
 # Preprocess data for case 33:
-preTest:
+pre-test:
 	python src/data/preprocess_data.py --case 33
+
+# Train model for case 33:
+train-test:
+	python scripts/train.py --case 33 --models all
+
+# Train model for case 33 online:
+train-test-online:
+	python scripts/train.py --case 33 --models all --online
+
+# Sync wandb logs to cloud
+sync:
+	wandb sync wandb_logs/wandb/offline-run-*
 
 # Clean up temporary Python files and cache
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".pytest_cache" -exec rm -rf {} +
+	find . -type d -name ".ipynb_checkpoints" -exec rm -rf {} +
+	find . -type d -name "wandb" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+
+# Clean up ALL training sessions (checkpoints and logs)
+clean-training:
+	rm -rf checkpoints/
+	rm -rf wandb_logs/
+
+# Comprehensive clean-up (code, data, and training)
+clean-all: clean clean-training
+	rm -rf src/data/01_raw/
+	rm -rf src/data/03_processed/
+	rm -rf reports/figures/01_raw_data/
+	rm -rf reports/figures/03_processed/

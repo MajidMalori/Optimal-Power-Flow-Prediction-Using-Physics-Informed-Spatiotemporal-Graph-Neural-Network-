@@ -342,8 +342,11 @@ def save_data(data: dict, case: str, frac: float, out_dir: str):
     for k, v in data.items():
         base = f"{case}_{k}_frac{frac:.1f}"
         
-        # Skip writing large info dicts we don't need on disk for PINN
+        # Save convergence stats as JSON for plotting
         if k == 'convergence_stats':
+            audit_path = os.path.join(out_dir, f"{case}_data_quality_audit_frac{frac:.1f}.json")
+            with open(audit_path, 'w') as f:
+                json.dump(v, f, indent=4)
             continue
             
         if k == 'ybus_data':

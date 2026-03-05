@@ -23,14 +23,20 @@ physics_loss:
   lambda_branch_capacity: 0.01  # Weight for branch thermal limit violations
 
 trainer:
+  seed: 42
   max_epochs: 100
   accelerator: "auto"
   devices: "auto"
   log_every_n_steps: 10
+  enable_progress_bar: true
+  enable_model_summary: false
 
 logger:
-  save_dir: "tb_logs"
-  name: "powerflow_models"
+  backend: "wandb"              # Options: wandb, tensorboard
+  mode: "offline"               # Options: online, offline (offline = fast, sync later with 'wandb sync')
+  project: "powerflow-pinn"
+  entity: "benardmarfoadjei"
+  save_dir: "wandb_logs"
 
 callbacks:
   early_stopping:
@@ -39,7 +45,6 @@ callbacks:
     mode: "min"
   model_checkpoint:
     monitor: "val_loss"
-    dirpath: "checkpoints"
     filename: "{epoch:02d}-{val_loss:.4f}"
     save_top_k: 3
     mode: "min"
