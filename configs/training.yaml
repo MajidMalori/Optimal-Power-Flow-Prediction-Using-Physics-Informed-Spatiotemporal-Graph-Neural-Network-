@@ -35,7 +35,7 @@ logger:
   backend: "wandb"              # Options: wandb, tensorboard
   mode: "offline"               # Options: online, offline (offline = fast, sync later with 'wandb sync')
   project: "powerflow-pinn"
-  entity: "benardmarfoadjei"
+  entity: "benardmarfoadjei-knust-engineering-research-project-keep-"
   save_dir: "wandb_logs"
 
 callbacks:
