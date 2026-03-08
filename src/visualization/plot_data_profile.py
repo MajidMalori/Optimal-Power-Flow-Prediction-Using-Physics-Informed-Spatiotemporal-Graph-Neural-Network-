@@ -32,7 +32,7 @@ def plot_data_profile(config, case_name: str, output_path: str) -> str:
     """
     Create professional data profile visualization.
     """
-    data_dir = config.get('output_dir', 'data/01_raw')
+    data_dir = os.path.join(config.get('output_dir', 'data/01_raw'), case_name)
     feature_pattern = os.path.join(data_dir, f"{case_name}_features_frac*.npy")
     feature_files = sorted(glob.glob(feature_pattern))
     
@@ -77,8 +77,12 @@ def plot_data_profile(config, case_name: str, output_path: str) -> str:
     p_ren = features[:, :, FeatureIndices.P_REN]    # MW
     vm = features[:, :, FeatureIndices.VM]  # Voltage magnitude in p.u.
     
-    # Calculate hourly indices
-    hours = np.arange(n_samples) % hours_per_day
+    # Calculate hours per sequence (prevents shifting if timesteps aren't multiple of 24)
+    all_hours = []
+    for f_data in all_features:
+        all_hours.append(np.arange(f_data.shape[0]) % hours_per_day)
+    hours = np.concatenate(all_hours)
+    
     unique_fracs = np.sort(np.unique(np.round(ren_fracs, 1)))
     
     # Create figure with 2x2 grid
@@ -88,76 +92,62 @@ def plot_data_profile(config, case_name: str, output_path: str) -> str:
     # Color palette - professional gradients
     colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(unique_fracs)))
     
-    # ========== PLOT 1: Daily Load Pattern ==========
+    # ========== PLOT 1: Demand vs. Supply Balance ==========
     ax1 = fig.add_subplot(gs[0, 0])
     
-    for i, frac in enumerate(unique_fracs):
-        mask = np.abs(ren_fracs - frac) < 0.05
-        total_load = np.sum(p_load[mask], axis=1)  # Total system load in MW
-        
-        hourly_mean = []
-        hourly_std = []
-        for h in range(hours_per_day):
-            hour_data = total_load[hours[mask] == h]
-            if len(hour_data) > 0:
-                hourly_mean.append(np.mean(hour_data))
-                hourly_std.append(np.std(hour_data))
-            else:
-                hourly_mean.append(np.nan)
-                hourly_std.append(np.nan)
-        
-        hourly_mean = np.array(hourly_mean)
-        hourly_std = np.array(hourly_std)
-        
-        time_axis = np.linspace(0, 24, hours_per_day, endpoint=False)
-        ax1.plot(time_axis, hourly_mean, color=colors[i], 
-                label=f'{int(frac*100)}% Renewable', linewidth=2.5, alpha=0.9)
-        ax1.fill_between(time_axis, hourly_mean - hourly_std, hourly_mean + hourly_std,
-                        color=colors[i], alpha=0.15)
+    # We'll use the 100% renewable case as the primary illustration for balance
+    # or the highest available fraction
+    target_frac = unique_fracs[-1]
+    mask = np.abs(ren_fracs - target_frac) < 0.05
+    
+    # Calculate system-wide totals for the target fraction
+    total_demand = np.sum(p_load[mask], axis=1)
+    # Supply = Grid + Conv + Ren
+    total_supply = np.sum(p_ext[mask] + p_conv[mask] + p_ren[mask], axis=1)
+    
+    time_axis = np.linspace(0, 24, hours_per_day, endpoint=False)
+    
+    # Calculate hourly averages for the lines
+    demand_mean = np.array([np.mean(total_demand[hours[mask] == h]) for h in range(hours_per_day)])
+    supply_mean = np.array([np.mean(total_supply[hours[mask] == h]) for h in range(hours_per_day)])
+    
+    ax1.plot(time_axis, demand_mean, color='#2c3e50', label='Total System Demand', linewidth=3, linestyle='-')
+    ax1.plot(time_axis, supply_mean, color='#e67e22', label='Total System Generation', linewidth=2.5, linestyle='--')
     
     ax1.set_xlabel('Hour of Day', fontweight='bold')
-    ax1.set_ylabel('Total Active Load (MW)', fontweight='bold')
-    ax1.set_title('Daily Load Profile', fontweight='bold', pad=10)
+    ax1.set_ylabel('Power (MW)', fontweight='bold')
+    ax1.set_title(f'Demand vs. Supply Balance ({int(target_frac*100)}% Renewable)', fontweight='bold', pad=10)
     ax1.set_xticks(range(0, 25, 3))
     ax1.set_xticklabels([f'{h:02d}:00' for h in range(0, 25, 3)])
     ax1.set_xlim(0, 24)
     ax1.legend(loc='best', frameon=True, shadow=True)
     ax1.grid(True, alpha=0.3)
     
-    # ========== PLOT 2: Daily Generation Pattern ==========
+    # ========== PLOT 2: Daily Generation Mix (Stacked Area) ==========
     ax2 = fig.add_subplot(gs[0, 1])
     
-    for i, frac in enumerate(unique_fracs):
-        mask = np.abs(ren_fracs - frac) < 0.05
-        total_gen = np.sum(p_ext[mask] + p_conv[mask] + p_ren[mask], axis=1)  # Total generation in MW
-        
-        hourly_mean = []
-        hourly_std = []
-        for h in range(hours_per_day):
-            hour_data = total_gen[hours[mask] == h]
-            if len(hour_data) > 0:
-                hourly_mean.append(np.mean(hour_data))
-                hourly_std.append(np.std(hour_data))
-            else:
-                hourly_mean.append(np.nan)
-                hourly_std.append(np.nan)
-        
-        hourly_mean = np.array(hourly_mean)
-        hourly_std = np.array(hourly_std)
-        
-        time_axis = np.linspace(0, 24, hours_per_day, endpoint=False)
-        ax2.plot(time_axis, hourly_mean, color=colors[i], 
-                label=f'{int(frac*100)}% Renewable', linewidth=2.5, alpha=0.9)
-        ax2.fill_between(time_axis, hourly_mean - hourly_std, hourly_mean + hourly_std,
-                        color=colors[i], alpha=0.15)
+    # Calculate the mix for the target fraction
+    # Groups: External Grid, Conventional, Renewables
+    # Note: If we had solar/wind flags, we'd split them here.
+    # For now, we show the 3 main pillars.
+    mix_ext = np.array([np.mean(np.sum(p_ext[mask][hours[mask] == h], axis=1)) for h in range(hours_per_day)])
+    mix_conv = np.array([np.mean(np.sum(p_conv[mask][hours[mask] == h], axis=1)) for h in range(hours_per_day)])
+    mix_ren = np.array([np.mean(np.sum(p_ren[mask][hours[mask] == h], axis=1)) for h in range(hours_per_day)])
     
+    # Stack the data
+    stack_data = np.vstack([mix_ext, mix_conv, mix_ren])
+    stack_labels = ['External Grid', 'Conventional Gen', 'Renewable Gen']
+    stack_colors = ['#34495e', '#95a5a6', '#2ecc71']
+    
+    ax2.stackplot(time_axis, stack_data, labels=stack_labels, colors=stack_colors, alpha=0.8)
+
     ax2.set_xlabel('Hour of Day', fontweight='bold')
-    ax2.set_ylabel('Total Generation (MW)', fontweight='bold')
-    ax2.set_title('Daily Generation Profile', fontweight='bold', pad=10)
+    ax2.set_ylabel('Generation (MW)', fontweight='bold')
+    ax2.set_title('Daily Generation Mix', fontweight='bold', pad=10)
     ax2.set_xticks(range(0, 25, 3))
     ax2.set_xticklabels([f'{h:02d}:00' for h in range(0, 25, 3)])
     ax2.set_xlim(0, 24)
-    ax2.legend(loc='best', frameon=True, shadow=True)
+    ax2.legend(loc='upper right', frameon=True, shadow=True, fontsize=8)
     ax2.grid(True, alpha=0.3)
     
     # ========== PLOT 3: Renewable Generation by Level ==========

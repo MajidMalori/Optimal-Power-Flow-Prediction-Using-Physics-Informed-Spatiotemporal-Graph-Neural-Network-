@@ -14,8 +14,8 @@ import torch
 from tqdm import tqdm
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# script_dir is src/data, parent is src, root is one level up
-root_dir = os.path.dirname(os.path.dirname(script_dir))
+# root_dir is root, script_dir is root/scripts
+root_dir = os.path.dirname(script_dir)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
@@ -25,8 +25,8 @@ from src.constants import (
 NUM_FEATURES = FeatureIndices.NUM_FEATURES
 NUM_TARGETS = FeatureIndices.NUM_TARGETS
 
-RAW_DIR = os.path.join(script_dir, '01_raw')
-PROCESSED_DIR = os.path.join(script_dir, '03_processed')
+RAW_DIR = os.path.join(root_dir, 'data', '01_raw')
+PROCESSED_DIR = os.path.join(root_dir, 'data', '03_processed')
 
 def load_config():
     yaml_path = os.path.join(root_dir, 'configs', 'data_generation.yaml')
@@ -49,9 +49,10 @@ POWER_TARGET_INDICES = list(range(8))
 
 def get_case_files(raw_dir: str, case_name: str):
     """Discover all fraction files for a case, sorted by fraction value."""
-    feat_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_features_frac*.npy")))
-    targ_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_targets_frac*.npy")))
-    topo_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_topology_ids_frac*.npy")))
+    case_raw_dir = os.path.join(raw_dir, case_name)
+    feat_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_features_frac*.npy")))
+    targ_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_targets_frac*.npy")))
+    topo_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_topology_ids_frac*.npy")))
     return feat_files, targ_files, topo_files
 
 
@@ -118,9 +119,10 @@ def time_based_split(n_samples: int, train_ratio=None, val_ratio=None):
 
 def load_ybus_data(raw_dir: str, case_name: str):
     """Load base Ybus and contingency Ybus matrices."""
-    ybus_base_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_base_frac*.npy")))
-    ybus_cont_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_contingency_matrices_frac*.npy")))
-    ybus_ts_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_contingency_timesteps_frac*.npy")))
+    case_raw_dir = os.path.join(raw_dir, case_name)
+    ybus_base_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_base_frac*.npy")))
+    ybus_cont_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_contingency_matrices_frac*.npy")))
+    ybus_ts_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_contingency_timesteps_frac*.npy")))
 
     # Use first fraction's base Ybus (topology is the same across fractions)
     ybus_base = np.load(ybus_base_files[0]) if ybus_base_files else None
@@ -138,10 +140,10 @@ def load_ybus_data(raw_dir: str, case_name: str):
     contingency_matrices = np.concatenate(all_cont_matrices) if all_cont_matrices else np.array([])
     contingency_timesteps = np.concatenate(all_cont_timesteps) if all_cont_timesteps else np.array([])
 
-    branch_from_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_from_frac*.npy")))
-    branch_to_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_to_frac*.npy")))
-    branch_cap_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_max_i_ka_frac*.npy")))
-    branch_ibase_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_ybus_branch_i_base_frac*.npy")))
+    branch_from_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_branch_from_frac*.npy")))
+    branch_to_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_branch_to_frac*.npy")))
+    branch_cap_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_branch_max_i_ka_frac*.npy")))
+    branch_ibase_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_ybus_branch_i_base_frac*.npy")))
 
     branch_from = np.load(branch_from_files[0]) if branch_from_files else None
     branch_to = np.load(branch_to_files[0]) if branch_to_files else None
@@ -153,7 +155,8 @@ def load_ybus_data(raw_dir: str, case_name: str):
 
 def load_adjacency(raw_dir: str, case_name: str):
     """Load base adjacency edge index."""
-    adj_files = sorted(glob.glob(os.path.join(raw_dir, f"{case_name}_base_adjacency_frac*.npy")))
+    case_raw_dir = os.path.join(raw_dir, case_name)
+    adj_files = sorted(glob.glob(os.path.join(case_raw_dir, f"{case_name}_base_adjacency_frac*.npy")))
     if adj_files:
         return np.load(adj_files[0], allow_pickle=True)
     return None
@@ -320,9 +323,10 @@ if __name__ == "__main__":
         print()
         try:
             from src.visualization.plot_preprocessing import generate_all_preprocessing_plots
-            reports_dir = os.path.join(root_dir, 'reports', 'figures', '03_processed')
+            base_reports_dir = os.path.join(root_dir, 'reports', 'figures', '03_processed')
             for case in processed_cases:
                 case_dir = os.path.join(PROCESSED_DIR, case)
+                reports_dir = os.path.join(base_reports_dir, case)
                 generate_all_preprocessing_plots(case_dir, case, reports_dir)
         except Exception as e:
             print(f"Plot generation error: {e}")

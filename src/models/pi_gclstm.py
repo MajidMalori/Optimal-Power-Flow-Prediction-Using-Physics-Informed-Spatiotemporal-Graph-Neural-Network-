@@ -47,6 +47,7 @@ class PIGCLSTM(L.LightningModule):
                 branch_from=batch["branch_from"].to(self.device),
                 branch_to=batch["branch_to"].to(self.device),
                 branch_max_s_pu=batch["branch_max_s_pu"].to(self.device),
+                contingencies=batch.get("contingencies", torch.tensor([])).to(self.device),
                 lambda_power=self.lambda_power,
                 lambda_voltage=self.lambda_voltage,
                 lambda_branch=self.lambda_branch,
@@ -56,29 +57,39 @@ class PIGCLSTM(L.LightningModule):
     def forward(self, x_seq, edge_idx_seq):
         """
         x_seq: (batch, seq_len, nodes, features)
-        edge_idx_seq: list of edge_index tensors, one per timestep
+        edge_idx_seq: list (batch) of lists (seq) of edge_index tensors
         """
         batch_size, seq_len, num_nodes, num_features = x_seq.shape
 
         spatial_embeddings = []
-        for t in range(seq_len):
-            x_t = x_seq[:, t, :, :].reshape(-1, num_features)
-            edge_index_t = edge_idx_seq[t]
+        for b in range(batch_size):
+            sample_embeddings = []
+            for t in range(seq_len):
+                x_bt = x_seq[b, t] # [N, F]
+                edge_index_bt = edge_idx_seq[b][t]
+                
+                out_t = x_bt
+                for gcn in self.gcn_layers:
+                    out_t = self.relu(gcn(out_t, edge_index_bt))
+                sample_embeddings.append(out_t)
+            spatial_embeddings.append(torch.stack(sample_embeddings)) # [seq_len, N, hidden]
 
-            out_t = x_t
-            for gcn in self.gcn_layers:
-                out_t = self.relu(gcn(out_t, edge_index_t))
-            spatial_embeddings.append(out_t)
-
-        spatial_seq = torch.stack(spatial_embeddings, dim=1)
+        spatial_seq = torch.stack(spatial_embeddings) # [batch, seq_len, nodes, hidden]
+        # Reshape for LSTM: (batch * nodes, seq_len, hidden)
+        spatial_seq = spatial_seq.transpose(1, 2).reshape(batch_size * num_nodes, seq_len, -1)
+        
         lstm_out, _ = self.lstm(spatial_seq)
         last_out = lstm_out[:, -1, :]
-        preds = self.output_layer(last_out)
+        preds = self.output_layer(last_out) # [batch * nodes, out_channels]
         return preds.reshape(batch_size, num_nodes, -1)
 
     def _shared_step(self, batch, stage):
         x_seq = batch["features"]
         edge_idx_seq = batch["edge_index_seq"]
+        topology_ids_seq = batch["topology_ids"]
+        # Physics validation is for the last timestep
+        last_topo_ids = topology_ids_seq[:, -1]
+        
         full_targets = batch["targets"]
         targets_vm_va = full_targets[..., 8:10]
 
@@ -89,7 +100,7 @@ class PIGCLSTM(L.LightningModule):
         physics = self._get_physics_loss(batch)
         vm_pred = preds[..., 0]
         va_pred = preds[..., 1]
-        physics_result = physics(vm_pred, va_pred, full_targets)
+        physics_result = physics(vm_pred, va_pred, full_targets, last_topo_ids)
 
         total_loss = data_loss + physics_result["physics_loss"]
 

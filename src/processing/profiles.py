@@ -1,6 +1,6 @@
 import numpy as np
 import pandapower as pp
-from src.constants import HOURLY_LOAD_PATTERN
+from src.constants import HOURLY_LOAD_PATTERN, HOURLY_SOLAR_PATTERN, HOURLY_WIND_PATTERN
 try:
     from utils.contingency_ybus import DataGenerationError
 except ImportError:
@@ -12,13 +12,7 @@ def get_daily_load_profile(hour: int, _season: str = 'summer') -> float:
     return HOURLY_LOAD_PATTERN.get(hour, 0.5) * np.random.uniform(0.95, 1.05)
 
 def get_solar_generation_profile(hour: int, day_of_year: int = 180, weather_state: str = None, config: dict = None) -> float:
-    if hour < 5 or hour > 19: return 0.0
-    
-    hour_from_noon = abs(hour - 12)
-    if hour_from_noon > 7: return 0.0
-    
-    solar_angle = (hour - 12) * (np.pi / 14)
-    base_solar = max(0, np.cos(solar_angle))
+    base_solar = HOURLY_SOLAR_PATTERN.get(hour, 0.0)
     season_factor = 0.85 + 0.15 * np.sin(2 * np.pi * (day_of_year - 80) / 365)
     
     if weather_state is None:
@@ -49,12 +43,11 @@ def get_wind_generation_profile(hour: int, day: int = 0, weather_state: str = No
         'storm': (0.85, 1.0)
     }
     low, high = wind_ranges.get(weather_state, (0.85, 1.0))
-    base_wind = np.random.uniform(low, high)
+    base_wind = HOURLY_WIND_PATTERN.get(hour, 0.5) * np.random.uniform(low, high)
     
-    thermal_factor = 1.0 + 0.08 * np.sin(2 * np.pi * (hour - 6) / 24)
-    micro_variation = np.random.uniform(0.85, 1.15)
+    micro_variation = np.random.uniform(0.95, 1.05)
     
-    return np.clip(base_wind * thermal_factor * micro_variation, 0.0, 1.0)
+    return np.clip(base_wind * micro_variation, 0.0, 1.0)
 
 def simulate_weather_sequence(timesteps: int, _hours_per_day: int = 24, seed: int = None, _config: dict = None) -> list:
     if seed is not None: np.random.seed(seed)

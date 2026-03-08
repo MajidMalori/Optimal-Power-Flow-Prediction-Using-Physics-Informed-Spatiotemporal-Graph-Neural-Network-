@@ -7,13 +7,13 @@ import lightning as L
 from torch.utils.data import DataLoader
 
 from src.models import PIGCN, PowerFlowDataModule
-from src.data.preprocess_data import denormalize_predictions
+from scripts.preprocess_data import denormalize_predictions
 from src.constants import TargetIndices
 
 # Identify if dummy processed data is available from previous tests
 PROCESSED_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-    "src", "data", "03_processed"
+    "data", "03_processed"
 )
 HAVE_PROCESSED_DATA = os.path.exists(os.path.join(PROCESSED_DATA_DIR, "case33", "train_features.pt"))
 
@@ -102,8 +102,8 @@ def test_lightning_fast_dev_run_and_denormalize(case_name):
     assert not np.isnan(denorm_preds).any(), "Denormalized predictions contain NaNs"
     
     # Verify Power mapping
-    # 0.5 p.u. * 10 MVA (s_base for case33) = 5.0 MVA
-    assert np.allclose(denorm_preds[..., TargetIndices.P_LOAD], 5.0), "Power denormalization failed to scale by S_base."
+    # 0.5 p.u. * s_base
+    assert np.allclose(denorm_preds[..., TargetIndices.P_LOAD], 0.5 * meta['s_base']), "Power denormalization failed to scale by S_base."
     
     # Verify VM mapping
     # 0 (deviation) + 1.0 (nominal) = 1.0

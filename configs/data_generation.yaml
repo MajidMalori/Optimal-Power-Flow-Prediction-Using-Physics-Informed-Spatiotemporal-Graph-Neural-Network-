@@ -1,5 +1,5 @@
 # Directories
-output_dir: "src/data/01_raw"
+output_dir: "data/01_raw"
 reports_dir: "reports/figures/01_raw_data"
 
 # Simulation Core
@@ -12,7 +12,7 @@ time_steps: 10008
 renewable_fractions_to_run: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
 # Network Dynamics
-contingency_rate: 0.05
+configuration_rate: 0.10        # Probability of a switching event (rerouting) per timestep
 pmu_coverage: 0.3
 hours_per_day: 24
 

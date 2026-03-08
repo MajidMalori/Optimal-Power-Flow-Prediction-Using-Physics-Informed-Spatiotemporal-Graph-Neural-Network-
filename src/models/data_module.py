@@ -38,6 +38,7 @@ class PowerFlowDataset(Dataset):
         return {
             "features": self.features[idx],
             "targets": self.targets[idx],
+            "topology_id": self.topology_ids[idx],
             "edge_index": self._get_edge_index(idx)
         }
 
@@ -77,11 +78,13 @@ class SpatioTemporalDataset(Dataset):
         # targets shape: (T, num_nodes, num_features)
         target = self.targets[idx + self.seq_len - 1]
         
+        topo_ids_seq = self.topology_ids[idx : idx + self.seq_len]
         edge_index_seq = [self._get_edge_index(i) for i in range(idx, idx + self.seq_len)]
         
         return {
             "features": feat_seq,
             "targets": target,
+            "topology_ids": topo_ids_seq,
             "edge_index_seq": edge_index_seq
         }
 
@@ -144,26 +147,24 @@ class PowerFlowDataModule(L.LightningDataModule):
     def collate_fn(self, batch):
         """Custom collate function to handle variable-sized edge indices."""
         features = torch.stack([item["features"] for item in batch])
-        # Pass FULL targets (all 10 columns) — physics loss needs P/Q columns
-        # Individual models will slice to [8:10] for their data loss internally
         full_targets = torch.stack([item["targets"] for item in batch])
         
         result = {
             "features": features,
             "targets": full_targets,
             "ybus": self.ybus_base,
+            "contingencies": self.contingencies,
             "branch_from": self.branch_from,
             "branch_to": self.branch_to,
             "branch_max_s_pu": self.branch_max_s_pu,
         }
         
         if self.seq_len > 1:
-            edge_index_seq = []
-            for t in range(self.seq_len):
-                edge_index_seq.append(batch[0]["edge_index_seq"][t])
-            result["edge_index_seq"] = edge_index_seq
+            result["topology_ids"] = torch.stack([item["topology_ids"] for item in batch])
+            result["edge_index_seq"] = [item["edge_index_seq"] for item in batch]
         else:
-            result["edge_index"] = batch[0]["edge_index"]
+            result["topology_ids"] = torch.stack([item["topology_id"] for item in batch])
+            result["edge_index"] = [item["edge_index"] for item in batch]
         
         return result
 

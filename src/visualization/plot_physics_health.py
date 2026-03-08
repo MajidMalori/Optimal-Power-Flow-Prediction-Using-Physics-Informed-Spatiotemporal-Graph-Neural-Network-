@@ -26,7 +26,7 @@ def plot_physics_health(config, case_name: str, output_path: str) -> str:
     """
     Create professional physics health visualization.
     """
-    data_dir = config.get('output_dir', 'data/01_raw')
+    data_dir = os.path.join(config.get('output_dir', 'data/01_raw'), case_name)
     feature_pattern = os.path.join(data_dir, f"{case_name}_features_frac*.npy")
     feature_files = sorted(glob.glob(feature_pattern))
     
@@ -166,9 +166,9 @@ def plot_physics_health(config, case_name: str, output_path: str) -> str:
                    color='gray', marker='x', s=60, linewidths=2, alpha=0.8, label='Unobserved / Missing')
     else:
         # If NO unobserved buses, add a note explaining why
-        ax2.text(0.5, 0.05, "Note: All buses are partially observed (Dynamic PMUs)\nNo permanently unobserved buses (Gray Xs)", 
-                transform=ax2.transAxes, ha='center', va='bottom', fontsize=10, 
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#3498db'))
+        ax2.text(0.95, 0.05, "Note: All buses are partially observed (Dynamic PMUs)", 
+                transform=ax2.transAxes, ha='right', va='bottom', fontsize=9, 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='#3498db'))
     
     # Add limit lines
     ax2.axhline(v_min, color='orange', linestyle='--', linewidth=2, alpha=0.7)

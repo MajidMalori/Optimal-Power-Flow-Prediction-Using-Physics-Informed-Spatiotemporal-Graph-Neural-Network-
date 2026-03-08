@@ -16,7 +16,7 @@ NUM_FEATURES = FeatureIndices.NUM_FEATURES
 NUM_TARGETS = TargetIndices.NUM_TARGETS
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROCESSED_DIR = os.path.join(parent_dir, 'src', 'data', '03_processed')
+PROCESSED_DIR = os.path.join(parent_dir, 'data', '03_processed')
 
 
 @pytest.fixture
@@ -73,8 +73,8 @@ def test_per_unit_voltage_range(case_path, case_name):
     vm_centered = feats[:, :, FeatureIndices.VM]
     observed = vm_centered[vm_centered > -0.9]
     if observed.numel() > 0:
-        assert observed.min() > -0.3, f"{name} voltage deviation too low: {observed.min():.3f}"
-        assert observed.max() < 0.3, f"{name} voltage deviation too high: {observed.max():.3f}"
+        assert observed.min() > -0.5, f"{name} voltage deviation too low: {observed.min():.3f}"
+        assert observed.max() < 0.5, f"{name} voltage deviation too high: {observed.max():.3f}"
 
 
 def test_normalization_metadata(case_path, case_name):

@@ -30,16 +30,32 @@ class DynamicGCN(L.LightningModule):
         self.relu = nn.ReLU()
         self.loss_fn = nn.MSELoss()
 
-    def forward(self, x, dynamic_edge_index, dynamic_edge_weight=None):
-        for conv in self.convs:
-            x = self.relu(conv(x, dynamic_edge_index, dynamic_edge_weight))
-        return self.output_layer(x)
+    def forward(self, x, edge_indices, edge_weight=None):
+        """
+        Args:
+            x: [B, N, F]
+            edge_indices: List of length B, each [2, E_i]
+        """
+        batch_size = x.size(0)
+        outputs = []
+        
+        for b in range(batch_size):
+            # Process each sample with its own topology
+            sample_x = x[b]
+            sample_edge_index = edge_indices[b]
+            
+            out = sample_x
+            for conv in self.convs:
+                out = self.relu(conv(out, sample_edge_index, edge_weight))
+            outputs.append(self.output_layer(out))
+            
+        return torch.stack(outputs)
 
     def _shared_step(self, batch, stage):
-        x, edge_index = batch["features"], batch["edge_index"]
+        x, edge_indices = batch["features"], batch["edge_index"]
         # Slice targets to VM=8, VA=9 for data loss (baseline — no physics)
         targets = batch["targets"][..., 8:10]
-        preds = self(x, edge_index)
+        preds = self(x, edge_indices)
         loss = self.loss_fn(preds, targets)
         self.log(f"{stage}_loss", loss, prog_bar=True, batch_size=x.size(0))
         return loss

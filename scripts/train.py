@@ -64,7 +64,7 @@ SPATIAL_MODELS = {"StandardGCN", "DynamicGCN", "PIGCN"}
 RECURRENT_MODELS = {"PIGCLSTM", "PIGCGRU", "PIResnetGCLSTM", "PIResnetGCGRU"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROCESSED_DIR = os.path.join(PROJECT_ROOT, "src", "data", "03_processed")
+PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "03_processed")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

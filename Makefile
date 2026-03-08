@@ -20,6 +20,10 @@ test-physics:
 test-models:
 	pytest tests/test_models.py
 
+# Runs only the topology reconfiguration tests
+test-topology:
+	python3 tests/test_topology.py
+
 # Runs only the end-to-end training tests
 test-e2e:
 	pytest tests/test_training_e2e.py
@@ -48,29 +52,67 @@ lint-naming:
 lint-complexity:
 	pylint --disable=all --enable=too-many-branches,too-many-statements,too-many-locals,too-many-arguments data/*.py models/*.py tests/*.py
 
-# Generate 120 timestep data for all cases
-main-120:
-	python src/data/main.py --case all --timestep 120
-
 # Generate 96 timestep data for case 33:
-main-test:
-	python src/data/main.py --case 33 --timestep 96
+gen-33:
+	python scripts/generate_data.py --case 33 --timestep 96
 
-# Preprocess data for case 33:
-pre-test:
-	python src/data/preprocess_data.py --case 33
+gen-57:
+	python scripts/generate_data.py --case 57 --timestep 96
+
+gen-118:
+	python scripts/generate_data.py --case 118 --timestep 96
+
+gen-all:
+	python scripts/generate_data.py --case all --timestep 96
+
+gen-full:
+	python scripts/generate_data.py --timestep 10008
+
+prep-33:
+	python scripts/preprocess_data.py --case 33
+
+prep-57:
+	python scripts/preprocess_data.py --case 57
+
+prep-118:
+	python scripts/preprocess_data.py --case 118
+
+prep-all:
+	python scripts/preprocess_data.py --case all
 
 # Train model for case 33:
-train-test:
+train-33:
 	python scripts/train.py --case 33 --models all
 
+train-57:
+	python scripts/train.py --case 57 --models all
+
+train-118:
+	python scripts/train.py --case 118 --models all
+
+train-all:
+	python scripts/train.py --case all --models all
+
 # Train model for case 33 online:
-train-test-online:
+train-33-online:
 	python scripts/train.py --case 33 --models all --online
 
 # Sync wandb logs to cloud
 sync:
 	wandb sync wandb_logs/wandb/offline-run-*
+
+# Generate animations for all fractions
+anim-33:
+	python scripts/animate_grid_dynamics.py --case case33
+
+anim-57:
+	python scripts/animate_grid_dynamics.py --case case57
+
+anim-118:
+	python scripts/animate_grid_dynamics.py --case case118
+
+anim-all:
+	python scripts/animate_grid_dynamics.py --case all
 
 # Clean up temporary Python files and cache
 clean:
@@ -87,7 +129,8 @@ clean-training:
 
 # Comprehensive clean-up (code, data, and training)
 clean-all: clean clean-training
-	rm -rf src/data/01_raw/
-	rm -rf src/data/03_processed/
-	rm -rf reports/figures/01_raw_data/
-	rm -rf reports/figures/03_processed/
+	rm -rf data/01_raw/*
+	rm -rf data/03_processed/*
+	rm -rf reports/figures/01_raw_data/*
+	rm -rf reports/figures/03_processed/*
+	rm -rf reports/animations/*

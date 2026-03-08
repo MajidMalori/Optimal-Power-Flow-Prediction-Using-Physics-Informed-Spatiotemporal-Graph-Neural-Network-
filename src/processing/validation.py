@@ -1,10 +1,16 @@
 import os
 import sys
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# script_dir is root/scripts/data, root is 2 levels up
+root_dir = os.path.dirname(os.path.dirname(script_dir))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
 import numpy as np
 import pandapower as pp
-from src.data.profiles import calculate_renewable_reactive_power
-from src.data.topology import restore_contingency
+from src.processing.profiles import calculate_renewable_reactive_power
+from src.processing.topology import restore_configuration
 from src.constants import MAX_SLACK_MULTIPLIER, MAX_SLACK_WARNING_MULTIPLIER, MAX_LINE_LOADING_PERCENT, WARNING_LINE_LOADING_PERCENT
 
 
@@ -48,7 +54,7 @@ from src.constants import (
 
 def validate_power_flow_outputs(net: pp.pandapowerNet, _convergence_stats: dict, case_name: str = None, _config: dict = None) -> tuple[bool, str, dict]:
     flags = {k: False for k in ['voltage_violation', 'angle_violation', 'line_loading_violation', 
-                                'slack_power_violation', 'generator_capacity_violation', 'inverter_capability_violation']}
+                                 'slack_power_violation', 'generator_capacity_violation', 'inverter_capability_violation']}
     
     if not net.converged: return False, "Power flow did not converge", flags
     
@@ -84,8 +90,8 @@ def validate_power_flow_outputs(net: pp.pandapowerNet, _convergence_stats: dict,
     return True, "Valid", flags
 
 def apply_curtailment_with_retry(net: pp.pandapowerNet, base_renewable_p_mw: dict, 
-                                  max_attempts: int = 10, convergence_stats: dict = None,
-                                  _has_contingency: bool = False, case_name: str = None, config: dict = None) -> tuple[bool, float, dict]:
+                                   max_attempts: int = 10, convergence_stats: dict = None,
+                                   _has_contingency: bool = False, case_name: str = None, config: dict = None) -> tuple[bool, float, dict]:
     scaling = 1.0
     for attempt in range(max_attempts):
         if attempt > 0:
@@ -116,10 +122,10 @@ def apply_curtailment_with_retry(net: pp.pandapowerNet, base_renewable_p_mw: dic
 
 def hard_reset_system(net: pp.pandapowerNet, base_load_p: np.ndarray, base_load_q: np.ndarray,
                       base_renewable_p_mw: dict, convergence_stats: dict = None,
-                      dropped_line_idx: int = None, case_name: str = None, config: dict = None) -> tuple[bool, int]:
+                      switch_info: dict = None, case_name: str = None, config: dict = None) -> tuple[bool, int]:
     if convergence_stats: convergence_stats['validation_stats']['hard_resets'] += 1
     
-    if dropped_line_idx is not None: restore_contingency(net, dropped_line_idx)
+    if switch_info is not None: restore_configuration(net, switch_info)
     net.load.p_mw = base_load_p.copy()
     net.load.q_mvar = base_load_q.copy()
     

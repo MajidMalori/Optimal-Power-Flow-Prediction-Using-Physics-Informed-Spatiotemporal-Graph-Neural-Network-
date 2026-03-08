@@ -1,7 +1,7 @@
 import os
 import pytest
 
-PROCESSED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src', 'data', '03_processed')
+PROCESSED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', '03_processed')
 
 def pytest_addoption(parser):
     parser.addoption(

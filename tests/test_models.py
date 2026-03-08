@@ -32,11 +32,11 @@ def dummy_data():
     num_targets = 10       # Full target tensor width
     num_branches = 5       # Dummy branch count
     
-    # Feature Inputs
-    x_static = torch.rand(batch_size * num_nodes, in_channels)
+    # Feature Inputs - now matching (B, N, F) for spatial only too
+    x_static = torch.rand(batch_size, num_nodes, in_channels)
     x_seq = torch.rand(batch_size, seq_len, num_nodes, in_channels)
     # Full 10-column targets matching data_module collate format
-    targets = torch.rand(batch_size * num_nodes, num_targets)
+    targets = torch.rand(batch_size, num_nodes, num_targets)
     targets_seq = torch.rand(batch_size, num_nodes, num_targets)
     
     # Graph Topologies
@@ -45,7 +45,13 @@ def dummy_data():
         [1, 0, 2, 1]
     ], dtype=torch.long)
     
-    dynamic_edge_idx_seq = [edge_index for _ in range(seq_len)]
+    # Lists of tensors for edge_index to match collate_fn
+    batch_edge_index = [edge_index for _ in range(batch_size)]
+    batch_edge_index_seq = [[edge_index for _ in range(seq_len)] for _ in range(batch_size)]
+    
+    # Topology IDs
+    topology_ids = torch.zeros(batch_size, dtype=torch.long)
+    topology_ids_seq = torch.zeros(batch_size, seq_len, dtype=torch.long)
     
     # Physics tensors (dummy Ybus and branch data)
     ybus = torch.randn(num_nodes, num_nodes, dtype=torch.complex128)
@@ -56,7 +62,8 @@ def dummy_data():
     # Dummy batches for Lightning steps
     static_batch = {
         "features": x_static,
-        "edge_index": edge_index,
+        "edge_index": batch_edge_index,
+        "topology_ids": topology_ids,
         "targets": targets,
         "ybus": ybus,
         "branch_from": branch_from,
@@ -66,7 +73,8 @@ def dummy_data():
     
     seq_batch = {
         "features": x_seq,
-        "edge_index_seq": dynamic_edge_idx_seq,
+        "edge_index_seq": batch_edge_index_seq,
+        "topology_ids": topology_ids_seq,
         "targets": targets_seq,
         "ybus": ybus,
         "branch_from": branch_from,
@@ -82,8 +90,8 @@ def dummy_data():
         "out_channels": out_channels,
         "x_static": x_static,
         "x_seq": x_seq,
-        "edge_index": edge_index,
-        "dynamic_edge_idx_seq": dynamic_edge_idx_seq,
+        "edge_index": batch_edge_index,
+        "dynamic_edge_idx_seq": batch_edge_index_seq,
         "static_batch": static_batch,
         "seq_batch": seq_batch
     }
@@ -91,7 +99,7 @@ def dummy_data():
 def test_standard_gcn(dummy_data):
     m = StandardGCN(dummy_data["in_channels"], dummy_data["hidden_channels"], dummy_data["out_channels"])
     out = m(dummy_data["x_static"], dummy_data["edge_index"])
-    assert out.shape == (dummy_data["batch_size"] * dummy_data["num_nodes"], dummy_data["out_channels"])
+    assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
     trainer = L.Trainer(fast_dev_run=True, logger=False, enable_checkpointing=False)
     # create a dummy dataloader
     dl = torch.utils.data.DataLoader([dummy_data["static_batch"]], batch_size=None)
@@ -100,7 +108,7 @@ def test_standard_gcn(dummy_data):
 def test_dynamic_gcn(dummy_data):
     m = DynamicGCN(dummy_data["in_channels"], dummy_data["hidden_channels"], dummy_data["out_channels"])
     out = m(dummy_data["x_static"], dummy_data["edge_index"])
-    assert out.shape == (dummy_data["batch_size"] * dummy_data["num_nodes"], dummy_data["out_channels"])
+    assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
     trainer = L.Trainer(fast_dev_run=True, logger=False, enable_checkpointing=False)
     dl = torch.utils.data.DataLoader([dummy_data["static_batch"]], batch_size=None)
     trainer.fit(m, train_dataloaders=dl, val_dataloaders=dl)
@@ -108,7 +116,7 @@ def test_dynamic_gcn(dummy_data):
 def test_pi_gcn(dummy_data):
     m = PIGCN(dummy_data["in_channels"], dummy_data["hidden_channels"], dummy_data["out_channels"])
     out = m(dummy_data["x_static"], dummy_data["edge_index"])
-    assert out.shape == (dummy_data["batch_size"] * dummy_data["num_nodes"], dummy_data["out_channels"])
+    assert out.shape == (dummy_data["batch_size"], dummy_data["num_nodes"], dummy_data["out_channels"])
     trainer = L.Trainer(fast_dev_run=True, logger=False, enable_checkpointing=False)
     dl = torch.utils.data.DataLoader([dummy_data["static_batch"]], batch_size=None)
     trainer.fit(m, train_dataloaders=dl, val_dataloaders=dl)

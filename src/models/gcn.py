@@ -1,3 +1,4 @@
+import os
 import lightning as L
 import torch
 from torch import nn
@@ -20,6 +21,15 @@ class StandardGCN(L.LightningModule):
         self.patience = kwargs.get('lr_patience', 10)
         self.factor = kwargs.get('lr_factor', 0.5)
 
+        # Load static adjacency for Model 1 (Baseline)
+        data_dir = kwargs.get('data_dir', 'data/03_processed/case33')
+        adj_path = os.path.join(data_dir, 'adjacency.pt')
+        if os.path.exists(adj_path):
+            self.register_buffer("static_edge_index", torch.load(adj_path, weights_only=True))
+        else:
+            # Fallback if specific case dir not provided
+            self.static_edge_index = None
+
         self.convs = nn.ModuleList()
         self.convs.append(GCNConv(in_channels, hidden_channels))
         for _ in range(num_layers - 2):
@@ -29,16 +39,19 @@ class StandardGCN(L.LightningModule):
         self.relu = nn.ReLU()
         self.loss_fn = nn.MSELoss()
 
-    def forward(self, x, edge_index, edge_weight=None):
+    def forward(self, x, edge_index=None, edge_weight=None):
+        # Model 1 ignores the batch edge_index to stay truly static
+        target_edge_index = self.static_edge_index if self.static_edge_index is not None else edge_index[0]
+        
         for conv in self.convs:
-            x = self.relu(conv(x, edge_index, edge_weight))
+            x = self.relu(conv(x, target_edge_index, edge_weight))
         return self.output_layer(x)
 
     def _shared_step(self, batch, stage):
-        x, edge_index = batch["features"], batch["edge_index"]
+        x = batch["features"]
         # Slice targets to VM=8, VA=9 for data loss (baseline — no physics)
         targets = batch["targets"][..., 8:10]
-        preds = self(x, edge_index)
+        preds = self(x)
         loss = self.loss_fn(preds, targets)
         self.log(f"{stage}_loss", loss, prog_bar=True, batch_size=x.size(0))
         return loss

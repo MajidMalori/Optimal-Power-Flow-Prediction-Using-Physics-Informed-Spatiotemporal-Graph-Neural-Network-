@@ -39,20 +39,92 @@ def configure_renewables(net: pp.pandapowerNet, renewable_fraction_for_run: floa
         
     return net
 
-def apply_n1_contingency(net: pp.pandapowerNet) -> int:
-    active_lines = net.line.index[net.line.in_service]
-    if not active_lines.any(): return None
+def apply_configuration_switch(net: pp.pandapowerNet) -> dict:
+    """
+    Simulates a 'Configuration Change' (Switching Event) for both radial and meshed grids.
+    1. Identifies tie-lines (Normally Open).
+    2. If no NO lines exist (Case 57/118), it creates one by opening a line in a cycle.
+    3. Closes a NO line to create a loop.
+    4. Finds a different line in that loop and opens it.
+    """
+    # 1. Identify Tie-Lines (Normally Open)
+    no_lines = net.line.index[~net.line.in_service].values
     
-    for line_to_drop in np.random.permutation(active_lines.values):
-        net.line.loc[line_to_drop, 'in_service'] = False
-        if nx.is_connected(top.create_nxgraph(net, include_trafos=True)):
-            return line_to_drop
-        net.line.loc[line_to_drop, 'in_service'] = True
-    return None
+    # 2. If no NO lines exist, we must create one by opening a cycle
+    # This prevents the 'straight line' topology on meshed systems like Case 57
+    if len(no_lines) == 0:
+        try:
+            g = top.create_nxgraph(net, include_trafos=False)
+            simple_g = nx.Graph(g)
+            loops = nx.cycle_basis(simple_g)
+            if not loops: return None
+            
+            # Pick a random loop and open a line in it
+            loop_nodes = loops[np.random.randint(len(loops))]
+            u, v = loop_nodes[0], loop_nodes[1]
+            mask = ((net.line.from_bus == u) & (net.line.to_bus == v)) | \
+                   ((net.line.from_bus == v) & (net.line.to_bus == u))
+            indices = net.line.index[mask].values
+            if len(indices) == 0: return None
+            
+            line_to_open = indices[0]
+            net.line.loc[line_to_open, 'in_service'] = False
+            # Now we have one NO line, we can proceed or just return this as the switch
+            return {'closed_idx': int(line_to_open), 'opened_idx': int(line_to_open)} # Self-loop switch
+        except Exception: return None
 
-def restore_contingency(net: pp.pandapowerNet, dropped_line_idx: int):
-    if dropped_line_idx is not None:
-        net.line.loc[dropped_line_idx, 'in_service'] = True
+    line_to_close = np.random.choice(no_lines)
+    net.line.loc[line_to_close, 'in_service'] = True
+    
+    # 3. Find the resulting loop using NetworkX
+    try:
+        g = top.create_nxgraph(net, include_trafos=True)
+        # convert to simple graph for cycle_basis
+        simple_g = nx.Graph(g)
+        loops = list(nx.cycle_basis(simple_g))
+        if not loops:
+            net.line.loc[line_to_close, 'in_service'] = False
+            return None
+            
+        loop_nodes = loops[0] # Take the first loop formed
+        
+        # Find all lines that connect nodes in this loop
+        loop_lines = []
+        for i in range(len(loop_nodes)):
+            u, v = loop_nodes[i], loop_nodes[(i+1)%len(loop_nodes)]
+            # Find the line index connecting u and v
+            mask = ((net.line.from_bus == u) & (net.line.to_bus == v)) | \
+                   ((net.line.from_bus == v) & (net.line.to_bus == u))
+            indices = net.line.index[mask].values
+            if len(indices) > 0:
+                loop_lines.extend(indices)
+        
+        # 4. Filter: We must NOT open the line we just closed (otherwise nothing changed)
+        possible_to_open = [idx for idx in loop_lines if idx != line_to_close]
+        
+        if not possible_to_open:
+            net.line.loc[line_to_close, 'in_service'] = False
+            return None
+            
+        line_to_open = np.random.choice(possible_to_open)
+        
+        # 5. Open the second line
+        net.line.loc[line_to_open, 'in_service'] = False
+        
+        return {
+            'closed_idx': int(line_to_close),
+            'opened_idx': int(line_to_open)
+        }
+    except Exception:
+        # Emergency rollback
+        net.line.loc[line_to_close, 'in_service'] = False
+        return None
+
+def restore_configuration(net: pp.pandapowerNet, switch_info: dict):
+    """Reverts a switching event back to the base configuration."""
+    if switch_info:
+        net.line.loc[switch_info['closed_idx'], 'in_service'] = False
+        net.line.loc[switch_info['opened_idx'], 'in_service'] = True
 
 def calculate_ybus_from_net(net: pp.pandapowerNet) -> np.ndarray:
     if net._ppc is None or 'internal' not in net._ppc or 'Ybus' not in net._ppc['internal']:
