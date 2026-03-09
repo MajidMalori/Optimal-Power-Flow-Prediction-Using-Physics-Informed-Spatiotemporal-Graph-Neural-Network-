@@ -47,6 +47,19 @@ class StandardGCN(L.LightningModule):
             x = self.relu(conv(x, target_edge_index, edge_weight))
         return self.output_layer(x)
 
+    def _get_physics_loss(self, batch):
+        """Lazily initialize PhysicsLoss for evaluation (even if not used for training)."""
+        if not hasattr(self, '_physics_loss') or self._physics_loss is None:
+            from src.models.physics_loss import PhysicsLoss
+            self._physics_loss = PhysicsLoss(
+                ybus=batch["ybus"].to(self.device),
+                branch_from=batch["branch_from"].to(self.device),
+                branch_to=batch["branch_to"].to(self.device),
+                branch_max_s_pu=batch["branch_max_s_pu"].to(self.device),
+                contingencies=batch.get("contingencies", torch.tensor([])).to(self.device),
+            )
+        return self._physics_loss
+
     def _shared_step(self, batch, stage):
         x = batch["features"]
         # Slice targets to VM=8, VA=9 for data loss (baseline — no physics)

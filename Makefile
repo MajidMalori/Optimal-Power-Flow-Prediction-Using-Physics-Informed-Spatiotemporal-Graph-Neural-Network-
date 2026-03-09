@@ -114,6 +114,19 @@ anim-118:
 anim-all:
 	python scripts/animate_grid_dynamics.py --case all
 
+# Evaluate trained models on the test set
+eval-33:
+	python scripts/evaluate.py --case case33
+
+eval-57:
+	python scripts/evaluate.py --case case57
+
+eval-118:
+	python scripts/evaluate.py --case case118
+
+eval-all:
+	python scripts/evaluate.py --case all
+
 # Clean up temporary Python files and cache
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +

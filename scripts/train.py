@@ -43,25 +43,9 @@ from lightning.pytorch.loggers import WandbLogger
 logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
 from src.models import (
-    StandardGCN, DynamicGCN, PIGCN,
-    PIGCLSTM, PIGCGRU,
-    PIResnetGCLSTM, PIResnetGCGRU,
+    MODEL_REGISTRY, SPATIAL_MODELS, RECURRENT_MODELS,
     PowerFlowDataModule
 )
-
-# ── Constants ────────────────────────────────────────────────────────────────
-MODEL_REGISTRY = {
-    "StandardGCN": StandardGCN,
-    "DynamicGCN": DynamicGCN,
-    "PIGCN": PIGCN,
-    "PIGCLSTM": PIGCLSTM,
-    "PIGCGRU": PIGCGRU,
-    "PIResnetGCLSTM": PIResnetGCLSTM,
-    "PIResnetGCGRU": PIResnetGCGRU
-}
-
-SPATIAL_MODELS = {"StandardGCN", "DynamicGCN", "PIGCN"}
-RECURRENT_MODELS = {"PIGCLSTM", "PIGCGRU", "PIResnetGCLSTM", "PIResnetGCGRU"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "03_processed")

@@ -207,3 +207,94 @@ class PhysicsLoss(nn.Module):
             "voltage_limit_loss": loss_voltage.detach(),
             "branch_capacity_loss": loss_branch.detach(),
         }
+
+    @torch.no_grad()
+    def evaluate_constraints(
+        self,
+        vm_pred: Tensor,
+        va_pred: Tensor,
+        targets: Tensor,
+        topology_ids: Tensor,
+        p_tol: float = 0.005,  # 0.5% power balance tolerance (standard for OPF)
+    ) -> dict:
+        """
+        Evaluate binary constraint satisfaction for benchmarking.
+        Returns counts of violations and total items checked.
+        """
+        # Auto-reshape if flat
+        if vm_pred.dim() == 1:
+            num_nodes = self.ybus_base.shape[0]
+            batch_size = vm_pred.shape[0] // num_nodes
+            vm_pred = vm_pred.reshape(batch_size, num_nodes)
+            va_pred = va_pred.reshape(batch_size, num_nodes)
+        else:
+            batch_size, num_nodes = vm_pred.shape
+
+        v_complex = self._reconstruct_complex_voltage(vm_pred, va_pred)
+        
+        # 1. Power Balance
+        i_injected_list = []
+        for b in range(batch_size):
+            tid = topology_ids[b].item()
+            yb = self.ybus_base if (tid == 0 or self.contingencies is None) else self.contingencies[tid - 1]
+            i_injected_list.append(torch.matmul(yb, v_complex[b].unsqueeze(-1)).squeeze(-1))
+        
+        i_injected = torch.stack(i_injected_list)
+        s_calc = v_complex * torch.conj(i_injected)
+        p_calc = s_calc.real.float()
+        q_calc = s_calc.imag.float()
+
+        if targets.dim() == 2:
+            targets = targets.reshape(batch_size, num_nodes, -1)
+
+        p_net_true = (targets[..., 2] + targets[..., 4] + targets[..., 6] - targets[..., 0])
+        q_net_true = (targets[..., 3] + targets[..., 5] + targets[..., 7] - targets[..., 1])
+
+        p_err = torch.abs(p_calc - p_net_true)
+        q_err = torch.abs(q_calc - q_net_true)
+        
+        p_satisfied = (p_err < p_tol).sum().item()
+        q_satisfied = (q_err < p_tol).sum().item()
+        total_p_q = batch_size * num_nodes
+
+        # 2. Voltage Limits
+        vm_abs = vm_pred + 1.0
+        v_satisfied = ((vm_abs >= self.v_min) & (vm_abs <= self.v_max)).sum().item()
+        total_v = batch_size * num_nodes
+
+        # 3. Branch Capacity
+        f_idx = self.branch_from
+        t_idx = self.branch_to
+        v_from = v_complex[:, f_idx]
+        v_to = v_complex[:, t_idx]
+        
+        y_branch_list = []
+        for b in range(batch_size):
+            tid = topology_ids[b].item()
+            yb = self.ybus_base if (tid == 0 or self.contingencies is None) else self.contingencies[tid - 1]
+            y_branch_list.append(-yb[f_idx, t_idx])
+            
+        y_branch = torch.stack(y_branch_list)
+        s_branch = torch.abs(v_from * torch.conj(y_branch * (v_from - v_to)))
+        s_max = self.branch_max_s_pu.unsqueeze(0).float()
+        
+        s_satisfied = (s_branch <= s_max).sum().item()
+        total_s = batch_size * s_branch.shape[1]
+
+        # A sample is fully "feasible" if ALL its constraints are met
+        p_v_s_all_met = (p_err < p_tol).all(dim=1) & (q_err < p_tol).all(dim=1) & \
+                        ((vm_abs >= self.v_min) & (vm_abs <= self.v_max)).all(dim=1) & \
+                        (s_branch <= s_max).all(dim=1)
+        feasible_samples = p_v_s_all_met.sum().item()
+
+        return {
+            "p_satisfied": p_satisfied,
+            "q_satisfied": q_satisfied,
+            "v_satisfied": v_satisfied,
+            "s_satisfied": s_satisfied,
+            "total_p_q": total_p_q,
+            "total_v": total_v,
+            "total_s": total_s,
+            "feasible_samples": feasible_samples,
+            "total_samples": batch_size
+        }
