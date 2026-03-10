@@ -127,6 +127,20 @@ eval-118:
 eval-all:
 	python scripts/evaluate.py --case all
 
+# Analyze uncertainty on the test set
+unc-33:
+	python scripts/analyze_uncertainty.py --case case33
+
+unc-57:
+	python scripts/analyze_uncertainty.py --case case57
+
+unc-118:
+	python scripts/analyze_uncertainty.py --case case118
+
+unc-all:
+	python scripts/analyze_uncertainty.py --case all
+
+
 # Clean up temporary Python files and cache
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +

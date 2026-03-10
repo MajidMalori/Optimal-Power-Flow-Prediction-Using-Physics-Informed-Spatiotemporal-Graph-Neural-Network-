@@ -4,11 +4,31 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 def set_premium_aesthetics():
-    """Set the aesthetic parameters for the plots."""
+    """Set the aesthetic parameters for the plots and silence font warnings."""
+    import logging
+    import warnings
+    # Silence matplotlib font manager warnings and general findfont warnings
+    logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore", message=".*findfont: Generic family.*")
+    warnings.filterwarnings("ignore", message=".*findfont: Font family.*")
+
     sns.set_theme(style="whitegrid")
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = ['Inter', 'Roboto', 'Arial']
+    plt.rcParams['font.family'] = 'DejaVu Sans' # Use a specific installed font
     plt.rcParams['figure.dpi'] = 300
+
+SOLVER_DISPLAY = {
+    "nr": "Newton-Raphson",
+    "iwamoto_nr": "NR+Iwamoto",
+    "gs": "Gauss-Seidel",
+    "bfsw": "Backward/Fwd"
+}
+
+SOLVER_COLORS = {
+    "nr": "#e63946",
+    "iwamoto_nr": "#e76f51",
+    "gs": "#2a9d8f",
+    "bfsw": "#264653"
+}
 
 def plot_benchmark_results(results, case_name, output_dir):
     """
@@ -73,25 +93,87 @@ def plot_benchmark_results(results, case_name, output_dir):
     plt.savefig(os.path.join(output_dir, "physics_gap.png"), bbox_inches='tight')
     plt.close()
 
-    # --- Plot 3: Efficiency Gain (Speedup) ---
-    plt.figure(figsize=(10, 6))
-    inf_times = [r['avg_inf_ms'] for r in results]
-    pp_times = [r['avg_pp_ms'] for r in results]
-    
-    plt.bar(models, inf_times, color='#4cc9f0', label='GNN Inference (ms)')
-    plt.axhline(y=np.mean(pp_times), color='#f72585', linestyle='--', label='Pandapower IPOPT (avg)')
-    
-    plt.yscale('log')
-    plt.ylabel('Time per Sample (ms) - Log Scale', fontsize=12, fontweight='bold')
-    plt.title(f"Efficiency Gain: {case_name} (Speedup vs Reference)", fontsize=14, fontweight='bold', pad=20)
-    plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
-    plt.xticks(rotation=45, ha='right')
-    
-    for i, r in enumerate(results):
-        plt.text(i, r['avg_inf_ms'], f"{r['speedup']:.1f}x", ha='center', va='bottom', fontweight='bold', fontsize=10)
+    # --- Plot 3: Multi-Solver Efficiency (Speedup vs All Solvers) ---
+    solver_speeds = results[0].get('solver_speeds', {})
+    if solver_speeds:
+        fig, ax = plt.subplots(figsize=(12, 7))
+        inf_times = [r['avg_inf_ms'] for r in results]
+        
+        # GNN inference bars
+        bars = ax.bar(models, inf_times, color='#4cc9f0', label='GNN Inference', zorder=3)
+        
+        # Horizontal lines for each solver
+        for alg, ms in solver_speeds.items():
+            color = SOLVER_COLORS.get(alg, '#888888')
+            name = SOLVER_DISPLAY.get(alg, alg)
+            ax.axhline(y=ms, color=color, linestyle='--', linewidth=2, 
+                       label=f'{name} ({ms:.1f} ms)', zorder=2)
+        
+        ax.set_yscale('log')
+        ax.set_ylabel('Time per Sample (ms) - Log Scale', fontsize=12, fontweight='bold')
+        ax.set_title(f"Multi-Solver Efficiency: {case_name}", fontsize=14, fontweight='bold', pad=20)
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+        ax.set_xticklabels(models, rotation=45, ha='right')
+        
+        # Add speedup annotations (vs NR)
+        nr_ms = solver_speeds.get("nr", 1.0)
+        for i, r in enumerate(results):
+            sp = nr_ms / r['avg_inf_ms']
+            ax.text(i, r['avg_inf_ms'], f"{sp:.0f}x", ha='center', va='bottom', 
+                    fontweight='bold', fontsize=9, zorder=4)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "efficiency.png"), bbox_inches='tight')
+        plt.close()
 
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "efficiency.png"), bbox_inches='tight')
-    plt.close()
-    
-    print(f"Benchmark plots saved to {os.path.relpath(output_dir)}")
+    # --- Plot 4: Solver Accuracy Comparison (GNN vs Classical Solvers vs NR Truth) ---
+    solver_accuracy = results[0].get('solver_accuracy', {})
+    if solver_accuracy:
+        fig, (ax_vm, ax_va) = plt.subplots(1, 2, figsize=(16, 7))
+        
+        # Collect all entries: solvers + GNN models
+        all_labels = []
+        all_mae_vm = []
+        all_mae_va = []
+        all_colors = []
+        
+        # Classical solvers first
+        for alg, acc in solver_accuracy.items():
+            all_labels.append(SOLVER_DISPLAY.get(alg, alg))
+            all_mae_vm.append(acc['mae_vm'])
+            all_mae_va.append(acc['mae_va'])
+            all_colors.append(SOLVER_COLORS.get(alg, '#888888'))
+        
+        # GNN models
+        gnn_palette = plt.cm.cool(np.linspace(0.2, 0.8, len(results)))
+        for i, r in enumerate(results):
+            all_labels.append(r['model'])
+            all_mae_vm.append(r['mae_vm'])
+            all_mae_va.append(r['mae_va'])
+            all_colors.append(gnn_palette[i])
+        
+        x = np.arange(len(all_labels))
+        
+        # VM subplot
+        ax_vm.barh(x, all_mae_vm, color=all_colors, edgecolor='white', linewidth=0.5)
+        ax_vm.set_yticks(x)
+        ax_vm.set_yticklabels(all_labels, fontsize=10)
+        ax_vm.set_xlabel('MAE Voltage Magnitude (p.u.)', fontsize=11, fontweight='bold')
+        ax_vm.set_title('VM Accuracy vs NR Ground Truth', fontsize=13, fontweight='bold')
+        ax_vm.invert_yaxis()
+        ax_vm.set_xscale('log')
+        
+        # VA subplot
+        ax_va.barh(x, all_mae_va, color=all_colors, edgecolor='white', linewidth=0.5)
+        ax_va.set_yticks(x)
+        ax_va.set_yticklabels(all_labels, fontsize=10)
+        ax_va.set_xlabel('MAE Voltage Angle (rad)', fontsize=11, fontweight='bold')
+        ax_va.set_title('VA Accuracy vs NR Ground Truth', fontsize=13, fontweight='bold')
+        ax_va.invert_yaxis()
+        ax_va.set_xscale('log')
+        
+        fig.suptitle(f"Solver vs GNN Accuracy Comparison: {case_name}", 
+                     fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "solver_comparison.png"), bbox_inches='tight')
+        plt.close()

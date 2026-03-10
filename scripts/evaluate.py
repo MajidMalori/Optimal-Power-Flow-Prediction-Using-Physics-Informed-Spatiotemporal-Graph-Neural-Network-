@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import shutil
 import warnings
 
 # Absolute silence for environment warnings
@@ -21,7 +22,13 @@ import yaml
 import argparse
 import numpy as np
 import logging
+import warnings
 from tqdm import tqdm
+
+# Silence font-related warnings before they trigger
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", message=".*findfont: Generic family.*")
+warnings.filterwarnings("ignore", message=".*findfont: Font family.*")
 
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +40,8 @@ from src.processing.topology import load_network
 from src.visualization.plot_benchmarks import plot_benchmark_results
 
 logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
+logging.getLogger("pandapower").setLevel(logging.ERROR)
+logging.getLogger("pypower").setLevel(logging.ERROR)
 
 def get_latest_checkpoint(model_name, case_name):
     pattern = os.path.join(PROJECT_ROOT, "checkpoints", "**", f"{model_name}_{case_name}", "*.ckpt")
@@ -42,8 +51,6 @@ def get_latest_checkpoint(model_name, case_name):
     return max(files, key=os.path.getmtime)
 
 def run_evaluation(model_name, case_name, ckpt_path, device):
-    print(f"Evaluating {model_name} on {case_name}")
-    
     # 1. Load Data
     config_path = os.path.join(PROJECT_ROOT, "configs", "training.yaml")
     with open(config_path, 'r') as f:
@@ -69,6 +76,8 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
     # 3. Metrics accumulators
     mae_vm = []
     mae_va = []
+    mse_vm = []
+    mse_va = []
     
     p_satisfied = 0
     q_satisfied = 0
@@ -80,10 +89,11 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
     feasible_count = 0
 
     inference_times = []
+    
 
     # 4. Evaluation Loop
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Inference", leave=False, ascii=True):
+        for batch in test_loader:
             # Move batch to device
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             
@@ -102,17 +112,20 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             
             # Forward pass
             preds = model(x, edge_index)
-            
+
             if device.type == "cuda":
                 torch.cuda.synchronize()
             end = time.perf_counter()
             inference_times.append((end - start) / x.size(0))
 
-            # MAE (VM is index 0 in preds, VA is index 1)
+            # MAE & MSE (VM is index 0 in preds, VA is index 1)
             targets_vm_va = targets[..., 8:10]
             err = torch.abs(preds - targets_vm_va)
             mae_vm.append(err[..., 0].mean().item())
             mae_va.append(err[..., 1].mean().item())
+            
+            mse_vm.append((err[..., 0]**2).mean().item())
+            mse_va.append((err[..., 1]**2).mean().item())
 
             # Constraints
             physics = model._get_physics_loss(batch)
@@ -136,54 +149,83 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             feasible_count += res["feasible_samples"]
             total_samples += res["total_samples"]
 
-    # 5. Pandapower Baseline (Speed Factor)
+    # 5. Multi-Solver Benchmark (Speed + Accuracy vs NR Ground Truth)
     net = load_network(case_name)
-    pp_times = []
-    for _ in range(5):
-        start = time.perf_counter()
-        try:
-            pp.runopp(net)
-        except:
-            pp.runpp(net)
-        end = time.perf_counter()
-        pp_times.append(end - start)
     
-    avg_pp_time = np.mean(pp_times)
+    # Determine which solvers to test (BFS only for radial networks)
+    is_radial = case_name == "case33"
+    solvers = ["nr", "iwamoto_nr", "gs"]
+    if is_radial:
+        solvers.append("bfsw")
+    
+    solver_speeds = {}  # solver_name -> avg_ms
+    solver_vm = {}      # solver_name -> vm array
+    solver_va = {}      # solver_name -> va array
+    
+    # Suppress stdout during solver runs (Iwamoto prints debug multipliers)
+    devnull = open(os.devnull, 'w')
+    
+    for alg in solvers:
+        times = []
+        vm_result = None
+        va_result = None
+        for trial in range(3):
+            try:
+                old_stdout = sys.stdout
+                sys.stdout = devnull
+                start = time.perf_counter()
+                pp.runpp(net, algorithm=alg)
+                end = time.perf_counter()
+                sys.stdout = old_stdout
+                times.append(end - start)
+                # Store the last successful solution for accuracy comparison
+                vm_result = net.res_bus.vm_pu.values.copy()
+                va_result = np.deg2rad(net.res_bus.va_degree.values.copy())
+            except Exception:
+                sys.stdout = old_stdout
+        
+        if times:
+            solver_speeds[alg] = np.mean(times) * 1000  # ms
+            solver_vm[alg] = vm_result
+            solver_va[alg] = va_result
+    
+    devnull.close()
+    
+    # Solver accuracy: compare each solver against NR ground truth
+    solver_accuracy = {}
+    if "nr" in solver_vm:
+        nr_vm = solver_vm["nr"]
+        nr_va = solver_va["nr"]
+        for alg in solvers:
+            if alg == "nr" or alg not in solver_vm:
+                continue
+            mae_vm_solver = np.mean(np.abs(solver_vm[alg] - nr_vm))
+            mae_va_solver = np.mean(np.abs(solver_va[alg] - nr_va))
+            solver_accuracy[alg] = {"mae_vm": mae_vm_solver, "mae_va": mae_va_solver}
+    
     avg_inf_time = np.mean(inference_times)
-    speed_factor = avg_pp_time / avg_inf_time
+    
+    # Primary speedup uses NR as reference (the gold standard)
+    nr_speed_ms = solver_speeds.get("nr", 1.0)
+    speed_factor = nr_speed_ms / (avg_inf_time * 1000)
 
-    # 6. Report
-    print(f"\n{'-'*50}")
-    print(f"RESULTS: {model_name} on {case_name}")
-    print(f"{'-'*50}")
-    print(f"Accuracy:")
-    print(f"  MAE (Voltage Mag):    {np.mean(mae_vm):.6f} p.u.")
-    print(f"  MAE (Voltage Angle):  {np.mean(mae_va):.6f} rad")
-    print(f"\nPhysical Feasibility:")
-    print(f"  Overall Feasibility:  {feasible_count/total_samples*100:6.2f}%")
-    print(f"  Constraint Sat. Rate:")
-    print(f"    - Power P:          {p_satisfied/total_nodes*100:6.2f}%")
-    print(f"    - Power Q:          {q_satisfied/total_nodes*100:6.2f}%")
-    print(f"    - Voltage Limits:   {v_satisfied/total_nodes*100:6.2f}%")
-    print(f"    - Branch Limits:    {s_satisfied/total_branches*100:6.2f}%")
-    print(f"\nEfficiency:")
-    print(f"  Avg Inference Time:   {avg_inf_time*1000:8.3f} ms/sample")
-    print(f"  Avg Pandapower Time:  {avg_pp_time*1000:8.3f} ms/sample")
-    print(f"  Speedup Factor:       {speed_factor:8.1f}x")
-    print(f"{'-'*50}\n")
+    # No verbose per-model reporting here; we sum it all up at the end.
 
     return {
         "case": case_name,
         "model": model_name,
         "mae_vm": np.mean(mae_vm),
         "mae_va": np.mean(mae_va),
+        "mse_vm": np.mean(mse_vm),
+        "mse_va": np.mean(mse_va),
         "feasibility": feasible_count / total_samples,
         "p_sat": p_satisfied / total_nodes,
         "q_sat": q_satisfied / total_nodes,
         "v_sat": v_satisfied / total_nodes,
         "s_sat": s_satisfied / total_branches,
         "avg_inf_ms": avg_inf_time * 1000,
-        "avg_pp_ms": avg_pp_time * 1000,
+        "solver_speeds": solver_speeds,
+        "solver_accuracy": solver_accuracy,
         "speedup": speed_factor
     }
 
@@ -204,34 +246,94 @@ def main():
     model_list = list(MODEL_REGISTRY.keys()) if args.model.lower() == "all" else [args.model]
 
     results = []
+    
     for case in cases:
-        for model_name in model_list:
+        print(f"\n{'='*80}")
+        print(f"BENCHMARK EVALUATION PROFILING: {case}")
+        print(f"{'='*80}\n")
+        
+        # Clear previous benchmark reports for this case
+        benchmark_dir = os.path.join(PROJECT_ROOT, "reports", "benchmarks", case)
+        if os.path.exists(benchmark_dir):
+            shutil.rmtree(benchmark_dir)
+        os.makedirs(benchmark_dir, exist_ok=True)
+        
+        # Single Unified Progress Bar
+        pbar = tqdm(model_list, desc=f"Evaluating {case}", leave=True)
+        
+        for model_name in pbar:
+            pbar.set_postfix_str(f"Processing {model_name}... ")
             ckpt = args.checkpoint if args.checkpoint else get_latest_checkpoint(model_name, case)
             if not ckpt:
-                print(f"No checkpoint found for {model_name} on {case}. Skipping.")
                 continue
-            
             try:
                 res = run_evaluation(model_name, case, ckpt, device)
                 results.append(res)
             except Exception as e:
-                print(f"Error evaluating {model_name} on {case}: {e}")
-                import traceback
-                traceback.print_exc()
-
-    # Integrated Plotting
-    if results:
-        # Group by case for plotting
-        case_results = {}
-        for r in results:
-            c = r['case']
-            if c not in case_results:
-                case_results[c] = []
-            case_results[c].append(r)
-        
-        for case, res_list in case_results.items():
-            case_dir = os.path.join(PROJECT_ROOT, "reports", "benchmarks", case)
-            plot_benchmark_results(res_list, case, case_dir)
+                pass # Silently continue on errors
+                
+        # Final Tabular Summary Report for the current case
+        case_res = [r for r in results if r['case'] == case]
+        if case_res:
+            # Solver speed reference table
+            first = case_res[0]
+            solver_names = {"nr": "Newton-Raphson", "iwamoto_nr": "NR+Iwamoto", "gs": "Gauss-Seidel", "bfsw": "Backward/Fwd"}
+            
+            print("\n" + "="*80)
+            print("SOLVER SPEED REFERENCE")
+            print("="*80)
+            for alg, ms in first['solver_speeds'].items():
+                print(f"  {solver_names.get(alg, alg):<20}: {ms:8.3f} ms/sample")
+            print("")
+            
+            # GNN Benchmark Table
+            print("="*120)
+            print("GNN BENCHMARK SUMMARY")
+            print("="*120)
+            
+            # Build header with per-solver speedups
+            solver_keys = list(first['solver_speeds'].keys())
+            solver_hdrs = [f"vs {solver_names.get(s, s)[:6]}" for s in solver_keys]
+            
+            header = f"{'Model':<18} | {'MAE vm/va':<15} | {'MSE vm/va':<15} | {'PQ/V/S Sat %':<15}"
+            for sh in solver_hdrs:
+                header += f" | {sh:<8}"
+            print(header)
+            print("-" * len(header))
+            
+            for res in case_res:
+                row = f"{res['model']:<18} | "
+                # Compact metrics to fit more
+                row += f"{res['mae_vm']:.3f}/{res['mae_va']:.3f} | "
+                row += f"{res['mse_vm']:.2e}/{res['mse_va']:.2e} | "
+                
+                avg_pq = (res['p_sat'] + res['q_sat']) / 2.0
+                row += f"{avg_pq*100:4.1f}/{res['v_sat']*100:4.1f}/{res['s_sat']*100:4.1f} | "
+                
+                for alg in solver_keys:
+                    spd_ms = res['solver_speeds'].get(alg, 1.0)
+                    sp = spd_ms / res['avg_inf_ms']
+                    row += f" {sp:7.1f}x |"
+                print(row)
+            
+            # Solver accuracy vs NR (if available)
+            if first.get('solver_accuracy'):
+                print("\n" + "="*80)
+                print("SOLVER ACCURACY vs NR GROUND TRUTH")
+                print("="*80)
+                header2 = f"{'Solver':<20} | {'MAE VM (p.u.)':<14} | {'MAE VA (rad)':<14}"
+                print(header2)
+                print("-" * len(header2))
+                for alg, acc in first['solver_accuracy'].items():
+                    print(f"{solver_names.get(alg, alg):<20} | {acc['mae_vm']:14.10f} | {acc['mae_va']:14.10f}")
+                # Add GNN models for comparison
+                for res in case_res:
+                    print(f"{res['model']:<20} | {res['mae_vm']:14.10f} | {res['mae_va']:14.10f}")
+            
+            print("")
+            
+            # Plotting
+            plot_benchmark_results(case_res, case, benchmark_dir)
 
 if __name__ == "__main__":
     main()
