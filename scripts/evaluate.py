@@ -35,6 +35,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.models import MODEL_REGISTRY, PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS
+from src.constants import TargetIndices
 import pandapower as pp
 from src.processing.topology import load_network
 from src.visualization.plot_benchmarks import plot_benchmark_results
@@ -57,7 +58,7 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
         config = yaml.safe_load(f)
     
     # Initialize DataModule correctly
-    data_dir = os.path.join(PROJECT_ROOT, "data", "03_processed")
+    data_dir = os.path.join(PROJECT_ROOT, "data", "prep")
     dm = PowerFlowDataModule(
         data_dir=data_dir,
         case_name=case_name,
@@ -118,14 +119,19 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             end = time.perf_counter()
             inference_times.append((end - start) / x.size(0))
 
-            # MAE & MSE (VM is index 0 in preds, VA is index 1)
-            targets_vm_va = targets[..., 8:10]
-            err = torch.abs(preds - targets_vm_va)
-            mae_vm.append(err[..., 0].mean().item())
-            mae_va.append(err[..., 1].mean().item())
+            # MAE & MSE
+            from src.constants import TargetIndices
+            targets_vm = targets[..., TargetIndices.VM]
+            targets_va = targets[..., TargetIndices.VA]
             
-            mse_vm.append((err[..., 0]**2).mean().item())
-            mse_va.append((err[..., 1]**2).mean().item())
+            err_vm = torch.abs(preds[..., 0] - targets_vm)
+            err_va = torch.abs(preds[..., 1] - targets_va)
+            
+            mae_vm.append(err_vm.mean().item())
+            mae_va.append(err_va.mean().item())
+            
+            mse_vm.append((err_vm**2).mean().item())
+            mse_va.append((err_va**2).mean().item())
 
             # Constraints
             physics = model._get_physics_loss(batch)
@@ -149,66 +155,8 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             feasible_count += res["feasible_samples"]
             total_samples += res["total_samples"]
 
-    # 5. Multi-Solver Benchmark (Speed + Accuracy vs NR Ground Truth)
-    net = load_network(case_name)
-    
-    # Determine which solvers to test (BFS only for radial networks)
-    is_radial = case_name == "case33"
-    solvers = ["nr", "iwamoto_nr", "gs"]
-    if is_radial:
-        solvers.append("bfsw")
-    
-    solver_speeds = {}  # solver_name -> avg_ms
-    solver_vm = {}      # solver_name -> vm array
-    solver_va = {}      # solver_name -> va array
-    
-    # Suppress stdout during solver runs (Iwamoto prints debug multipliers)
-    devnull = open(os.devnull, 'w')
-    
-    for alg in solvers:
-        times = []
-        vm_result = None
-        va_result = None
-        for trial in range(3):
-            try:
-                old_stdout = sys.stdout
-                sys.stdout = devnull
-                start = time.perf_counter()
-                pp.runpp(net, algorithm=alg)
-                end = time.perf_counter()
-                sys.stdout = old_stdout
-                times.append(end - start)
-                # Store the last successful solution for accuracy comparison
-                vm_result = net.res_bus.vm_pu.values.copy()
-                va_result = np.deg2rad(net.res_bus.va_degree.values.copy())
-            except Exception:
-                sys.stdout = old_stdout
-        
-        if times:
-            solver_speeds[alg] = np.mean(times) * 1000  # ms
-            solver_vm[alg] = vm_result
-            solver_va[alg] = va_result
-    
-    devnull.close()
-    
-    # Solver accuracy: compare each solver against NR ground truth
-    solver_accuracy = {}
-    if "nr" in solver_vm:
-        nr_vm = solver_vm["nr"]
-        nr_va = solver_va["nr"]
-        for alg in solvers:
-            if alg == "nr" or alg not in solver_vm:
-                continue
-            mae_vm_solver = np.mean(np.abs(solver_vm[alg] - nr_vm))
-            mae_va_solver = np.mean(np.abs(solver_va[alg] - nr_va))
-            solver_accuracy[alg] = {"mae_vm": mae_vm_solver, "mae_va": mae_va_solver}
-    
     avg_inf_time = np.mean(inference_times)
     
-    # Primary speedup uses NR as reference (the gold standard)
-    nr_speed_ms = solver_speeds.get("nr", 1.0)
-    speed_factor = nr_speed_ms / (avg_inf_time * 1000)
-
     # No verbose per-model reporting here; we sum it all up at the end.
 
     return {
@@ -223,11 +171,57 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
         "q_sat": q_satisfied / total_nodes,
         "v_sat": v_satisfied / total_nodes,
         "s_sat": s_satisfied / total_branches,
-        "avg_inf_ms": avg_inf_time * 1000,
-        "solver_speeds": solver_speeds,
-        "solver_accuracy": solver_accuracy,
-        "speedup": speed_factor
+        "avg_inf_ms": avg_inf_time * 1000
     }
+
+def run_solver_benchmark(case_name, config):
+    """Run classical solvers once per case for speed/accuracy reference."""
+    net = load_network(case_name)
+    eval_cfg = config.get("evaluation", {}).get("benchmark", {})
+    configured_solvers = eval_cfg.get("solvers", ["nr", "iwamoto_nr", "gs", "bfsw"])
+    solver_trials = eval_cfg.get("solver_trials", 3)
+    
+    is_radial = case_name == "case33"
+    solvers = [s for s in configured_solvers if (s != "bfsw" or is_radial)]
+    
+    solver_speeds = {}
+    solver_vm = {}
+    solver_va = {}
+    
+    devnull = open(os.devnull, 'w')
+    for alg in solvers:
+        times = []
+        vm_result, va_result = None, None
+        for _ in range(solver_trials):
+            try:
+                old_stdout = sys.stdout
+                sys.stdout = devnull
+                start = time.perf_counter()
+                pp.runpp(net, algorithm=alg)
+                end = time.perf_counter()
+                sys.stdout = old_stdout
+                times.append(end - start)
+                vm_result = net.res_bus.vm_pu.values.copy()
+                va_result = np.deg2rad(net.res_bus.va_degree.values.copy())
+            except Exception:
+                sys.stdout = old_stdout
+        
+        if times:
+            solver_speeds[alg] = np.mean(times) * 1000  # ms
+            solver_vm[alg] = vm_result
+            solver_va[alg] = va_result
+    devnull.close()
+    
+    solver_accuracy = {}
+    if "nr" in solver_vm:
+        nr_vm, nr_va = solver_vm["nr"], solver_va["nr"]
+        for alg in solvers:
+            if alg == "nr" or alg not in solver_vm: continue
+            mae_vm = np.mean(np.abs(solver_vm[alg] - nr_vm))
+            mae_va = np.mean(np.abs(solver_va[alg] - nr_va))
+            solver_accuracy[alg] = {"mae_vm": mae_vm, "mae_va": mae_va}
+            
+    return solver_speeds, solver_accuracy
 
 def main():
     parser = argparse.ArgumentParser()
@@ -237,6 +231,10 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    config_path = os.path.join(PROJECT_ROOT, "configs", "training.yaml")
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
 
     if args.case.lower() == "all":
         cases = ["case33", "case57", "case118"]
@@ -258,6 +256,14 @@ def main():
             shutil.rmtree(benchmark_dir)
         os.makedirs(benchmark_dir, exist_ok=True)
         
+        # Create CSV subfolder to separate data from images
+        csv_dir = os.path.join(benchmark_dir, "csv")
+        os.makedirs(csv_dir, exist_ok=True)
+        
+        # 0. Classical Solver Benchmark (Once per case)
+        print(f"Running classical solver benchmarks for {case}...")
+        solver_speeds, solver_accuracy = run_solver_benchmark(case, config)
+        
         # Single Unified Progress Bar
         pbar = tqdm(model_list, desc=f"Evaluating {case}", leave=True)
         
@@ -268,6 +274,12 @@ def main():
                 continue
             try:
                 res = run_evaluation(model_name, case, ckpt, device)
+                res["solver_speeds"] = solver_speeds
+                res["solver_accuracy"] = solver_accuracy
+                # Calculate speedup vs NR
+                nr_ms = solver_speeds.get("nr", 1.0)
+                res["speedup"] = nr_ms / res["avg_inf_ms"]
+                
                 results.append(res)
             except Exception as e:
                 pass # Silently continue on errors
@@ -330,7 +342,52 @@ def main():
                 for res in case_res:
                     print(f"{res['model']:<20} | {res['mae_vm']:14.10f} | {res['mae_va']:14.10f}")
             
-            print("")
+            # Save to CSV
+            import pandas as pd
+            
+            # 1. GNN Benchmark Summary CSV
+            gnn_summary_data = []
+            for res in case_res:
+                row_data = {
+                    "Model": res['model'],
+                    "MAE_VM": res['mae_vm'],
+                    "MAE_VA": res['mae_va'],
+                    "MSE_VM": res['mse_vm'],
+                    "MSE_VA": res['mse_va'],
+                    "P_Sat_pct": res['p_sat'] * 100,
+                    "Q_Sat_pct": res['q_sat'] * 100,
+                    "V_Sat_pct": res['v_sat'] * 100,
+                    "S_Sat_pct": res['s_sat'] * 100,
+                    "Avg_Inf_ms": res['avg_inf_ms']
+                }
+                for alg in solver_keys:
+                    spd_ms = res['solver_speeds'].get(alg, 1.0)
+                    sp = spd_ms / res['avg_inf_ms']
+                    row_data[f"Speedup_vs_{alg}"] = sp
+                gnn_summary_data.append(row_data)
+            
+            df_gnn = pd.DataFrame(gnn_summary_data)
+            df_gnn.to_csv(os.path.join(csv_dir, f"{case}_gnn_benchmark.csv"), index=False)
+            
+            # 2. Solver Accuracy CSV
+            if first.get('solver_accuracy'):
+                acc_data = []
+                for alg, acc in first['solver_accuracy'].items():
+                    acc_data.append({
+                        "Solver_or_Model": solver_names.get(alg, alg),
+                        "Type": "Classical Solver",
+                        "MAE_VM": acc['mae_vm'],
+                        "MAE_VA": acc['mae_va']
+                    })
+                for res in case_res:
+                    acc_data.append({
+                        "Solver_or_Model": res['model'],
+                        "Type": "GNN",
+                        "MAE_VM": res['mae_vm'],
+                        "MAE_VA": res['mae_va']
+                    })
+                df_acc = pd.DataFrame(acc_data)
+                df_acc.to_csv(os.path.join(csv_dir, f"{case}_solver_accuracy.csv"), index=False)
             
             # Plotting
             plot_benchmark_results(case_res, case, benchmark_dir)

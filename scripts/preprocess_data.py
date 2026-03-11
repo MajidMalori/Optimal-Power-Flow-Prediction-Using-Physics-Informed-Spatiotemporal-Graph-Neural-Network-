@@ -1,7 +1,7 @@
 """
 Data Preprocessing Pipeline
-Reads raw .npy from 01_raw, applies per-unit normalization,
-time-based train/val/test splits, and saves .pt tensors to 03_processed.
+Reads raw .npy from data/raw, applies per-unit normalization,
+time-based train/val/test splits, and saves .pt tensors to data/prep.
 """
 
 import os
@@ -25,8 +25,8 @@ from src.constants import (
 NUM_FEATURES = FeatureIndices.NUM_FEATURES
 NUM_TARGETS = FeatureIndices.NUM_TARGETS
 
-RAW_DIR = os.path.join(root_dir, 'data', '01_raw')
-PROCESSED_DIR = os.path.join(root_dir, 'data', '03_processed')
+RAW_DIR = os.path.join(root_dir, 'data', 'raw')
+PROCESSED_DIR = os.path.join(root_dir, 'data', 'prep')
 
 def load_config():
     yaml_path = os.path.join(root_dir, 'configs', 'data_generation.yaml')
@@ -323,7 +323,7 @@ if __name__ == "__main__":
         print()
         try:
             from src.visualization.plot_preprocessing import generate_all_preprocessing_plots
-            base_reports_dir = os.path.join(root_dir, 'reports', 'figures', '03_processed')
+            base_reports_dir = os.path.join(root_dir, 'reports', 'prep_data')
             for case in processed_cases:
                 case_dir = os.path.join(PROCESSED_DIR, case)
                 reports_dir = os.path.join(base_reports_dir, case)

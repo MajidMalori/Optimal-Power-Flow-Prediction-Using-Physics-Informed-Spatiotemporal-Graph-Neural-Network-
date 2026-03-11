@@ -32,8 +32,8 @@ env/
 venv/
 
 # ── Data Files (regenerated via 'make mainTest' and 'make preTest') ─────────
-src/data/01_raw/
-src/data/03_processed/
+data/raw/
+data/prep/
 *.npy
 *.pt
 *.csv

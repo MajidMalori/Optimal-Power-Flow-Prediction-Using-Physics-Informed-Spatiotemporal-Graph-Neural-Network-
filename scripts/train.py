@@ -48,7 +48,7 @@ from src.models import (
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "03_processed")
+PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "prep")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -133,7 +133,8 @@ def train_single_model(model_name, case_name, config, group_name):
         group=group_name,
         save_dir=logger_cfg.get('save_dir', 'wandb_logs'),
         config=run_config,
-        tags=[model_name, case_name, group_name, "spatial" if model_name in SPATIAL_MODELS else "recurrent"]
+        tags=[model_name, case_name, group_name, "spatial" if model_name in SPATIAL_MODELS else "recurrent"],
+        anonymous=False
     )
 
     # 4. Callbacks (Professional separation: Checkpoints vs Logs)
@@ -166,7 +167,31 @@ def train_single_model(model_name, case_name, config, group_name):
     trainer.fit(model, datamodule=dm)
 
     # 7. Test
-    trainer.test(model, datamodule=dm, ckpt_path="best")
+    test_results = trainer.test(model, datamodule=dm, ckpt_path="best")
+    
+    if test_results:
+        import pandas as pd
+        report_dir = os.path.join(PROJECT_ROOT, "reports", "training", case_name)
+        os.makedirs(report_dir, exist_ok=True)
+        
+        # Create CSV subfolder for metrics
+        csv_dir = os.path.join(report_dir, "csv")
+        os.makedirs(csv_dir, exist_ok=True)
+        
+        # Convert list of dicts to DataFrame
+        df_test = pd.DataFrame(test_results)
+        # Add identifying columns
+        df_test.insert(0, "case", case_name)
+        df_test.insert(0, "model", model_name)
+        
+        # We append to a master file so all models for this case end up in one table
+        csv_path = os.path.join(csv_dir, f"{case_name}_training_metrics.csv")
+        
+        # If file exists, append without header; else write with header
+        if os.path.exists(csv_path):
+            df_test.to_csv(csv_path, mode='a', header=False, index=False)
+        else:
+            df_test.to_csv(csv_path, index=False)
 
     # 8. Close W&B run cleanly before starting the next model
     wandb.finish()
@@ -178,11 +203,17 @@ def main():
     parser.add_argument("--config", type=str, default="configs/training.yaml", help="Path to training config")
     parser.add_argument("--case", type=str, default=None, help="Comma separated cases (e.g., '33,57' or 'all')")
     parser.add_argument("--models", type=str, default=None, help="Comma separated models or 'all'")
+    parser.add_argument("--epochs", type=int, default=None, help="Override training max epochs")
     parser.add_argument("--offline", action="store_true", help="Force W&B offline mode (fast, sync later)")
     parser.add_argument("--online", action="store_true", help="Force W&B online mode (live cloud sync)")
     args = parser.parse_args()
 
     config = load_config(args.config)
+    
+    if args.epochs is not None:
+        if 'trainer' not in config:
+            config['trainer'] = {}
+        config['trainer']['max_epochs'] = args.epochs
 
     # ── Resolve W&B mode: CLI flags override YAML ────────────────────────
     if args.online:
@@ -219,7 +250,13 @@ def main():
 
     print(f"\n📋 Training {total} model(s) | Mode: {wandb_mode} | Cases: {', '.join(cases)}")
 
+    import shutil
     for case_name in cases:
+        # Clear out old training reports for this case
+        report_dir = os.path.join(PROJECT_ROOT, "reports", "training", case_name)
+        if os.path.exists(report_dir):
+            shutil.rmtree(report_dir)
+            
         for model_name in models_to_train:
             current += 1
             print(f"\n{'='*60}")
@@ -228,7 +265,6 @@ def main():
 
             try:
                 train_single_model(model_name, case_name, config, group_name)
-                print(f"\n✅ {model_name} on {case_name} completed!")
             except Exception as e:
                 print(f"\n❌ {model_name} on {case_name} failed: {e}")
                 wandb.finish(exit_code=1)

@@ -53,8 +53,8 @@ gen_config = load_data_config()
 
 # Professional Path Setup
 data_mode = 'train' # Default
-output_dir = gen_config.get('output_dir', 'data/01_raw')
-reports_dir = gen_config.get('reports_dir', 'reports/figures/01_raw_data')
+output_dir = gen_config.get('output_dir', 'data/raw')
+reports_dir = gen_config.get('reports_dir', 'reports/raw_data')
 
 timesteps_to_use = args.timesteps if args.timesteps is not None else gen_config.get('time_steps', 10008)
 

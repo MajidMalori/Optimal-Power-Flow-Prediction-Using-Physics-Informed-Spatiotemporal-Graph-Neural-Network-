@@ -8,7 +8,7 @@ import pytest
 from constants import FeatureIndices, V_GARBAGE_LOW, V_GARBAGE_HIGH
 
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "01_raw")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "raw")
 
 def get_feature_files():
     pattern = os.path.join(DATA_DIR, "**", "*_features_frac*.npy")

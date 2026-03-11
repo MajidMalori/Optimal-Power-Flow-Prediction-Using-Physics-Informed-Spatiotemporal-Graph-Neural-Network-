@@ -32,7 +32,7 @@ def plot_data_profile(config, case_name: str, output_path: str) -> str:
     """
     Create professional data profile visualization.
     """
-    data_dir = os.path.join(config.get('output_dir', 'data/01_raw'), case_name)
+    data_dir = os.path.join(config.get('output_dir', 'data/raw'), case_name)
     feature_pattern = os.path.join(data_dir, f"{case_name}_features_frac*.npy")
     feature_files = sorted(glob.glob(feature_pattern))
     

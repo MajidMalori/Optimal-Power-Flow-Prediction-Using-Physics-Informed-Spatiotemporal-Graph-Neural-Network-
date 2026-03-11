@@ -46,7 +46,7 @@ def generate_all_data_plots(config: dict, bus_systems: List[int], data_plots_dir
         case_config['CASE_NAME'] = case_name
         
         # Determine case-specific Data Dir and Plots Dir
-        base_data_dir = config.get('output_dir', 'data/01_raw')
+        base_data_dir = config.get('output_dir', 'data/raw')
         data_dir = os.path.join(base_data_dir, case_name)
         case_plots_dir = os.path.join(data_plots_dir, case_name)
         os.makedirs(case_plots_dir, exist_ok=True)

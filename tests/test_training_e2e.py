@@ -13,7 +13,7 @@ from src.constants import TargetIndices
 # Identify if dummy processed data is available from previous tests
 PROCESSED_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-    "data", "03_processed"
+    "data", "prep"
 )
 HAVE_PROCESSED_DATA = os.path.exists(os.path.join(PROCESSED_DATA_DIR, "case33", "train_features.pt"))
 

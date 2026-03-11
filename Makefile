@@ -140,6 +140,14 @@ unc-118:
 unc-all:
 	python scripts/analyze_uncertainty.py --case all
 
+# Full pipeline for all cases
+full-33: gen-33 prep-33 test train-33 eval-33 unc-33
+full-57: gen-57 prep-57 test train-57 eval-57 unc-57
+full-118: gen-118 prep-118 test train-118 eval-118 unc-118
+
+# End-to-end pipeline (Pipeline Orchestration)
+full-test: clean-training clean gen-all prep-all test train-all eval-all unc-all
+
 
 # Clean up temporary Python files and cache
 clean:
@@ -149,15 +157,37 @@ clean:
 	find . -type d -name "wandb" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
+# Clean up training logs (local)
+clean-logs:
+	@rm -rf logs/
+
+# Clean up model checkpoints
+clean-checkpoints:
+	@rm -rf checkpoints/
+
+# Clean up W&B logs
+clean-wandb:
+	@rm -rf wandb_logs/
+
 # Clean up ALL training sessions (checkpoints and logs)
-clean-training:
-	rm -rf checkpoints/
-	rm -rf wandb_logs/
+clean-training: clean-logs clean-checkpoints clean-wandb
+
+# Clean up only report directories
+clean-reports:
+	@rm -rf reports/raw_data/
+	@rm -rf reports/prep_data/
+	@rm -rf reports/animations/
+	@rm -rf reports/uncertainty/
+	@rm -rf reports/benchmarks/
+	@rm -rf reports/figures/
+	@rm -rf reports/training/
+
+# Clean up raw and processed data
+clean-data-raw:
+	@rm -rf data/raw/*
+
+clean-data-processed:
+	@rm -rf data/prep/*
 
 # Comprehensive clean-up (code, data, and training)
-clean-all: clean clean-training
-	rm -rf data/01_raw/*
-	rm -rf data/03_processed/*
-	rm -rf reports/figures/01_raw_data/*
-	rm -rf reports/figures/03_processed/*
-	rm -rf reports/animations/*
+clean-all: clean clean-training clean-reports clean-data-raw clean-data-processed

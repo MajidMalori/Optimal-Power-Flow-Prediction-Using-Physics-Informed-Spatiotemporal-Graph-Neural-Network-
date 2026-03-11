@@ -122,4 +122,4 @@ def plot_switching_heatmap(data_dir: str, case_name: str, output_path: str, frac
 if __name__ == "__main__":
     import sys
     case = sys.argv[1] if len(sys.argv) > 1 else 'case33'
-    plot_switching_heatmap('data/01_raw', case, f'reports/figures/01_raw_data/heatmap_{case}.png')
+    plot_switching_heatmap('data/raw', case, f'reports/raw_data/heatmap_{case}.png')

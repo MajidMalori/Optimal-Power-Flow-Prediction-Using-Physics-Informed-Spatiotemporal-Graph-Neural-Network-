@@ -1,7 +1,7 @@
 import os
 import pytest
 
-PROCESSED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', '03_processed')
+PROCESSED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'prep')
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -16,7 +16,7 @@ def pytest_generate_tests(metafunc):
     if "case_name" in metafunc.fixturenames:
         requested = metafunc.config.getoption("case")
         
-        # Determine available cases in 03_processed
+        # Determine available cases in data/prep
         available = []
         if os.path.isdir(PROCESSED_DIR):
             for d in os.listdir(PROCESSED_DIR):

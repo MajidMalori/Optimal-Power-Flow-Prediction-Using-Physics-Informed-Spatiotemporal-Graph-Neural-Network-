@@ -160,7 +160,7 @@ def test_pi_resnet_gcgru(dummy_data):
 
 def test_datamodule_setup():
     """Verify that DataModule can initialize without failing."""
-    dm = PowerFlowDataModule(data_dir="data/03_processed", case_name="case33")
+    dm = PowerFlowDataModule(data_dir="data/prep", case_name="case33")
     assert dm.batch_size == 32
     assert dm.seq_len == 1
     assert hasattr(dm, "collate_fn")

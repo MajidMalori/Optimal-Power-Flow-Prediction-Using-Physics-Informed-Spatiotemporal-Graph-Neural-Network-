@@ -22,7 +22,7 @@ class StandardGCN(L.LightningModule):
         self.factor = kwargs.get('lr_factor', 0.5)
 
         # Load static adjacency for Model 1 (Baseline)
-        data_dir = kwargs.get('data_dir', 'data/03_processed/case33')
+        data_dir = kwargs.get('data_dir', 'data/prep/case33')
         adj_path = os.path.join(data_dir, 'adjacency.pt')
         if os.path.exists(adj_path):
             self.register_buffer("static_edge_index", torch.load(adj_path, weights_only=True))

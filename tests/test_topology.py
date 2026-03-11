@@ -16,7 +16,7 @@ from src.constants import FeatureIndices
 
 @pytest.fixture
 def data_dir():
-    return "src/data/01_raw"
+    return "src/data/raw"
 
 def test_degree_transitions(data_dir, case_name):
     print(f"--- Verifying Degree Transitions for {case_name} ---")
@@ -83,5 +83,5 @@ def test_degree_transitions(data_dir, case_name):
     print(f"\nFinal Result: {success_count}/{total_events} events verified in bus features.")
 
 if __name__ == "__main__":
-    DATA_PATH = "src/data/01_raw"
+    DATA_PATH = "src/data/raw"
     test_degree_transitions(DATA_PATH, "case33")

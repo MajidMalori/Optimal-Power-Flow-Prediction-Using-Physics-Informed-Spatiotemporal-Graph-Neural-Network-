@@ -219,7 +219,7 @@ if __name__ == "__main__":
 
     for case in cases:
         n_buses = BUS_LABEL.get(case, case)
-        data_dir = os.path.join(root_dir, 'data', '01_raw', case)
+        data_dir = os.path.join(root_dir, 'data', 'raw', case)
         out_dir  = os.path.join(root_dir, 'reports', 'animations', case)
         os.makedirs(out_dir, exist_ok=True)
 

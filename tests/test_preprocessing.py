@@ -16,7 +16,7 @@ NUM_FEATURES = FeatureIndices.NUM_FEATURES
 NUM_TARGETS = TargetIndices.NUM_TARGETS
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROCESSED_DIR = os.path.join(parent_dir, 'data', '03_processed')
+PROCESSED_DIR = os.path.join(parent_dir, 'data', 'prep')
 
 
 @pytest.fixture

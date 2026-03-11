@@ -35,6 +35,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.models import MODEL_REGISTRY, PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS
+from src.constants import TargetIndices
 from src.visualization.plot_uncertainty import plot_spatial_comparison_grid, plot_temporal_comparison_curves
 
 logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
@@ -53,7 +54,7 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
         config = yaml.safe_load(f)
     
     # Initialize DataModule correctly
-    data_dir = os.path.join(PROJECT_ROOT, "data", "03_processed")
+    data_dir = os.path.join(PROJECT_ROOT, "data", "prep")
     dm = PowerFlowDataModule(
         data_dir=data_dir,
         case_name=case_name,
@@ -86,19 +87,23 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
             is_recurrent = model_name in RECURRENT_MODELS
             edge_index = batch["edge_index_seq"] if is_recurrent else batch["edge_index"]
 
+            # --- TTA Parameters ---
+            unc_cfg = config.get("evaluation", {}).get("uncertainty", {})
+            noise_scale = unc_cfg.get("tta_noise_scale", 0.05)
+            noise_features_names = unc_cfg.get("noise_features", ["P_LOAD", "Q_LOAD", "P_REN", "Q_REN"])
+            
+            from src.constants import FeatureIndices
+            input_indices = [getattr(FeatureIndices, name) for name in noise_features_names]
+            
             # --- TTA Loop ---
             tta_preds = []
             
-            # Feature indices for noise: P_LOAD=0, Q_LOAD=1, P_REN=6, Q_REN=7
-            input_indices = [0, 1, 6, 7]
-            
             for _ in range(num_tta):
-                # Apply balanced 5% noise to all power inputs
-                # This reflects realistic sensor/forecast uncertainty (Research-Grade TTA)
-                noise_std = torch.abs(x) * 0.05 + 0.001
+                # Apply proportional noise to all target features
+                noise_std = torch.abs(x) * noise_scale + 0.001
                 noise = torch.randn_like(x) * noise_std
                 
-                # Apply noise to all power inputs (P_LOAD, Q_LOAD, P_REN, Q_REN)
+                # Apply noise to specific inputs
                 mask = torch.zeros_like(x)
                 mask[..., input_indices] = 1.0
                 x_perturbed = x + (noise * mask)
@@ -115,7 +120,8 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
             # Combined uncertainty: RMS of VM and VA standard deviations
             uncertainty_metric = torch.sqrt(torch.mean(preds_std**2, dim=-1)) # [B, N]
 
-            targets_vm_va = targets[..., 8:10]
+            from src.constants import TargetIndices
+            targets_vm_va = targets[..., TargetIndices.VM:TargetIndices.VA+1]
 
             # Store for uncertainty analysis
             # We store the TTA-based uncertainty metric
@@ -204,6 +210,10 @@ def main():
             shutil.rmtree(uncertainty_dir)
         os.makedirs(uncertainty_dir, exist_ok=True)
         
+        # Create CSV subfolder to separate data from images
+        csv_dir = os.path.join(uncertainty_dir, "csv")
+        os.makedirs(csv_dir, exist_ok=True)
+        
         all_results = []
         
         # Single Unified Progress Bar
@@ -237,9 +247,6 @@ def main():
             print("SPATIAL UNCERTAINTY SUMMARY (Mean Node Standard Deviation in p.u.)")
             print("="*80)
             header = f"{'Model':<20} | " + " | ".join([f"{l:>8}" for l in frac_labels])
-            print(header)
-            print("-" * len(header))
-            
             for res in all_results:
                 row = f"{res['model']:<20} | "
                 row += " | ".join([f"{res['uncertainty'][f]['mean_spatial']:8.6f}" for f in fractions])
@@ -257,7 +264,32 @@ def main():
                 # temporal_mean holds the actual mean TTA uncertainty per hour
                 row += " | ".join([f"{np.mean(res['uncertainty'][f]['temporal_mean']):8.6f}" for f in fractions])
                 print(row)
+            
+            # Save to CSV
+            import pandas as pd
+            
+            spatial_data = []
+            temporal_data = []
+            
+            for res in all_results:
+                row_sp = {"Model": res['model']}
+                row_tmp = {"Model": res['model']}
+                
+                for f in fractions:
+                    label = f"{int(f*100)}%"
+                    row_sp[label] = res['uncertainty'][f]['mean_spatial']
+                    row_tmp[label] = np.mean(res['uncertainty'][f]['temporal_mean'])
+                
+                spatial_data.append(row_sp)
+                temporal_data.append(row_tmp)
+                
+            df_sp = pd.DataFrame(spatial_data)
+            df_sp.to_csv(os.path.join(csv_dir, f"{case}_spatial_uncertainty.csv"), index=False)
+            
+            df_tmp = pd.DataFrame(temporal_data)
+            df_tmp.to_csv(os.path.join(csv_dir, f"{case}_temporal_uncertainty.csv"), index=False)
             print("")
+
 
 if __name__ == "__main__":
     main()
