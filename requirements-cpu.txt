@@ -21,6 +21,8 @@ pandas>=2.0.0
 matplotlib==3.10.8
 seaborn==0.13.2
 pandapower>=2.14.0
+networkx>=3.0
+Pillow>=10.0.0
 
 # Experiment Tracking
 wandb==0.25.0

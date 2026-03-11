@@ -61,7 +61,4 @@ logs/
 reports/
 
 # ── Documentation text files ───
-Debates.txt
-project_summary.txt
-benchmark.txt
-physics_constraint_equations.txt
+notes/
