@@ -1,6 +1,6 @@
 # Optimal Power Flow Prediction Using Physics-Informed Spatiotemporal Graph Neural Networks
 
-This repository outlines the detailed study of Graph Neural Network (GNN) architectures for predicting AC Optimal Power Flow (ACOPF) solutions in electrical distribution and transmission grids under dynamic topology changes. The system simulates realistic grid conditions — including renewable energy integration, configuration switching (line rerouting), and stochastic weather models — then trains and benchmarks seven distinct neural architectures ranging from static spatial baselines to physics-informed spatiotemporal models.
+This repository outlines the detailed study of Graph Neural Network (GNN) architectures for predicting AC Optimal Power Flow (ACOPF) solutions in electrical distribution and transmission grids under dynamic topology changes. The system simulates realistic grid conditions including renewable energy integration, configuration switching (line rerouting), and stochastic weather models. It then trains and benchmarks seven distinct neural architectures ranging from static spatial baselines to physics-informed spatiotemporal models.
 
 ---
 
@@ -49,72 +49,53 @@ The AC power flow equations govern the relationship between voltage phasors and 
 
 **Complex Voltage Phasor:**
 
-```
-V_i = |V_i| · e^(j·θ_i)
-```
+$$V_i = |V_i| \cdot e^{j \cdot \theta_i}$$
 
 where `|V_i|` is the voltage magnitude (p.u.) and `θ_i` is the voltage angle (radians).
 
 **Current Injection (Ohm's Law for Networks):**
 
-```
-I_i = Σ_{k=1}^{N} Y_{ik} · V_k
-```
+$$I_i = \sum_{k=1}^{N} Y_{ik} \cdot V_k$$
 
 where `Y_{ik}` is the `(i, k)` entry of the bus admittance matrix (Ybus). The Ybus encodes the network topology: `Y_{ik} = -y_{ik}` for the mutual admittance between buses `i` and `k`, and `Y_{ii} = Σ_{k≠i} y_{ik}` for the self-admittance.
 
 **Complex Power Injection:**
 
-```
-S_i = V_i · I_i* = P_i + j·Q_i
-```
+$$S_i = V_i \cdot I_i^* = P_i + j \cdot Q_i$$
 
 Expanding this gives the standard power balance equations:
 
 **Active Power Balance:**
 
-```
-P_i = |V_i| · Σ_{k=1}^{N} |V_k| · (G_{ik}·cos(θ_i - θ_k) + B_{ik}·sin(θ_i - θ_k))
-```
+$$P_i = |V_i| \cdot \sum_{k=1}^{N} |V_k| \cdot (G_{ik}\cos(\theta_i - \theta_k) + B_{ik}\sin(\theta_i - \theta_k))$$
 
 **Reactive Power Balance:**
 
-```
-Q_i = |V_i| · Σ_{k=1}^{N} |V_k| · (G_{ik}·sin(θ_i - θ_k) - B_{ik}·cos(θ_i - θ_k))
-```
+$$Q_i = |V_i| \cdot \sum_{k=1}^{N} |V_k| \cdot (G_{ik}\sin(\theta_i - \theta_k) - B_{ik}\cos(\theta_i - \theta_k))$$
 
 where `G_{ik} + j·B_{ik} = Y_{ik}` are the real (conductance) and imaginary (susceptance) components of the admittance matrix.
 
 **Net Power Injection at Bus `i`:**
 
-```
-P_net_i = P_ext_grid_i + P_conv_gen_i + P_renewable_i - P_load_i
-Q_net_i = Q_ext_grid_i + Q_conv_gen_i + Q_renewable_i - Q_load_i
-```
+$$\begin{aligned} P_{net,i} &= P_{ext,i} + P_{gen,i} + P_{ren,i} - P_{load,i} \\ Q_{net,i} &= Q_{ext,i} + Q_{gen,i} + Q_{ren,i} - Q_{load,i} \end{aligned}$$
 
 ### Physics-Informed Loss Function
 
 The total loss for physics-informed models is:
 
-```
-L_total = L_data + λ_P · L_power + λ_V · L_voltage + λ_S · L_branch
-```
+$$L_{total} = L_{data} + \lambda_P L_{power} + \lambda_V L_{voltage} + \lambda_S L_{branch}$$
 
 Each term is defined below.
 
 #### 1. Data Loss (MSE)
 
-```
-L_data = (1/NB) · Σ_{i=1}^{N} Σ_{b=1}^{B} [(V̂m_{b,i} - Vm_{b,i})² + (θ̂_{b,i} - θ_{b,i})²]
-```
+$$L_{data} = \frac{1}{NB} \sum_{i=1}^{N} \sum_{b=1}^{B} [(\hat{V}_{m,b,i} - V_{m,b,i})^2 + (\hat{\theta}_{b,i} - \theta_{b,i})^2]$$
 
 where `V̂m` and `θ̂` are the predicted voltage magnitude deviation and angle, and `Vm`, `θ` are the ground-truth values from pandapower.
 
 #### 2. Power Balance Loss (Equality Constraint)
 
-```
-L_power = (1/NB) · Σ [(P_calc_i - P_net_true_i)² + (Q_calc_i - Q_net_true_i)²]
-```
+$$L_{power} = \frac{1}{NB} \sum [(P_{calc,i} - P_{net,true,i})^2 + (Q_{calc,i} - Q_{net,true,i})^2]$$
 
 The calculated power `P_calc` and `Q_calc` are derived from the predicted voltages using the AC power flow equations above. The true net power `P_net_true` comes from the ground-truth target vector (not from the predictions).
 
@@ -130,9 +111,7 @@ Q_calc = Im(S_calc)
 
 #### 3. Voltage Limit Loss (Inequality Constraint)
 
-```
-L_voltage = (1/NB) · Σ [ReLU(|V_i| - V_max)² + ReLU(V_min - |V_i|)²]
-```
+$$L_{voltage} = \frac{1}{NB} \sum [\text{ReLU}(|V_i| - V_{max})^2 + \text{ReLU}(V_{min} - |V_i|)^2]$$
 
 This penalizes predicted voltage magnitudes that fall outside the operational bounds. The bounds are case-specific:
 
@@ -144,16 +123,11 @@ This penalizes predicted voltage magnitudes that fall outside the operational bo
 
 #### 4. Branch Capacity Loss (Inequality Constraint)
 
-```
-L_branch = (1/LB) · Σ [ReLU(|S_k| - S_k_max)²]
-```
+$$L_{branch} = \frac{1}{LB} \sum [\text{ReLU}(|S_k| - S_{k,max})^2]$$
 
 where the branch apparent power flow is:
 
-```
-I_k = Y_branch_k · (V_from_k - V_to_k)
-|S_k| = |V_from_k · conj(I_k)|
-```
+$$\begin{aligned} I_k &= Y_{branch,k} (V_{from,k} - V_{to,k}) \\ |S_k| &= |V_{from,k} \cdot I_k^*| \end{aligned}$$
 
 `Y_branch_k` is the series admittance of branch `k`, extracted as `-Y_{bus}[from, to]`. `S_k_max` is the thermal rating of the branch in per-unit.
 
@@ -171,9 +145,7 @@ These are configurable in `configs/training.yaml` under `physics_loss`.
 
 All models use the GCN convolution operator from Kipf & Welling (2017):
 
-```
-H^(l+1) = σ(D̃^(-1/2) · Ã · D̃^(-1/2) · H^(l) · W^(l))
-```
+$$H^{(l+1)} = \sigma(\tilde{D}^{-1/2} \tilde{A} \tilde{D}^{-1/2} H^{(l)} W^{(l)})$$
 
 where:
 - `Ã = A + I` is the adjacency matrix with added self-loops
@@ -188,15 +160,11 @@ The adjacency matrix `A` is derived from the Ybus: two buses are connected (`A_{
 
 All power quantities (MW, MVar) are normalized by the system base `S_base`:
 
-```
-x_pu = x_MW / S_base
-```
+$$x_{pu} = \frac{x_{MW}}{S_{base}}$$
 
 Voltage magnitudes are mean-centered around the nominal value:
 
-```
-Vm_feature = Vm_pu - 1.0
-```
+$$Vm_{feature} = Vm_{pu} - 1.0$$
 
 Voltage angles are left in radians (already small-scale). Bus degree is normalized by the maximum degree observed in the base topology.
 
@@ -212,9 +180,9 @@ These process one timestep at a time. Input shape: `(B, N, F)` where `B` is batc
 
 | # | Model | Class | Physics Loss | Adjacency | Description |
 |---|-------|-------|:------------:|:---------:|-------------|
-| 1 | StandardGCN | `StandardGCN` | No | Static | Baseline. Uses a fixed adjacency matrix loaded from disk. Ignores topology changes. |
-| 2 | DynamicGCN | `DynamicGCN` | No | Dynamic | Same architecture as Model 1, but the adjacency matrix updates per sample to reflect the current switching state. |
-| 3 | PIGCN | `PIGCN` | Yes | Dynamic | Physics-Informed GCN. Same forward pass as Model 2, but the training loss includes power balance, voltage limit, and branch capacity penalties. |
+| 1 | StandardGCN | `StandardGCN` | No | Static | Baseline model that uses a fixed adjacency matrix loaded from disk, ignoring any topology changes. |
+| 2 | DynamicGCN | `DynamicGCN` | No | Dynamic | Similar to the StandardGCN, but the adjacency matrix is updated for every sample to reflect the current switching state. |
+| 3 | PIGCN | `PIGCN` | Yes | Dynamic | Physics-Informed GCN with the same forward pass as Model 2, but the training loss incorporates power balance, voltage limit, and branch capacity penalties. |
 
 ### Spatiotemporal Models
 
@@ -229,7 +197,7 @@ These process a sequence of `T` timesteps. Input shape: `(B, T, N, F)`. They pre
 
 All spatiotemporal models (4–7) use physics-informed loss. The temporal architecture follows this pattern:
 
-```
+```text
 For each sample b in batch:
   For each timestep t in sequence:
     h_{b,t} = GCN(X_{b,t}, A_{b,t})            # Spatial embedding [N, H]
@@ -239,13 +207,13 @@ For each sample b in batch:
   pred_b = Linear(O_b[:, -1, :])                # Last timestep output [N, 2]
 ```
 
-The output is always `(B, N, 2)` — predicted voltage magnitude deviation and voltage angle for each bus.
+The output is always `(B, N, 2)`, representing the predicted voltage magnitude deviation and voltage angle for each bus.
 
 ### Residual GCN Block
 
 The `ResidualGCNBlock` implements:
 
-```
+```text
 identity = shortcut(x)
 h = ReLU(GCNConv_1(x, A))
 h = GCNConv_2(h, A)
@@ -305,7 +273,7 @@ Each bus has a 10-dimensional target vector containing the ground-truth power fl
 
 A 24-hour "Camel" demand shape. Each hour maps to a scaling factor (0–1):
 
-```
+```text
 Hour:   0     1     ...   9    10    ...   18    19    ...   23
 Scale:  0.40  0.35  ...  0.90  0.88  ...  1.00  0.98  ...  0.50
 ```
@@ -316,9 +284,7 @@ The profile has two peaks: a morning peak around 9:00–10:00 and an evening glo
 
 A bell-curve peaking at 12:00 (noon), modulated by a seasonal factor and a stochastic weather model:
 
-```
-P_solar(h) = base_solar(h) · cloud_factor · season_factor
-```
+$$P_{solar}(h) = P_{base}(h) \cdot \text{cloud\_factor} \cdot \text{season\_factor}$$
 
 - `season_factor = 0.85 + 0.15 · sin(2π · (day - 80) / 365)`, peaking around the summer solstice.
 - `cloud_factor` is sampled from a weather-state-dependent range:
@@ -345,7 +311,7 @@ A night-peaking coastal profile. Wind output is highest at night (hours 0–4, 2
 
 Weather evolves over time using a first-order Markov chain with separate transition matrices for solar and wind states. For example, the solar transition matrix:
 
-```
+```text
 From \ To       Clear   Partly   Cloudy  Storm
 Clear           0.65    0.30     0.05    0.00
 Partly Cloudy   0.25    0.45     0.25    0.05
@@ -364,9 +330,9 @@ Renewable inverters provide reactive power support based on local voltage:
 
 The data generator simulates grid reconfiguration events (switching), where tie-lines are closed and other lines are opened to reroute power flow while maintaining connectivity.
 
-**Radial grids (Case 33):** The network has pre-defined tie-lines (normally open). A switching event closes a randomly selected tie-line, finds the resulting loop using `networkx.cycle_basis()`, and opens a different line in that loop.
+**Radial grids (Case 33):** The network includes pre-defined tie-lines that are normally open. During a switching event, the system closes a randomly selected tie-line, identifies the resulting loop via `networkx.cycle_basis()`, and then opens a different line within that loop.
 
-**Meshed grids (Case 57, 118):** These networks have no designated tie-lines. The code identifies a cycle in the existing graph, opens one line to create a "virtual" tie-line, then proceeds with the standard switching procedure.
+**Meshed grids (Case 57, 118):** These networks do not have designated tie-lines. The code first identifies a cycle in the existing graph and opens one line to create a "virtual" tie-line, then proceeds with the standard switching procedure.
 
 The probability of a switching event at each timestep is controlled by `configuration_rate` in `configs/data_generation.yaml` (default: 10%).
 
@@ -393,7 +359,7 @@ The preprocessing script (`scripts/preprocess_data.py`):
 
 ## Project Structure
 
-```
+```text
 .
 ├── configs/
 │   ├── data_generation.yaml      # Data simulation parameters
@@ -622,7 +588,7 @@ The evaluation script (`scripts/evaluate.py`) benchmarks each trained model on t
    - Gauss-Seidel (GS)
    - Backward/Forward Sweep (BFS, radial grids only)
 
-The uncertainty analysis (`scripts/analyze_uncertainty.py`) uses Test-Time Augmentation (TTA): a 5% proportional Gaussian noise is injected into load and renewable power features, and inference is repeated `num_tta_samples` times. The variance of predictions across these augmented inputs measures model sensitivity to input perturbation.
+The uncertainty analysis (`scripts/analyze_uncertainty.py`) uses Test-Time Augmentation (TTA) by injecting 5% proportional Gaussian noise into load and renewable power features. Inference is then repeated `num_tta_samples` times, and the variance of these predictions across the augmented inputs is used to measure how sensitive the model is to input perturbations.
 
 Results are saved to `reports/benchmarks/<case>/` and `reports/uncertainty/<case>/`.
 
