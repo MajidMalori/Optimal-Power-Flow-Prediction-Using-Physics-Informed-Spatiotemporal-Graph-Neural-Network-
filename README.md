@@ -1,464 +1,667 @@
-# Physics-Informed Machine Learning for Power System State Estimation and Optimization
+# Optimal Power Flow Prediction Using Physics-Informed Spatiotemporal Graph Neural Networks
 
-## 1. Overview
-This repository implements a **Physics-Informed Machine Learning (PIML)** framework for dynamic state estimation and multi-objective optimization in power distribution networks. The system integrates graph neural networks (GNNs) and recurrent neural networks (RNNs) with physical power flow constraints to reconstruct the full system state (voltages, angles, power flows) from sparse, noisy measurements.
+This repository outlines the detailed study of Graph Neural Network (GNN) architectures for predicting AC Optimal Power Flow (ACOPF) solutions in electrical distribution and transmission grids under dynamic topology changes. The system simulates realistic grid conditions — including renewable energy integration, configuration switching (line rerouting), and stochastic weather models — then trains and benchmarks seven distinct neural architectures ranging from static spatial baselines to physics-informed spatiotemporal models.
 
-The framework is designed to handle high penetrations of renewable energy resources (DERs) and provides uncertainty quantification via Monte Carlo Dropout. It employs a **Multi-Objective Optimal Power Flow (MOOPF)** objective to simultaneously optimize for data accuracy, physical consistency, and operational safety. **Hyperparameter optimization is performed using a novel Perturbation-Driven Seagull Optimization Algorithm (MoSOA)**, specifically designed for deep learning applications and **accepted for publication in IOSR Journals**.
+---
 
-## 2. Data Generation Methodology
-The data generation pipeline (`data/main.py`) creates realistic, time-series power system datasets using the `pandapower` library. It simulates dynamic load profiles and weather-dependent renewable generation (solar and wind).
+## Table of Contents
 
-### 2.1. Simulation Methodology
-The simulation operates on a time-series basis (default: 2400 steps). For each timestep $t$, the system solves the AC Optimal Power Flow (OPF) problem. To ensure 100% data coverage and physical validity under stressed conditions, a **Hierarchical Convergence Strategy** is employed:
+- [Problem Statement](#problem-statement)
+- [Mathematical Formulation](#mathematical-formulation)
+  - [AC Power Flow Equations](#ac-power-flow-equations)
+  - [Physics-Informed Loss Function](#physics-informed-loss-function)
+  - [Graph Convolution](#graph-convolution)
+  - [Per-Unit Normalization](#per-unit-normalization)
+- [Model Architectures](#model-architectures)
+- [Data Pipeline](#data-pipeline)
+  - [Test Cases](#test-cases)
+  - [Feature Vector](#feature-vector)
+  - [Load and Renewable Profiles](#load-and-renewable-profiles)
+  - [Configuration Switching](#configuration-switching)
+  - [Preprocessing](#preprocessing)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Quick Start](#quick-start)
+  - [Individual Pipeline Steps](#individual-pipeline-steps)
+  - [Parallel Pipeline Execution](#parallel-pipeline-execution)
+  - [Makefile Reference](#makefile-reference)
+- [Configuration](#configuration)
+- [Evaluation and Benchmarking](#evaluation-and-benchmarking)
+- [Testing](#testing)
+- [Experiment Tracking](#experiment-tracking)
 
-1.  **Strict (Normal)**: Standard Newton-Raphson OPF with tight tolerance ($10^{-5}$ MVA). Represents normal N-0 operation.
-2.  **Strict (Contingency)**: If normal OPF fails, an N-1 contingency is simulated by removing a random transmission line. This mimics real-world grid reliability requirements.
-3.  **Relaxed (Contingency)**: If strict convergence fails, tolerances are relaxed ($10^{-4}$ MVA) to find a valid solution under stressed conditions (e.g., voltage congestion).
+---
 
-### 2.2. Profiles and Stochastic Modeling
-The system uses sophisticated stochastic models to generate realistic load and generation profiles:
+## Problem Statement
 
-*   **Load Profiles** (`data/profiles.py`):
-    *   Base load follows a typical diurnal curve (peaking at 18:00, trough at 03:00).
-    *   Stochastic variation: $L_t = L_{base}(t) \times \mathcal{U}(0.95, 1.05)$.
+Solving AC Optimal Power Flow is computationally expensive. Classical solvers (Newton-Raphson, Gauss-Seidel) require iterative matrix operations at every timestep, which becomes a bottleneck for real-time grid operation, especially as renewable energy sources introduce high-frequency variability in both generation and topology.
 
-*   **Weather Simulation** (`data/profiles.py`):
-    *   Weather states (Clear, Partly Cloudy, Cloudy, Storm) are modeled using a **Markov Chain** with persistence to simulate realistic weather patterns.
-    *   Transition probabilities favor state persistence (e.g., $P(Clear|Clear) = 0.65$) to avoid unrealistic rapid fluctuations.
+This project trains GNNs to approximate ACOPF solutions directly from the grid state (bus power injections, voltage measurements, and topology) in a single forward pass. The key question is whether encoding physical constraints into the training loss and incorporating temporal dependencies improves prediction accuracy and physical feasibility compared to purely data-driven baselines.
 
-*   **Renewable Generation**:
-    *   **Solar**: Modeled as a function of solar angle $\alpha(t)$ and cloud cover factor $C_{weather}$:
-        
-$$P_{solar}(t) = P_{rated} \times \max(0, \cos(\alpha(t))) \times C_{weather} \times S_{season}$$
+---
 
-    *   **Wind**: Modeled with weather-dependent base speeds and thermal diurnal effects:
-        
-$$P_{wind}(t) = P_{rated} \times \mathrm{clip}(v_{base}(weather) \times f_{thermal}(t) \times \mathcal{U}(0.85, 1.15))$$
+## Mathematical Formulation
 
-*   **Reactive Power Control** (`data/profiles.py`):
-    *   Implements **IEEE 1547 Volt-Var Control**. Inverters adjust reactive power $Q$ based on local voltage $V$:
-        *   If $V < 0.98$: Inject $Q$ (Capacitive)
-        *   If $V > 1.02$: Absorb $Q$ (Inductive)
-        *   Deadband: $0.98 \le V \le 1.02$
+### AC Power Flow Equations
 
-### 2.3. Topology and Validation
-*   **Y-Bus Calculation** (`data/topology.py`): The system extracts the Admittance Matrix ($Y_{bus}$) directly from `pandapower`'s internal Jacobian structure to ensure exact consistency with the physics solver. Crucially, this is extracted in **per-unit (p.u.)** values to match the neural network's normalized feature space.
-*   **Validation Logic** (`data/validation.py`):
-    *   **Pre-Validation**: Checks for generator capacity violations ($P > P_{max}$) and negative loads before solving.
-    *   **Post-Validation**: Filters out "numerical garbage" (e.g., $|V| < 0.5$ p.u. or angle differences $> 90^\circ$) while retaining valid stressed states (e.g., $|V| = 0.94$ p.u.).
+The AC power flow equations govern the relationship between voltage phasors and power injections at each bus in the network. For bus `i` in an `N`-bus system:
 
-### 2.4. Feature Space
-The model inputs and outputs are defined as follows for each bus $i$:
+**Complex Voltage Phasor:**
 
-$$\mathbf{x}_i = [P_{\mathrm{load}}, Q_{\mathrm{load}}, P_{\mathrm{ext}}, Q_{\mathrm{ext}}, P_{\mathrm{conv}}, Q_{\mathrm{conv}}, P_{\mathrm{ren}}, Q_{\mathrm{ren}}, |V|_{\mathrm{meas}}, \theta_{\mathrm{meas}}]$$
-
-Where $|V|_{\mathrm{meas}}$ and $\theta_{\mathrm{meas}}$ are sparse PMU measurements (available only at specific buses). The target is the full clean state vector for all buses.
-
-## 3. Model Architectures
-The repository implements several state-of-the-art architectures, all inheriting from a common base class.
-
-### 3.1. Graph Convolutional Network (GCN) Layer (`models/gcn_layer.py`)
-The core building block is a standard implementation of the Graph Convolutional Network (GCN) layer, enhanced with:
-1.  **Self-Loops**: $\tilde{A} = A + I$ to preserve node features.
-2.  **Symmetric Normalization**: $\tilde{D}^{-\frac{1}{2}}\tilde{A}\tilde{D}^{-\frac{1}{2}}$ to prevent gradient explosion in deep networks.
-3.  **Operation Order**:
-
-$$H^{(l+1)} = \sigma(\underbrace{\tilde{D}^{-\frac{1}{2}}\tilde{A}\tilde{D}^{-\frac{1}{2}}}_{\text{Normalized Adj}} (\underbrace{H^{(l)} W^{(l)}}_{\text{Linear Trans}}))$$
-
-### 3.2. Adaptive Graph Models (AdaptiveGCN / AdaptivePIGCN)
-These models (`models/adaptive_gcn.py`) learn the graph structure dynamically using the **Adaptive Topology Learner** (`models/adaptive_topology_learner.py`). Instead of relying solely on the physical topology $A_{phys}$, they compute a learned adjacency matrix $A_{learn}$ via node embeddings $E_1, E_2$:
-
-$$A_{learn} = \text{ReLU}(E_1 E_2^T)$$
-
-The final adjacency matrix is a weighted mix controlled by a learnable or fixed parameter $\phi$:
-
-$$A_{final} = \phi A_{phys} + (1-\phi) A_{learn}$$
-
-This allows the model to capture unobserved correlations and electrical distances that are not present in the physical connectivity matrix.
-
-### 3.3. Physics-Informed Graph Recurrent Networks (PIGC-RNN)
-For spatiotemporal dynamics, we employ **PIGCLSTM** and **PIGCGRU** (`models/graph_rnn.py`). These architectures combine Graph Convolutions with LSTM/GRU cells.
-*   **GraphConvGRU Cell** (`models/graph_rnn_cells.py`):
-    *   Integrates the GCN operation *inside* the GRU gate equations.
-    *   **Key Innovation**: Concatenates input $x_t$ and hidden state $h_{t-1}$ *before* convolution to reduce computational overhead and improve feature mixing.
-    
-$$\text{Gates} = GCN([x_t || h_{t-1}], A)$$
-
-$$r_t, z_t, n_t = \text{split}(\text{Gates})$$
-
-$$h_t = (1-z_t) \odot h_{t-1} + z_t \odot \tanh(n_t)$$
-
-## 4. Training Methodology
-The training process (`train.py`) minimizes a composite Physics-Informed Loss function (`utils/metrics.py`).
-
-### 4.1. Physics-Informed Loss Function
-The total loss $\mathcal{L}$ is a weighted sum of four components, balanced automatically using **Kendall's Homoscedastic Uncertainty Weighting**:
-
-$$\mathcal{L} = \sum_{i=1}^{4} (e^{-s_i} \mathcal{L}_i + s_i)$$
-
-Where $s_i = \log(\sigma_i^2)$ are learnable parameters representing the uncertainty of each task.
-
-1.  **Data Loss ($\mathcal{L}_{data}$)**: Mean Squared Error (MSE) between predicted state $\hat{y}$ and ground truth $y$ in normalized space.
-
-$$\mathcal{L}_{data} = ||\hat{y} - y||^2$$
-
-2.  **Physics Loss ($\mathcal{L}_{phys}$)**: Power balance violation (Kirchhoff's Laws).
-
-$$\mathcal{L}_{\text{phys}} = \|P_{\text{net}} - \text{Re}(V \cdot (Y_{\text{bus}}V)^{\ast})\|^2 + \|Q_{\text{net}} - \text{Im}(V \cdot (Y_{\text{bus}}V)^{\ast})\|^2$$
-
-3.  **Safety Loss ($\mathcal{L}_{safe}$)**: Soft penalty for voltage limit violations.
-
-$$\mathcal{L}_{\text{safe}} = \text{ReLU}(|V| - V_{\text{max}})^2 + \text{ReLU}(V_{\text{min}} - |V|)^2$$
-
-4.  **Constraint Loss ($\mathcal{L}_{const}$)**: Penalties for non-physical negative values (e.g., negative generation).
-
-### 4.2. Hyperparameter Optimization: Perturbation-Driven Seagull Algorithm (MoSOA)
-The framework employs **MoSOA**, a bio-inspired optimization algorithm designed for efficient hyperparameter tuning in deep learning applications.
-
-MoSOA addresses the limitations of traditional grid search and Bayesian optimization by combining:
-1. **Bio-Inspired Search Strategy**: Mimics the spiral attack pattern of seagulls for efficient exploration.
-2. **Adaptive Perturbation**: Dynamically adjusts the exploration-exploitation balance based on swarm fitness diversity.
-3. **Multi-Objective Fitness**: Optimizes for validation loss, training time, and model complexity.
-
-**Performance Benchmarks**:
-On the IEEE 118-bus system, MoSOA achieves **15-20% better validation loss** compared to random search with **40% fewer model evaluations**.
-
-| Metric | MoSOA | PSO | GWO | Random Search | Grid Search |
-|--------|-------|-----|-----|---------------|-------------|
-| **Average Rank** (lower=better) | **2.00** |  3.00 | 1.67 | 3.33 | 5.00 |
-| **Convergence Speed** (evaluations) | **4.3** | 5.7 | 4.3 | 40.0 | 14.3 |
-| **Speed-up vs Random** | **9.23x** | 7.0x | 9.2x | 1.0x | 2.8x |
-
-### 4.3. Training Configuration
-*   **Optimizer**: AdamW with Weight Decay ($10^{-4}$).
-*   **Scheduler**: Cosine Annealing Learning Rate Scheduler.
-*   **Hyperparameters Tuned by MoSOA**: `hidden_dim`, `num_gc_layers`, `embedding_dim`, `phi`, `rnn_layers` (for sequential models).
-
-## 5. Evaluation and Uncertainty
-### 5.1. Uncertainty Quantification
-Uncertainty is quantified using **Monte Carlo (MC) Dropout**. During inference, the model is run $N=50$ times with dropout enabled.
-*   **Prediction**: Mean of the stochastic forward passes: $\mu = \frac{1}{N}\sum \hat{y}_i$
-*   **Uncertainty**: Standard deviation of the forward passes: $\sigma = \sqrt{\frac{1}{N}\sum (\hat{y}_i - \mu)^2}$
-
-### 5.2. MOOPF Metrics
-We evaluate the models based on three conflicting objectives from the Multi-Objective Optimal Power Flow (MOOPF) framework (`utils/metrics.py`):
-
-1. **Carbon Emission Intensity** - Environmental objective measuring fossil fuel dependency:
-
-$$C_{emission} = \frac{\sum_{i \in generators} P_{fossil,i}}{\sum_{i \in generators} P_{total,i}} \times 100\%$$
-
-Lower values indicate higher renewable penetration and reduced environmental impact.
-
-2. **Power Loss** - Economic objective quantifying transmission inefficiency:
-
-$$P_{loss} = \frac{P_{generated} - P_{consumed}}{P_{consumed}} \times 100\%$$
-
-Lower percentage indicates more efficient power delivery and reduced operational costs.
-
-3. **Voltage Deviation** - Operational objective measuring grid stability and power quality:
-
-$$V_{deviation} = \frac{1}{N_{buses}} \sum_{i=1}^{N_{buses}} ||V_i| - 1.0|  \quad \text{(p.u.)}$$
-
-Lower deviation indicates better voltage regulation within acceptable limits (typically ±5% of nominal).
-
-## 6. Visualization
-The framework generates comprehensive plots (`utils/visualization.py`, `utils/evaluation_plots.py`):
-*   **Predicted vs. Actual**: Scatter plots with $R^2$ scores for Voltage Magnitude and Angle.
-*   **Error Distributions**: Histograms of prediction errors.
-*   **Uncertainty Calibration**: Reliability diagrams and Uncertainty vs. Error plots to validate MC Dropout quality.
-*   **Spatial/Temporal Uncertainty**: Heatmaps showing uncertainty distribution across the grid and time.
-*   **Renewable Impact**: Comparative analysis of Carbon, Voltage, and Losses across different renewable penetration levels (0% - 100%).
-
-## 7. Automation and Usage Guide
-
-This framework includes extensive automation features that handle data validation, selective regeneration, and visualization automatically. This section explains all automation processes and CLI arguments for easy usage.
-
-### 7.1. Automation Features
-
-#### 7.1.1. Data Validation (`utils/data_validation.py`)
-
-The system automatically validates data before training and regenerates only what is necessary:
-
-**Key Features:**
-- **Per-Bus-System Validation**: Validates each bus system (33, 57, 118) independently.
-- **Selective Regeneration**: Only regenerates invalid bus systems, preserving valid data.
-- **Configuration Hash Checking**: Detects configuration changes (timesteps, mode, etc.) and regenerates affected data.
-- **Metadata Management**: Uses per-process metadata files to support parallel execution without race conditions.
-- **Automatic Cleanup**: Removes old data files for bus systems being regenerated.
-
-**Example Workflow:**
-1. User runs: `python train.py`
-2. System validates all bus systems.
-3. Finds discrepancies (e.g., incorrect timesteps).
-4. Automatically deletes and regenerates only the affected data.
-5. Proceeds with training.
-
-#### 7.1.2. Plot Generation
-
-Plots are automatically generated after data generation or validation:
-
-- **Data Profile**: Load/generation patterns and data quality.
-- **Convergence**: Data generation quality metrics.
-- **Physics Health**: Voltage distribution and system health.
-
-**Plot Locations:**
-- Train mode: `data/plots_train/`
-- Test mode: `data/plots_test/`
-
-#### 7.1.3. Parallel Execution Support
-
-The system supports running data generation in parallel for different bus systems. Each process uses unique metadata files to prevent race conditions.
-
-### 7.2. Command-Line Interface (CLI)
-
-#### 7.2.1. Data Generation (`data/main.py`)
-
-Generate power system data for training or testing.
-
-**Usage:**
-```bash
-python data/main.py [OPTIONS]
+```
+V_i = |V_i| · e^(j·θ_i)
 ```
 
-**Arguments:**
-- `--mode {train,test}`: Data generation mode (default: `train`)
-  - `train`: Generates training data (default: 10008 timesteps)
-  - `test`: Generates test data (default: 240 timesteps)
+where `|V_i|` is the voltage magnitude (p.u.) and `θ_i` is the voltage angle (radians).
 
-- `--timesteps TIMESTEPS`: Number of time steps to generate
-  - Overrides default values from config
-  - Example: `--timesteps 1000`
+**Current Injection (Ohm's Law for Networks):**
 
-- `--buses BUS_SYSTEMS`: Comma-separated bus system numbers to generate
-  - Examples: `--buses 33`, `--buses 33,57`, `--buses 33,57,118`
-  - If not specified: Generates all bus systems (33, 57, 118)
-
-- `--config PATH`: Path to YAML configuration file (default: `config.yaml`)
-
-- `--output_dir PATH`: Directory to save generated data (default: `data/{mode}/`)
-
-- `--no_progress_bar`: Disable progress bars (useful when running from other scripts)
-
-**Default Behavior:**
-When no arguments are provided:
-- Mode: `train`
-- Timesteps: `10008`
-- Bus systems: All (33, 57, 118)
-
-**Examples:**
-```bash
-# Generate all training data with defaults
-python data/main.py
-
-# Generate test data for 33-bus system only
-python data/main.py --mode test --buses 33
-
-# Generate training data with custom timesteps for specific buses
-python data/main.py --mode train --timesteps 5000 --buses 33,57
-
-# Generate data and disable progress bars
-python data/main.py --no_progress_bar
+```
+I_i = Σ_{k=1}^{N} Y_{ik} · V_k
 ```
 
-**What Happens Automatically:**
-1. Validates existing data for specified bus systems
-2. Deletes old data files for bus systems being regenerated
-3. Generates new data with progress bars (one per renewable fraction)
-4. Saves metadata file with generation details
-5. Generates visualization plots automatically
-6. Cleans up old plots for regenerated bus systems
+where `Y_{ik}` is the `(i, k)` entry of the bus admittance matrix (Ybus). The Ybus encodes the network topology: `Y_{ik} = -y_{ik}` for the mutual admittance between buses `i` and `k`, and `Y_{ii} = Σ_{k≠i} y_{ik}` for the self-admittance.
 
-#### 7.2.2. Model Training (`train.py`)
+**Complex Power Injection:**
 
-Train physics-informed neural network models with automatic data validation.
-
-**Usage:**
-```bash
-python train.py [OPTIONS]
+```
+S_i = V_i · I_i* = P_i + j·Q_i
 ```
 
-**Arguments:**
-- `--mode {train,test}`: Data mode to use (default: from `config.yaml`)
-  - Overrides `data_mode` in config.yaml
-  - Example: `--mode test` uses test data
+Expanding this gives the standard power balance equations:
 
-- `--timesteps TIMESTEPS`: Override number of time steps
-  - Overrides `train_timesteps` or `test_timesteps` in config.yaml
+**Active Power Balance:**
 
-- `--output_dir PATH`: Override output directory for results
-
-- `--config PATH`: Path to YAML configuration file (default: `config.yaml`)
-
-**Default Behavior:**
-- Uses settings from `config.yaml`
-- Validates data automatically before training
-- Regenerates missing/invalid data automatically
-- Trains all models specified in `test_config` or `models_to_train`
-
-**Examples:**
-```bash
-# Train with default config.yaml settings
-python train.py
-
-# Train using test data instead of train data
-python train.py --mode test
-
-# Train with custom config file
-python train.py --config my_config.yaml
+```
+P_i = |V_i| · Σ_{k=1}^{N} |V_k| · (G_{ik}·cos(θ_i - θ_k) + B_{ik}·sin(θ_i - θ_k))
 ```
 
-**What Happens Automatically:**
-1. **Data Validation**: Checks all required data files exist and are valid
-2. **Selective Regeneration**: Regenerates only invalid bus systems
-3. **Plot Generation**: Generates plots for regenerated data
-4. **Model Training**: Trains all specified models with MoSOA optimization
-5. **Evaluation**: Runs MOOPF evaluation and generates comparative plots
-6. **Results Saving**: Saves all results, metrics, and model states
+**Reactive Power Balance:**
 
-#### 7.2.3. Plot Generation (`data/generate_data_plots.py`)
-
-Standalone script to generate data visualization plots (also runs automatically after data generation).
-
-**Usage:**
-```bash
-python data/generate_data_plots.py [OPTIONS]
+```
+Q_i = |V_i| · Σ_{k=1}^{N} |V_k| · (G_{ik}·sin(θ_i - θ_k) - B_{ik}·cos(θ_i - θ_k))
 ```
 
-**Arguments:**
-- `--mode {train,test}`: Data mode (default: `test`)
-  - Determines which data directory to read from
+where `G_{ik} + j·B_{ik} = Y_{ik}` are the real (conductance) and imaginary (susceptance) components of the admittance matrix.
 
-- `--buses BUS_SYSTEMS`: Bus systems to plot (default: `all`)
-  - Examples: `--buses 33`, `--buses 33,57`, `--buses all`
+**Net Power Injection at Bus `i`:**
 
-- `--output PATH`: Output directory for plots (default: `data/plots_{mode}/`)
-
-- `--no-cleanup`: Keep old plots instead of cleaning up
-
-- `--config PATH`: Path to YAML configuration file (default: `config.yaml`)
-
-**Examples:**
-```bash
-# Generate plots for all bus systems in test mode
-python data/generate_data_plots.py
-
-# Generate plots for train data, specific buses
-python data/generate_data_plots.py --mode train --buses 33,57
-
-# Generate plots without cleaning up old ones
-python data/generate_data_plots.py --no-cleanup
+```
+P_net_i = P_ext_grid_i + P_conv_gen_i + P_renewable_i - P_load_i
+Q_net_i = Q_ext_grid_i + Q_conv_gen_i + Q_renewable_i - Q_load_i
 ```
 
-**Note:** This script is typically not needed manually, as plots are generated automatically after data generation.
+### Physics-Informed Loss Function
 
-### 7.3. Common Workflows
+The total loss for physics-informed models is:
 
-#### 7.3.1. First-Time Setup
-
-```bash
-# 1. Generate all training data (default: train mode, 10008 timesteps, all buses)
-python data/main.py
-
-# 2. Train models (automatically validates data first)
-python train.py
+```
+L_total = L_data + λ_P · L_power + λ_V · L_voltage + λ_S · L_branch
 ```
 
-#### 7.3.2. Regenerating Specific Bus System
+Each term is defined below.
 
-```bash
-# Regenerate only 33-bus system with new timesteps
-python data/main.py --mode train --timesteps 5000 --buses 33
+#### 1. Data Loss (MSE)
 
-# Training will automatically use the new data
-python train.py
+```
+L_data = (1/NB) · Σ_{i=1}^{N} Σ_{b=1}^{B} [(V̂m_{b,i} - Vm_{b,i})² + (θ̂_{b,i} - θ_{b,i})²]
 ```
 
-#### 7.3.3. Parallel Data Generation
+where `V̂m` and `θ̂` are the predicted voltage magnitude deviation and angle, and `Vm`, `θ` are the ground-truth values from pandapower.
 
-```bash
-# Terminal 1
-python data/main.py --mode train --buses 33
+#### 2. Power Balance Loss (Equality Constraint)
 
-# Terminal 2 (run simultaneously)
-python data/main.py --mode train --buses 57
-
-# Terminal 3 (run simultaneously)
-python data/main.py --mode train --buses 118
+```
+L_power = (1/NB) · Σ [(P_calc_i - P_net_true_i)² + (Q_calc_i - Q_net_true_i)²]
 ```
 
-All processes run safely in parallel. Metadata files are automatically merged.
+The calculated power `P_calc` and `Q_calc` are derived from the predicted voltages using the AC power flow equations above. The true net power `P_net_true` comes from the ground-truth target vector (not from the predictions).
 
-#### 7.3.4. Testing with Different Configurations
+In the code, this is computed as:
 
-```bash
-# Generate test data
-python data/main.py --mode test --buses 33,57,118
-
-# Train using test data
-python train.py --mode test
+```python
+V_complex = (Vm_pred + 1.0) · exp(j · Va_pred)          # Reconstruct phasor
+I_injected = Y_bus @ V_complex                            # Current injection
+S_calc = V_complex · conj(I_injected)                     # Complex power
+P_calc = Re(S_calc)
+Q_calc = Im(S_calc)
 ```
 
-#### 7.3.5. Selective Regeneration via Training
+#### 3. Voltage Limit Loss (Inequality Constraint)
 
-```bash
-# If data validation detects mismatches, it automatically:
-# 1. Identifies which bus systems need regeneration
-# 2. Deletes only those bus systems' data
-# 3. Regenerates them with correct parameters
-# 4. Generates plots automatically
-# 5. Proceeds with training
-
-python train.py  # Everything happens automatically!
+```
+L_voltage = (1/NB) · Σ [ReLU(|V_i| - V_max)² + ReLU(V_min - |V_i|)²]
 ```
 
-### 7.4. Configuration Priority
+This penalizes predicted voltage magnitudes that fall outside the operational bounds. The bounds are case-specific:
 
-The system uses a hierarchical configuration priority:
+| System    | V_min (p.u.) | V_max (p.u.) | S_base (MVA) |
+| :-------- | :----------- | :----------- | :----------- |
+| Case 33   | 0.85         | 1.15         | 10           |
+| Case 57   | 0.90         | 1.10         | 100          |
+| Case 118  | 0.90         | 1.10         | 100          |
 
-1. **CLI Arguments** (Highest Priority)
-   - Overrides everything else
-   - Example: `--mode test` overrides config.yaml
+#### 4. Branch Capacity Loss (Inequality Constraint)
 
-2. **config.yaml**
-   - Default settings for all parameters
-   - Example: `data_mode: train`, `train_timesteps: 10008`
+```
+L_branch = (1/LB) · Σ [ReLU(|S_k| - S_k_max)²]
+```
 
-3. **Hardcoded Defaults** (Lowest Priority)
-   - Fallback values if nothing else is specified
-   - Example: Default mode is `train` if not in config
+where the branch apparent power flow is:
 
-### 7.5. File Organization
+```
+I_k = Y_branch_k · (V_from_k - V_to_k)
+|S_k| = |V_from_k · conj(I_k)|
+```
 
-**Data Files:**
-- Train data: `data/train/`
-- Test data: `data/test/`
-- Metadata: `data/{mode}/data_generation_metadata_*.json`
+`Y_branch_k` is the series admittance of branch `k`, extracted as `-Y_{bus}[from, to]`. `S_k_max` is the thermal rating of the branch in per-unit.
 
-**Plot Files:**
-- Train plots: `data/plots_train/`
-- Test plots: `data/plots_test/`
+#### Default Loss Weights
 
-**Model Results:**
-- Results: `results/{run_id}/`
-- Model states: `results/{run_id}/{model_name}/`
-- Plots: `results/{run_id}/{model_name}/plots/`
+| Parameter | Symbol | Default Value |
+| :-------- | :----- | :------------ |
+| Power balance weight | λ_P | 0.1 |
+| Voltage limit weight | λ_V | 0.01 |
+| Branch capacity weight | λ_S | 0.01 |
 
-### 7.6. Troubleshooting
+These are configurable in `configs/training.yaml` under `physics_loss`.
 
-**Issue: Data validation fails**
-- **Solution**: Run `python data/main.py` to regenerate data
+### Graph Convolution
 
-**Issue: Plots not generated**
-- **Solution**: Plots are generated automatically after data generation. If missing, run `python data/generate_data_plots.py`
+All models use the GCN convolution operator from Kipf & Welling (2017):
 
-**Issue: Wrong timesteps in data**
-- **Solution**: The system automatically detects and regenerates. Just run `python train.py` and it will fix it.
+```
+H^(l+1) = σ(D̃^(-1/2) · Ã · D̃^(-1/2) · H^(l) · W^(l))
+```
 
-**Issue: Parallel execution conflicts**
-- **Solution**: The system handles this automatically. Each process uses unique metadata files.
+where:
+- `Ã = A + I` is the adjacency matrix with added self-loops
+- `D̃` is the diagonal degree matrix of `Ã`
+- `H^(l)` is the node feature matrix at layer `l`
+- `W^(l)` is the learnable weight matrix at layer `l`
+- `σ` is a nonlinearity (ReLU)
 
-## 8. References
-1.  **GCN**: Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification with Graph Convolutional Networks. *ICLR*.
-2.  **Physics-Informed NN**: Raissi, M., Perdikaris, P., & Karniadakis, G. E. (2019). Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations. *Journal of Computational Physics*.
-3.  **Uncertainty Weighting**: Kendall, A., & Gal, Y. (2018). Multi-Task Learning Using Uncertainty to Weigh Losses for Scene Geometry and Semantics. *CVPR*.
-4.  **MC Dropout**: Gal, Y., & Ghahramani, Z. (2016). Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning. *ICML*.
+The adjacency matrix `A` is derived from the Ybus: two buses are connected (`A_{ij} = 1`) if there is an in-service line between them. For dynamic models, `A` changes per timestep based on the current switching state.
+
+### Per-Unit Normalization
+
+All power quantities (MW, MVar) are normalized by the system base `S_base`:
+
+```
+x_pu = x_MW / S_base
+```
+
+Voltage magnitudes are mean-centered around the nominal value:
+
+```
+Vm_feature = Vm_pu - 1.0
+```
+
+Voltage angles are left in radians (already small-scale). Bus degree is normalized by the maximum degree observed in the base topology.
+
+---
+
+## Model Architectures
+
+The project implements seven model architectures, organized into three categories:
+
+### Spatial-Only Models
+
+These process one timestep at a time. Input shape: `(B, N, F)` where `B` is batch size, `N` is number of buses, `F` is number of features.
+
+| # | Model | Class | Physics Loss | Adjacency | Description |
+|---|-------|-------|:------------:|:---------:|-------------|
+| 1 | StandardGCN | `StandardGCN` | No | Static | Baseline. Uses a fixed adjacency matrix loaded from disk. Ignores topology changes. |
+| 2 | DynamicGCN | `DynamicGCN` | No | Dynamic | Same architecture as Model 1, but the adjacency matrix updates per sample to reflect the current switching state. |
+| 3 | PIGCN | `PIGCN` | Yes | Dynamic | Physics-Informed GCN. Same forward pass as Model 2, but the training loss includes power balance, voltage limit, and branch capacity penalties. |
+
+### Spatiotemporal Models
+
+These process a sequence of `T` timesteps. Input shape: `(B, T, N, F)`. They predict the state at the final timestep of the sequence.
+
+| # | Model | Class | GCN Type | Temporal Layer | Description |
+|---|-------|-------|----------|----------------|-------------|
+| 4 | PIGCLSTM | `PIGCLSTM` | Standard GCNConv | LSTM | GCN extracts spatial features at each timestep. The per-node embeddings are then passed through an LSTM to capture temporal dependencies. |
+| 5 | PIGCGRU | `PIGCGRU` | Standard GCNConv | GRU | Same as Model 4 but with a GRU instead of LSTM. Fewer parameters, generally faster. |
+| 6 | PIResnetGCLSTM | `PIResnetGCLSTM` | Residual GCNConv | LSTM | Uses Residual GCN blocks (two GCNConv layers with a skip connection) to mitigate oversmoothing in deep GNNs. Temporal layer is LSTM. |
+| 7 | PIResnetGCGRU | `PIResnetGCGRU` | Residual GCNConv | GRU | Residual GCN blocks with GRU. |
+
+All spatiotemporal models (4–7) use physics-informed loss. The temporal architecture follows this pattern:
+
+```
+For each sample b in batch:
+  For each timestep t in sequence:
+    h_{b,t} = GCN(X_{b,t}, A_{b,t})            # Spatial embedding [N, H]
+  H_b = stack(h_{b,1}, ..., h_{b,T})            # [T, N, H]
+  H_b = reshape(H_b) → [N, T, H]               # Per-node sequences
+  O_b = RNN(H_b)                                # Temporal processing
+  pred_b = Linear(O_b[:, -1, :])                # Last timestep output [N, 2]
+```
+
+The output is always `(B, N, 2)` — predicted voltage magnitude deviation and voltage angle for each bus.
+
+### Residual GCN Block
+
+The `ResidualGCNBlock` implements:
+
+```
+identity = shortcut(x)
+h = ReLU(GCNConv_1(x, A))
+h = GCNConv_2(h, A)
+output = ReLU(h + identity)
+```
+
+If the input and output dimensions differ, `shortcut` is a linear projection. Otherwise it is the identity function.
+
+### Optimizer and Scheduler
+
+All models use:
+- **Optimizer:** Adam (lr = 0.001)
+- **Scheduler:** ReduceLROnPlateau (patience = 10, factor = 0.5, monitors `val_loss`)
+- **Early Stopping:** patience = 20 epochs on `val_loss`
+
+---
+
+## Data Pipeline
+
+### Test Cases
+
+The project uses three standard IEEE test systems provided by `pandapower`:
+
+| Case | Buses | Lines | Type | Topology | Base MVA |
+|------|------:|------:|------|----------|:--------:|
+| `case33` (Baran & Wu) | 33 | 37 | Distribution (radial) | Has tie-lines (normally open) | 10 |
+| `case57` | 57 | 80 | Transmission (meshed) | No tie-lines | 100 |
+| `case118` | 118 | 186 | Transmission (meshed) | No tie-lines | 100 |
+
+### Feature Vector
+
+Each bus at each timestep is described by an 11-dimensional feature vector:
+
+| Index | Feature | Unit | Description |
+|:-----:|---------|------|-------------|
+| 0 | `P_LOAD` | MW → p.u. | Active power consumed at this bus |
+| 1 | `Q_LOAD` | MVar → p.u. | Reactive power consumed at this bus |
+| 2 | `P_EXT_GRID` | MW → p.u. | Active power from the external grid (slack bus) |
+| 3 | `Q_EXT_GRID` | MVar → p.u. | Reactive power from the external grid |
+| 4 | `P_CONV` | MW → p.u. | Active power from conventional generators |
+| 5 | `Q_CONV` | MVar → p.u. | Reactive power from conventional generators |
+| 6 | `P_REN` | MW → p.u. | Active power from renewable generators (solar/wind) |
+| 7 | `Q_REN` | MVar → p.u. | Reactive power from renewable generators |
+| 8 | `VM` | p.u. - 1.0 | Voltage magnitude (mean-centered) |
+| 9 | `VA` | radians | Voltage angle |
+| 10 | `DEGREE` | normalized | Bus degree (number of connected lines / max degree) |
+
+The first 8 features have zero-mean Gaussian sensor noise added during data generation (`voltage_error_std = 0.005`, `power_error_std = 0.01`, `angle_error_std = 0.02`).
+
+### Target Vector
+
+Each bus has a 10-dimensional target vector containing the ground-truth power flow solution from pandapower (indices 0–7 mirror the feature power columns, indices 8–9 are voltage magnitude deviation and angle). The GNN predicts only indices 8 and 9.
+
+### Load and Renewable Profiles
+
+#### Load Profile
+
+A 24-hour "Camel" demand shape. Each hour maps to a scaling factor (0–1):
+
+```
+Hour:   0     1     ...   9    10    ...   18    19    ...   23
+Scale:  0.40  0.35  ...  0.90  0.88  ...  1.00  0.98  ...  0.50
+```
+
+The profile has two peaks: a morning peak around 9:00–10:00 and an evening global peak at 18:00. A ±5% uniform random perturbation is applied per timestep.
+
+#### Solar Profile
+
+A bell-curve peaking at 12:00 (noon), modulated by a seasonal factor and a stochastic weather model:
+
+```
+P_solar(h) = base_solar(h) · cloud_factor · season_factor
+```
+
+- `season_factor = 0.85 + 0.15 · sin(2π · (day - 80) / 365)`, peaking around the summer solstice.
+- `cloud_factor` is sampled from a weather-state-dependent range:
+
+| Weather State   | Cloud Factor Range |
+|-----------------|--------------------|
+| Clear           | [0.90, 1.00]       |
+| Partly Cloudy   | [0.35, 0.85]       |
+| Cloudy          | [0.08, 0.35]       |
+| Storm           | [0.00, 0.08]       |
+
+#### Wind Profile
+
+A night-peaking coastal profile. Wind output is highest at night (hours 0–4, 20–23) and lowest around midday (hours 11–13). The output is modulated by a weather state:
+
+| Weather State | Wind Speed Range |
+|---------------|------------------|
+| Calm          | [0.00, 0.20]     |
+| Breezy        | [0.20, 0.55]     |
+| Windy         | [0.55, 0.90]     |
+| Storm         | [0.85, 1.00]     |
+
+#### Weather Model
+
+Weather evolves over time using a first-order Markov chain with separate transition matrices for solar and wind states. For example, the solar transition matrix:
+
+```
+From \ To       Clear   Partly   Cloudy  Storm
+Clear           0.65    0.30     0.05    0.00
+Partly Cloudy   0.25    0.45     0.25    0.05
+Cloudy          0.10    0.30     0.50    0.10
+Storm           0.00    0.10     0.40    0.50
+```
+
+#### Renewable Reactive Power
+
+Renewable inverters provide reactive power support based on local voltage:
+- If `V < 0.98 p.u.`: inject positive Q (capacitive) proportional to the voltage deficit.
+- If `V > 1.02 p.u.`: absorb Q (inductive) proportional to the voltage excess.
+- Maximum reactive output: `Q_max = 0.33 · P`.
+
+### Configuration Switching
+
+The data generator simulates grid reconfiguration events (switching), where tie-lines are closed and other lines are opened to reroute power flow while maintaining connectivity.
+
+**Radial grids (Case 33):** The network has pre-defined tie-lines (normally open). A switching event closes a randomly selected tie-line, finds the resulting loop using `networkx.cycle_basis()`, and opens a different line in that loop.
+
+**Meshed grids (Case 57, 118):** These networks have no designated tie-lines. The code identifies a cycle in the existing graph, opens one line to create a "virtual" tie-line, then proceeds with the standard switching procedure.
+
+The probability of a switching event at each timestep is controlled by `configuration_rate` in `configs/data_generation.yaml` (default: 10%).
+
+For each unique topology encountered during simulation, the Ybus matrix is recomputed and stored. Topology states are tracked via integer IDs:
+- `topology_id = 0` → base topology (no switching)
+- `topology_id = k > 0` → the `k`-th unique switching configuration
+
+### Preprocessing
+
+The preprocessing script (`scripts/preprocess_data.py`):
+
+1. Loads raw `.npy` files from `data/raw/<case>/` (concatenates all renewable fraction runs).
+2. Applies per-unit normalization using the case-specific `S_base`.
+3. Splits the data chronologically (70% train / 15% validation / 15% test).
+4. Saves PyTorch tensors to `data/prep/<case>/`:
+   - `train_features.pt`, `val_features.pt`, `test_features.pt`
+   - `train_targets.pt`, `val_targets.pt`, `test_targets.pt`
+   - `train_topology_ids.pt`, `val_topology_ids.pt`, `test_topology_ids.pt`
+   - `ybus_base.pt`, `ybus_contingencies.pt`, `ybus_contingency_timesteps.pt`
+   - `adjacency.pt`, `branch_from.pt`, `branch_to.pt`, `branch_max_s_pu.pt`
+   - `normalization.json` (stores `S_base`, `max_degree`, and split sizes)
+
+---
+
+## Project Structure
+
+```
+.
+├── configs/
+│   ├── data_generation.yaml      # Data simulation parameters
+│   └── training.yaml             # Model, training, and evaluation settings
+├── data/
+│   ├── raw/                      # Raw .npy from pandapower simulations
+│   └── prep/                     # Normalized PyTorch tensors
+├── scripts/
+│   ├── generate_data.py          # Data generation (pandapower simulation)
+│   ├── preprocess_data.py        # Normalization and train/val/test splitting
+│   ├── train.py                  # Model training with Lightning + W&B
+│   ├── evaluate.py               # Benchmark evaluation (accuracy, physics, speed)
+│   ├── analyze_uncertainty.py    # Test-Time Augmentation uncertainty analysis
+│   └── animate_grid_dynamics.py  # Grid topology animation
+├── src/
+│   ├── constants.py              # Feature indices, physical constants, load profiles
+│   ├── models/
+│   │   ├── __init__.py           # Model registry
+│   │   ├── gcn.py                # Model 1: StandardGCN
+│   │   ├── dynamic_gcn.py        # Model 2: DynamicGCN
+│   │   ├── pi_gcn.py             # Model 3: PIGCN
+│   │   ├── pi_gclstm.py         # Model 4: PIGCLSTM
+│   │   ├── pi_gcgru.py          # Model 5: PIGCGRU
+│   │   ├── pi_resnet_gclstm.py  # Model 6: PIResnetGCLSTM
+│   │   ├── pi_resnet_gcgru.py   # Model 7: PIResnetGCGRU
+│   │   ├── layers.py            # ResidualGCNBlock, adjacency normalization
+│   │   ├── physics_loss.py      # PhysicsLoss (3 ACOPF constraints)
+│   │   └── data_module.py       # Lightning DataModule (spatial and temporal)
+│   ├── processing/
+│   │   ├── topology.py           # Network loading, switching, Ybus computation
+│   │   ├── profiles.py           # Load/solar/wind profiles, weather model
+│   │   └── validation.py         # Power flow input/output validation
+│   └── visualization/
+│       ├── plot_benchmarks.py     # Accuracy, physics gap, efficiency plots
+│       ├── plot_uncertainty.py    # Spatial and temporal uncertainty maps
+│       ├── plot_data_profile.py   # Load/generation profile visualization
+│       ├── plot_switching_heatmap.py
+│       └── ...                    # Additional plotting modules
+├── tests/
+│   ├── test_models.py            # Unit tests for all 7 model architectures
+│   ├── test_data_physics.py      # Physics validation of generated data
+│   ├── test_preprocessing.py     # Normalization and splitting tests
+│   ├── test_topology.py          # Switching event verification
+│   ├── test_evaluation.py        # Evaluation pipeline tests
+│   └── test_training_e2e.py      # End-to-end training smoke tests
+├── reports/                      # Generated plots and CSVs
+├── logs/                         # Pipeline execution logs
+├── Makefile                      # Convenience targets for all pipeline steps
+├── run_pipeline.sh               # Parallel execution of all cases
+├── verify_setup.sh               # Quick end-to-end validation
+├── requirements-cpu.txt
+└── requirements-gpu.txt
+```
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python 3.10+
+- CUDA 12.x (for GPU training; CPU-only is supported)
+
+### Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/<your-org>/spatio_temporal_nn.git
+cd spatio_temporal_nn
+
+# Create a virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements-gpu.txt   # For GPU (CUDA 12.x)
+# or
+pip install -r requirements-cpu.txt   # For CPU-only
+```
+
+### Key Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| PyTorch | 2.10.0 | Tensor computation and autograd |
+| PyTorch Geometric | 2.7.0 | GCNConv and graph utilities |
+| Lightning | 2.6.1 | Training loop, callbacks, logging |
+| pandapower | ≥2.14.0 | Power flow simulation and IEEE test cases |
+| Weights & Biases | 0.25.0 | Experiment tracking |
+| NetworkX | (via pandapower) | Cycle detection for switching |
+
+---
+
+## Usage
+
+### Quick Start
+
+Run the sanity check to verify the full pipeline works end-to-end with minimal data (24 timesteps, 1 epoch):
+
+```bash
+bash verify_setup.sh
+```
+
+### Individual Pipeline Steps
+
+```bash
+# 1. Generate data (10,008 timesteps for Case 33)
+python scripts/generate_data.py --case 33 --timesteps 10008
+
+# 2. Preprocess (normalize and split)
+python scripts/preprocess_data.py --case 33
+
+# 3. Train all 7 models
+python scripts/train.py --case 33 --models all
+
+# 4. Evaluate (benchmark against classical solvers)
+python scripts/evaluate.py --case case33
+
+# 5. Uncertainty analysis (Test-Time Augmentation)
+python scripts/analyze_uncertainty.py --case case33
+```
+
+### Parallel Pipeline Execution
+
+The `run_pipeline.sh` script runs all three cases (33, 57, 118) simultaneously in isolated background processes:
+
+```bash
+bash run_pipeline.sh
+```
+
+Configuration is controlled by flags at the top of the script:
+
+```bash
+# Case Selection
+DO_CASE_33=true
+DO_CASE_57=true
+DO_CASE_118=true
+
+# Execution Controls
+DO_GENERATE=true
+DO_PREPROCESS=true
+DO_TRAIN=true
+DO_EVALUATE=true
+DO_UNCERTAINTY=true
+
+# Cleanup Controls (run before pipeline starts)
+DO_CLEAN_REPORTS=true
+DO_CLEAN_LOGS=true
+DO_CLEAN_WANDB=true
+DO_CLEAN_RAW_DATA=false       # Caution: regeneration is slow
+DO_CLEAN_PROCESSED_DATA=true
+```
+
+### Makefile Reference
+
+| Target | Description |
+|--------|-------------|
+| `make gen-33` | Generate 96-timestep data for Case 33 |
+| `make gen-full` | Generate 10,008-timestep data for all cases |
+| `make prep-33` | Preprocess Case 33 data |
+| `make train-33` | Train all models on Case 33 |
+| `make eval-33` | Run benchmark evaluation for Case 33 |
+| `make unc-33` | Run uncertainty analysis for Case 33 |
+| `make full-33` | Full pipeline: generate → preprocess → test → train → evaluate → uncertainty |
+| `make full-test` | Full pipeline for all cases (sequential) |
+| `make test` | Run all pytest tests |
+| `make test-fast` | Run tests, stop on first failure |
+| `make clean-all` | Remove all generated data, logs, reports, and caches |
+| `make clean-training` | Remove only logs, checkpoints, and W&B data |
+| `make clean-reports` | Remove only report directories |
+| `make sync` | Upload offline W&B runs to the cloud |
+
+---
+
+## Configuration
+
+### `configs/data_generation.yaml`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `time_steps` | 10008 | Number of simulation timesteps |
+| `renewable_fractions_to_run` | [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] | Renewable penetration levels to simulate |
+| `configuration_rate` | 0.10 | Probability of a switching event per timestep |
+| `voltage_error_std` | 0.005 | Std. dev. of Gaussian noise on voltage measurements |
+| `power_error_std` | 0.01 | Std. dev. of Gaussian noise on power measurements |
+| `angle_error_std` | 0.02 | Std. dev. of Gaussian noise on angle measurements |
+| `pmu_coverage` | 0.3 | Fraction of buses with PMU-quality measurements |
+| `max_energy_utilization_coeff` | 0.98 | Maximum renewable capacity utilization |
+| `solar_weather_weights` | [0.3, 0.4, 0.25, 0.05] | Initial weather state probabilities for solar |
+| `wind_weather_weights` | [0.15, 0.45, 0.30, 0.10] | Initial weather state probabilities for wind |
+
+### `configs/training.yaml`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `batch_size` | 32 | Training batch size |
+| `seq_len` | 4 | Sequence length for spatiotemporal models |
+| `in_channels` | 11 | Number of input features per bus |
+| `out_channels` | 2 | Number of outputs per bus (Vm deviation, Va) |
+| `gcn_hidden` | 64 | Hidden dimension for GCN layers |
+| `lstm_hidden` / `gru_hidden` | 64 | Hidden dimension for recurrent layers |
+| `num_layers` | 4 | Number of GCN layers or Residual blocks |
+| `learning_rate` | 0.001 | Initial learning rate for Adam |
+| `lr_patience` | 10 | Epochs before reducing learning rate |
+| `lr_factor` | 0.5 | Learning rate reduction factor |
+| `max_epochs` | 200 | Maximum training epochs |
+| `seed` | 42 | Random seed for reproducibility |
+| `lambda_power_balance` | 0.1 | Weight for power balance physics loss |
+| `lambda_voltage_limit` | 0.01 | Weight for voltage limit physics loss |
+| `lambda_branch_capacity` | 0.01 | Weight for branch capacity physics loss |
+| `solver_trials` | 3 | Number of speed trials per classical solver |
+| `num_tta_samples` | 10 | Test-Time Augmentation samples for uncertainty |
+| `tta_noise_scale` | 0.05 | Proportional noise scale for TTA (5%) |
+
+---
+
+## Evaluation and Benchmarking
+
+The evaluation script (`scripts/evaluate.py`) benchmarks each trained model on the held-out test set along three axes:
+
+1. **Prediction Accuracy:** MAE for voltage magnitude and voltage angle against the pandapower ground truth.
+2. **Physical Feasibility:** Constraint satisfaction rates for active power balance (P), reactive power balance (Q), voltage limits (V), and branch capacity (S). A 0.5% tolerance is used for power balance.
+3. **Computational Efficiency:** Inference speed compared to four classical `pandapower` solvers:
+   - Newton-Raphson (NR)
+   - Newton-Raphson + Iwamoto multiplier (NRI)
+   - Gauss-Seidel (GS)
+   - Backward/Forward Sweep (BFS, radial grids only)
+
+The uncertainty analysis (`scripts/analyze_uncertainty.py`) uses Test-Time Augmentation (TTA): a 5% proportional Gaussian noise is injected into load and renewable power features, and inference is repeated `num_tta_samples` times. The variance of predictions across these augmented inputs measures model sensitivity to input perturbation.
+
+Results are saved to `reports/benchmarks/<case>/` and `reports/uncertainty/<case>/`.
+
+---
+
+## Testing
+
+```bash
+make test              # Run all tests
+make test-fast         # Stop on first failure
+make test-physics      # Data physics validation only
+make test-models       # Model architecture tests only
+make test-topology     # Switching event verification
+make test-e2e          # End-to-end training smoke test
+make test-preprocessing # Normalization and splitting tests
+```
+
+The test suite covers:
+- Forward pass shape checks for all 7 models
+- Physics loss computation correctness
+- Data generation output validation (voltage bounds, power balance)
+- Preprocessing normalization and split ratios
+- Topology switching event consistency (bus degree analysis)
+- End-to-end training loop (1 epoch smoke test)
+
+---
+
+## Experiment Tracking
+
+Training logs are managed by [Weights & Biases](https://wandb.ai/). By default, logging is in `offline` mode (fast, no network dependency). To sync offline runs to the cloud:
+
+```bash
+make sync
+```
+
+To train with live cloud logging:
+
+```bash
+python scripts/train.py --case 33 --models all --online
+```
+
+Each training run is automatically tagged with the model name, case, and a unique session timestamp for easy filtering in the W&B dashboard.

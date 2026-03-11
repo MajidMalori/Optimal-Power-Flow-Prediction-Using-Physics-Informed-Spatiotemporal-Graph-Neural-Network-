@@ -1,0 +1,59 @@
+data:
+  data_dir: "data/prep"
+  case_name: "case33"
+  batch_size: 32
+  seq_len: 4
+
+model:
+  name: "PIResnetGCLSTM"  # Options: StandardGCN, DynamicGCN, PIGCN, PIGCLSTM, PIGCGRU, PIResnetGCLSTM, PIResnetGCGRU
+  in_channels: 11
+  gcn_hidden: 64
+  lstm_hidden: 64
+  gru_hidden: 64
+  out_channels: 2
+  num_layers: 4  # Used for standard models (num_gcn_layers or num_res_blocks depending on model)
+  learning_rate: 0.001
+  lr_patience: 10
+  lr_factor: 0.5
+
+# Physics-Informed Loss Weights (only used by PI models)
+physics_loss:
+  lambda_power_balance: 0.1     # Weight for AC power flow equation violation
+  lambda_voltage_limit: 0.01    # Weight for voltage bound violations
+  lambda_branch_capacity: 0.01  # Weight for branch thermal limit violations
+
+trainer:
+  seed: 42
+  max_epochs: 200
+  accelerator: "auto"
+  devices: "auto"
+  log_every_n_steps: 10
+  enable_progress_bar: true
+  enable_model_summary: true
+
+logger:
+  backend: "wandb"              # Options: wandb, tensorboard
+  mode: "offline"               # Options: online, offline (offline = fast, sync later with 'wandb sync')
+  project: "powerflow-pinn"
+  entity: "benardmarfoadjei-knust-engineering-research-project-keep-"
+  save_dir: "logs/wandb_logs"
+callbacks:
+  early_stopping:
+    monitor: "val_loss"
+    patience: 20
+    mode: "min"
+  model_checkpoint:
+    monitor: "val_loss"
+    filename: "{epoch:02d}-{val_loss:.4f}"
+    save_top_k: 3
+    mode: "min"
+
+# Evaluation and Benchmarking parameters
+evaluation:
+  benchmark:
+    solver_trials: 3                 # Number of trials to run each classical solver to average the speed
+    solvers: ["nr", "iwamoto_nr", "gs", "bfsw"] # Full list of solvers to test. Will automatically filter out bfsw for meshed grids.
+  uncertainty:
+    num_tta_samples: 10              # Number of Test-Time Augmentation samples for uncertainty bound estimation
+    tta_noise_scale: 0.05            # Proportional noise applied to node features during TTA (5%)
+    noise_features: ["P_LOAD", "Q_LOAD", "P_REN", "Q_REN"] # Which inputs receive TTA uncertainty injection

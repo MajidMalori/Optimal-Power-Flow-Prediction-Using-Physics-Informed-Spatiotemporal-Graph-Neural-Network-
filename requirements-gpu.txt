@@ -1,26 +1,34 @@
-# Requirements for VAST.AI or GPU TRAINING
-# Use this on machines with NVIDIA GPUs (like Vast.ai)
-# Installation: pip install -r requirements-gpu.txt
+# Core dependencies for GPU training (CUDA 12.x)
+# Install: pip install -r requirements-gpu.txt
+#
+# PyTorch GPU wheels (CUDA 12.8):
+--extra-index-url https://download.pytorch.org/whl/cu128
 
-# Core deep learning framework (CUDA version)
-torch>=2.0.0
-torch-geometric>=2.3.0
+torch==2.10.0
+torchaudio==2.10.0
+torchvision==0.25.0
+torch-geometric==2.7.0
 
-# Scientific computing
-numpy>=1.21.0
-pandas>=1.3.0
+# Lightning
+lightning==2.6.1
+pytorch-lightning==2.6.1
+torchmetrics==1.8.2
 
-# Power system analysis
-pandapower>=2.13.0
-networkx>=2.6.0
-numba>=0.56.0  # JIT compilation for faster power flow calculations
+# Data & Science
+numpy==2.3.5
+scipy==1.16.3
+pandas>=2.0.0
+matplotlib==3.10.8
+seaborn==0.13.2
+pandapower>=2.14.0
 
-# Visualization
-matplotlib>=3.5.0
+# Experiment Tracking
+wandb==0.25.0
+tensorboard==2.20.0
 
-# Progress bars
-tqdm>=4.62.0
+# Utilities
+PyYAML==6.0.3
+tqdm==4.67.3
 
-# Configuration management
-PyYAML>=6.0
-
+# Testing
+pytest==9.0.2

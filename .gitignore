@@ -1,148 +1,67 @@
-# Data folders - exclude entire data generation folders (too heavy for git)
-# New dual-mode structure: monte_carlo and time_series
-data/monte_carlo/
-data/time_series/
-
-# Legacy data folders (in case old structure still exists)
-data/train/
-data/test/
-keep/
-tests/
-test_output/
-
-# Data files in root data folder
-data/*.npy
-data/*.txt
-data/*.json
-data/case*
-
-# Keep the data generation script and migration script
-!data/gen_meas_best.py
-!data/check_data.py
-
-# Explicitly exclude time coefficient files in root data folder
-data/*time_energy_coeffs.txt
-data/*time_carbon_coeffs.txt
-other_ref/
-state_est_data/
-old_data/
-
-# Test and debug scripts
-test_*.py
-debug_*.py
-*_test.py
-run_tests.bat
-train_adaptive*.py
-comprehensive_evaluation.py
-train_scalable.py
-test_physics_loss.py
-maxsea.
-analyze_results.py
-analyze_convergence.py
-
-# Images and plots
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.svg
-*.bmp
-*.
-*.txt
-*.cursor
-
-# Text files (info/debug files, but keep requirements)
-info*.txt
-*_info.txt
-debug*.txt
-check*.py
-
-# Markdown files (except README.md)
-*.md
-!README.md
-
-# JSON files (configurations, results, etc.)
-*.json
-*.ipynb
-*.rar
-
-MOSOA.py
-
-
-# Runs directory (automatically created by some frameworks)
-runs/
-
-# Checkpoints directory (legacy - models now saved in model_evaluation/)
-checkpoints/
-
-# Experimental results (new structure)
-experimental_results/
-
-# Test results (generated during development/testing)
-test_results/
-
-# Model evaluation results (legacy)
-model_evaluation/
-ResnetPIGCLSTM/
-
-# Python cache
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
 .python-version
+dist/
+build/
+*.whl
 
-# Environment variables
+# ── Testing & Coverage ──────────────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+*.cover
+
+# ── IDE & Editor ─────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Virtual Environments ────────────────────────────────────────────────────
 .env
 .venv
 env/
 venv/
-ENV/
-env.bak/
-venv.bak/
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# ── Data Files (regenerated via 'make mainTest' and 'make preTest') ─────────
+data/raw/
+data/prep/
+*.npy
+*.pt
+*.csv
+*.xlsx
+*.parquet
+*.h5
+*.json
+!configs/*.json
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
+# ── Training Artifacts (regenerated via 'make trainTest') ───────────────────
+wandb_logs/
+tb_logs/
+checkpoints/
+wandb/
+outputs/
 logs/
+*.ckpt
+*.pth
 
-# Windows-specific files
-bash.exe.stackdump
-*.stackdump
+# ── Media & Reports ─────────────────────────────────────────────────────────
+*.png
+*.jpg
+*.jpeg
+*.pdf
+reports/
+
+# ── Documentation text files ───
+Debates.txt
+project_summary.txt
+benchmark.txt
+physics_constraint_equations.txt

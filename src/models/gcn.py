@@ -1,0 +1,86 @@
+import os
+import lightning as L
+import torch
+from torch import nn
+from torch_geometric.nn import GCNConv
+
+
+class StandardGCN(L.LightningModule):
+    """
+    Model 1: Standard GCN (Baseline — No Physics)
+    Uses a fixed static adjacency matrix for message passing.
+    Spatial-only model — processes a single timestep at a time.
+    Input: (num_nodes, num_features) with a fixed edge_index.
+    Output: (num_nodes, out_channels)
+    """
+
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=3, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+        self.learning_rate = kwargs.get('learning_rate', 1e-3)
+        self.patience = kwargs.get('lr_patience', 10)
+        self.factor = kwargs.get('lr_factor', 0.5)
+
+        # Load static adjacency for Model 1 (Baseline)
+        data_dir = kwargs.get('data_dir', 'data/prep/case33')
+        adj_path = os.path.join(data_dir, 'adjacency.pt')
+        if os.path.exists(adj_path):
+            self.register_buffer("static_edge_index", torch.load(adj_path, weights_only=True))
+        else:
+            # Fallback if specific case dir not provided
+            self.static_edge_index = None
+
+        self.convs = nn.ModuleList()
+        self.convs.append(GCNConv(in_channels, hidden_channels))
+        for _ in range(num_layers - 2):
+            self.convs.append(GCNConv(hidden_channels, hidden_channels))
+
+        self.output_layer = nn.Linear(hidden_channels, out_channels)
+        self.relu = nn.ReLU()
+        self.loss_fn = nn.MSELoss()
+
+    def forward(self, x, edge_index=None, edge_weight=None):
+        # Model 1 ignores the batch edge_index to stay truly static
+        target_edge_index = self.static_edge_index if self.static_edge_index is not None else edge_index[0]
+        
+        for conv in self.convs:
+            x = self.relu(conv(x, target_edge_index, edge_weight))
+        return self.output_layer(x)
+
+    def _get_physics_loss(self, batch):
+        """Lazily initialize PhysicsLoss for evaluation (even if not used for training)."""
+        if not hasattr(self, '_physics_loss') or self._physics_loss is None:
+            from src.models.physics_loss import PhysicsLoss
+            self._physics_loss = PhysicsLoss(
+                ybus=batch["ybus"].to(self.device),
+                branch_from=batch["branch_from"].to(self.device),
+                branch_to=batch["branch_to"].to(self.device),
+                branch_max_s_pu=batch["branch_max_s_pu"].to(self.device),
+                contingencies=batch.get("contingencies", torch.tensor([])).to(self.device),
+            )
+        return self._physics_loss
+
+    def _shared_step(self, batch, stage):
+        x = batch["features"]
+        # Slice targets to VM=8, VA=9 for data loss (baseline — no physics)
+        targets = batch["targets"][..., 8:10]
+        preds = self(x)
+        loss = self.loss_fn(preds, targets)
+        self.log(f"{stage}_loss", loss, prog_bar=True, batch_size=x.size(0))
+        return loss
+
+    def training_step(self, batch, _batch_idx):
+        return self._shared_step(batch, "train")
+
+    def validation_step(self, batch, _batch_idx):
+        return self._shared_step(batch, "val")
+
+    def test_step(self, batch, _batch_idx):
+        return self._shared_step(batch, "test")
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=self.patience, factor=self.factor
+        )
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"}}
