@@ -140,6 +140,16 @@ unc-118:
 unc-all:
 	python scripts/analyze_uncertainty.py --case all
 
+# MoSOA Benchmarks:
+math:
+	python scripts/benchmark_math.py
+
+pert:
+	python scripts/benchmark_perturbation.py
+
+hpo:
+	python scripts/benchmark_hpo.py
+
 # Full pipeline for all cases
 full-33: gen-33 prep-33 test train-33 eval-33 unc-33
 full-57: gen-57 prep-57 test train-57 eval-57 unc-57
@@ -177,8 +187,7 @@ clean-reports:
 	@rm -rf reports/raw_data/
 	@rm -rf reports/prep_data/
 	@rm -rf reports/animations/
-	@rm -rf reports/uncertainty/
-	@rm -rf reports/benchmarks/
+	@rm -rf reports/evaluation/
 	@rm -rf reports/figures/
 	@rm -rf reports/training/
 

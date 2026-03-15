@@ -200,24 +200,21 @@ def main():
     model_list = list(MODEL_REGISTRY.keys()) if args.model.lower() == "all" else [args.model]
 
     for case in cases:
-        print(f"\n{'='*60}")
-        print(f"UNCERTAINTY ANALYSIS PROFILING: {case}")
-        print(f"{'='*60}\n")
+        print(f"\nUncertainty Analysis: {case}")
+        print("-" * 40)
         
-        # Clear previous uncertainty reports for this case
-        uncertainty_dir = os.path.join(PROJECT_ROOT, "reports", "uncertainty", case)
+        # Reports go to reports/evaluation/uncertainty/[case]
+        uncertainty_dir = os.path.join(PROJECT_ROOT, "reports", "evaluation", "uncertainty", case)
         if os.path.exists(uncertainty_dir):
             shutil.rmtree(uncertainty_dir)
         os.makedirs(uncertainty_dir, exist_ok=True)
         
-        # Create CSV subfolder to separate data from images
         csv_dir = os.path.join(uncertainty_dir, "csv")
         os.makedirs(csv_dir, exist_ok=True)
         
         all_results = []
         
-        # Single Unified Progress Bar
-        pbar = tqdm(model_list, desc=f"Analyzing {case}", leave=True)
+        pbar = tqdm(model_list, desc=f"Analyzing {case}", leave=True, dynamic_ncols=True)
         
         for model_name in pbar:
             pbar.set_postfix_str(f"Processing {model_name}... ")

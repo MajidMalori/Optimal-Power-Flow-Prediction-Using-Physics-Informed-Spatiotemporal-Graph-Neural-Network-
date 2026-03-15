@@ -1,6 +1,3 @@
-"""
-Tests MoSOA with 4 decay strategies: Exponential, Linear, Cosine, Quadratic.
-"""
 import time
 import sys
 import os
@@ -10,9 +7,14 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from typing import Dict, Any
+import shutil
 
 from src.benchmarks.functions import BENCHMARKS
 from src.optimizers.mosoa import MoSOA
+from src.visualization.plot_mosoa import (
+    plot_perturbation_ablation, 
+    plot_perturbation_convergence
+)
 
 
 class MoSOAPerturbationVariant(MoSOA):
@@ -45,7 +47,8 @@ class MoSOAPerturbationVariant(MoSOA):
             w = 0.95 - (it / t_max) * (0.95 - 0.35)
             
             if self.strategy == 'exponential':
-                beta = np.exp(-5 * it / t_max)
+                # Clip to prevent overflow in exp
+                beta = np.exp(-5.0 * min(1.0, it / t_max))
             elif self.strategy == 'linear':
                 beta = 1.0 - (it / t_max)
             elif self.strategy == 'cosine':
@@ -80,66 +83,127 @@ class MoSOAPerturbationVariant(MoSOA):
 
 
 def run_strategy_benchmark(strategy: str, func_name: str, num_runs: int = 15, 
-                           n_trials: int = 300, dim: int = 10):
+                            n_trials: int = 300, default_dim: int = 10):
     benchmark = BENCHMARKS[func_name]
     _obj_fn = benchmark['fn']
     bounds = benchmark['bounds']
-    search_space = {f'x_{i}': bounds for i in range(dim)}
+    
+    # Honor fixed dimensions
+    dim = benchmark['dim'] if benchmark['dim'] is not None else default_dim
+    
+    if isinstance(bounds[0], list):
+        search_space = {f'x_{i}': bounds[i] for i in range(dim)}
+    else:
+        search_space = {f'x_{i}': bounds for i in range(dim)}
     
     def obj_fn(params: Dict[str, Any]) -> float:
         x_array = np.array([params[f'x_{i}'] for i in range(dim)])
         return _obj_fn(x_array)
-    
-    results = []
-    for run in range(num_runs):
-        opt = MoSOAPerturbationVariant(search_space=search_space, seed=run+42, strategy=strategy)
-        opt.optimize(obj_fn, n_trials=n_trials, verbose=False)
-        results.append(opt.g_best_fitness)
-        
+
+    best_fitnesses = []
+    all_histories = []
+
+    for _ in range(num_runs):
+        opt = MoSOAPerturbationVariant(search_space=search_space, strategy=strategy)
+        best_params, history = opt.optimize(obj_fn, n_trials=n_trials, verbose=False)
+        best_fitnesses.append(obj_fn(best_params))
+        all_histories.append(history)
+
+    avg_history = np.mean(all_histories, axis=0)
+
     return {
         'Strategy': strategy,
         'Function': func_name,
-        'Mean': np.mean(results),
-        'Std': np.std(results),
-        'Best': np.min(results)
-    }
+        'Best': np.min(best_fitnesses),
+        'Worst': np.max(best_fitnesses),
+        'Mean': np.mean(best_fitnesses),
+        'Std': np.std(best_fitnesses)
+    }, avg_history
 
 def main():
-    test_funcs = ['F1', 'F5', 'F9'] 
+    # 1. Load Config
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
+    config = {}
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f).get('perturbation', {})
+    
+    num_runs = config.get('num_runs', 10)
+    iterations = config.get('iterations', 200)
+    pop_size = config.get('pop_size', 30)
+    n_trials = iterations * pop_size
+    
+    # 2. Clear previous results
+    out_dir = "reports/mosoa/perturbation"
+    if os.path.exists(out_dir):
+        shutil.rmtree(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    test_funcs = [f'F{i}' for i in range(1, 24)] 
     strategies = ['linear', 'cosine', 'quadratic', 'exponential']
     tasks = [(fn, strat) for fn in test_funcs for strat in strategies]
     
+    
     all_results = []
-    for fn_name, strat in tqdm(tasks, desc="Perturbation Comparison"):
-        res = run_strategy_benchmark(strat, fn_name)
+    convergence_histories = {} # {fn_name: {strategy: history}}
+    
+    # Subset of functions for convergence plots
+    conv_plot_subset = config.get('conv_plot_subset', ['F1', 'F9', 'F14', 'F21'])
+    
+    print() # Spacing from command
+    for fn_name, strat in tqdm(tasks, desc="Perturbation Strategy Ablation", leave=True, dynamic_ncols=True):
+        res, avg_hist = run_strategy_benchmark(strat, fn_name, num_runs=num_runs, n_trials=n_trials)
         all_results.append(res)
+        
+        if fn_name in conv_plot_subset:
+            if fn_name not in convergence_histories:
+                convergence_histories[fn_name] = {}
+            convergence_histories[fn_name][strat] = avg_hist
             
     df = pd.DataFrame(all_results)
     print("\n\n======= PERTURBATION STRATEGY COMPARISON =======")
     print(df.to_string(index=False))
     print("================================================")
     
-    os.makedirs("reports/mosoa", exist_ok=True)
-    df.to_csv("reports/mosoa/benchmark_perturbation_results.csv", index=False)
+    out_dir = "reports/mosoa/perturbation"
+    os.makedirs(out_dir, exist_ok=True)
+    df.to_csv(os.path.join(out_dir, "perturbation_results.csv"), index=False)
     
     try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        import seaborn as sns
+        # Categorize functions for separate plotting
+        # 1. Unimodal (F1-F7)
+        unimodal = [f'F{i}' for i in range(1, 8)]
+        df_uni = df[df['Function'].isin(unimodal)]
         
-        plt.figure(figsize=(10, 6))
-        sns.barplot(data=df, x='Function', y='Mean', hue='Strategy')
-        plt.yscale('log')
-        plt.title('Perturbation Strategy Comparison (Log Scale)')
-        plt.ylabel('Mean Fitness')
-        plt.tight_layout()
-        plt.savefig("reports/mosoa/perturbation_comparison.png", dpi=300)
-        plt.close()
-    except ImportError:
-        pass
+        # 2. Multimodal (F8-F13)
+        multimodal = [f'F{i}' for i in range(8, 14)]
+        df_multi = df[df['Function'].isin(multimodal)]
+        
+        # 3. Fixed-Dimension (F14-F23)
+        fixed_dim = [f'F{i}' for i in range(14, 24)]
+        df_fixed = df[df['Function'].isin(fixed_dim)]
 
-    print("Results saved to reports/mosoa/")
+        # Generating categorized plots
+        pbar_desc = "Generating Categorized Ablation Plots"
+        for df_subset, label, fname in tqdm([
+            (df_uni, "Unimodal", "ablation_unimodal_F1_F7.png"),
+            (df_multi, "Multimodal", "ablation_multimodal_F8_F13.png"),
+            (df_fixed, "Fixed-Dimension", "ablation_fixed_dim_F14_F23.png")
+        ], desc=pbar_desc, leave=True, dynamic_ncols=True):
+            if not df_subset.empty:
+                plot_perturbation_ablation(df_subset, os.path.join(out_dir, fname), title_suffix=label)
+            
+        # Also keep a "Full" overview but warn that it might be zoomed out
+        plot_perturbation_ablation(df, os.path.join(out_dir, "ablation_full_overview.png"), title_suffix="Full Overview")
+        
+        # 4. Strategy Convergence Plots (New)
+        pbar_desc = "Generating Strategy Convergence Plots"
+        for fn_name, histories in tqdm(convergence_histories.items(), desc=pbar_desc, leave=True, dynamic_ncols=True):
+            fname = f"convergence_ablation_{fn_name}.png"
+            plot_perturbation_convergence(histories, fn_name, os.path.join(out_dir, fname), num_runs=num_runs)
+            
+    except Exception as e:
+        print(f"Visualization error: {e}")
 
 if __name__ == "__main__":
     main()

@@ -18,12 +18,3 @@ hpo_space:
   # lambda_power_balance: [0.01, 1.0]
   # lambda_voltage_limit: [0.001, 0.1]
   # lambda_branch_capacity: [0.001, 0.1]
-
-benchmark_settings:
-  pop_size: 15                 # Seagull population size
-  n_trials: 50                 # Total number of iterations per algorithm
-  algorithms:
-    - mosoa
-    - soa
-    - tpe
-    - random

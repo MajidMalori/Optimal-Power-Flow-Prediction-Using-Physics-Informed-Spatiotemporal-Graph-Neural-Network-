@@ -323,7 +323,7 @@ if __name__ == "__main__":
         print()
         try:
             from src.visualization.plot_preprocessing import generate_all_preprocessing_plots
-            base_reports_dir = os.path.join(root_dir, 'reports', 'prep_data')
+            base_reports_dir = os.path.join(root_dir, 'reports', 'data')
             for case in processed_cases:
                 case_dir = os.path.join(PROCESSED_DIR, case)
                 reports_dir = os.path.join(base_reports_dir, case)

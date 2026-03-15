@@ -1,20 +1,20 @@
-"""
-Compares MoSOA vs SOA vs TPE vs Random Search on PISTGNN model tuning.
-"""
-import yaml
-import time
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import numpy as np
 import pandas as pd
+import os
+import sys
+import time
+import argparse
+import yaml
 from tqdm import tqdm
-from typing import Dict, Any
+from typing import Dict, Any, List
+import shutil
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.optimizers.mosoa import MoSOA
 from src.optimizers.soa import SOA
 from src.optimizers.tpe_wrapper import TPEOptimizer
+from src.visualization.plot_mosoa import plot_hpo_performance
 
 def load_hpo_config(config_path="configs/hpo_space.yaml"):
     with open(config_path, 'r') as f:
@@ -63,21 +63,49 @@ def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any],
     }
 
 def main():
-    config = load_hpo_config()
-    search_space = config['hpo_space']
-    settings = config['benchmark_settings']
-    n_trials = settings['n_trials']
-    pop_size = settings['pop_size']
+    parser = argparse.ArgumentParser(description='Benchmark HPO for PISTGNN')
+    parser.add_argument('--case', type=str, default='case33', help='Power system case')
+    args = parser.parse_args()
+
+    # 1. Load Execution Config
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
+    exec_config = {}
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            exec_config = yaml.safe_load(f).get('hpo', {})
+            
+    iterations = exec_config.get('iterations', 200)
+    pop_size = exec_config.get('pop_size', 10)
+    n_trials = iterations * pop_size
     
-    algorithms = [
-        (None, "Random Search"),
-        (TPEOptimizer, "TPE (Optuna)"),
-        (SOA, "SOA"),
-        (MoSOA, "MoSOA"),
-    ]
+    # 2. Clear previous reports
+    out_dir = "reports/mosoa/hpo"
+    if os.path.exists(out_dir):
+        shutil.rmtree(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 3. Load Search Space Config
+    space_path = os.path.join(os.path.dirname(__file__), "..", "configs", "hpo_space.yaml")
+    with open(space_path, 'r') as f:
+        space_config = yaml.safe_load(f)
+    
+    search_space = space_config['hpo_space']
+    
+    # Use fixed algorithms for HPO benchmark or load from config if added later
+    algorithm_map = {
+        'random': (None, "Random Search"),
+        'tpe': (TPEOptimizer, "TPE (Optuna)"),
+        'soa': (SOA, "SOA"),
+        'mosoa': (MoSOA, "MoSOA"),
+    }
+    
+    # Get algorithms to run from config, or use all if not specified
+    algorithms_to_run_names = exec_config.get('algorithms', ['mosoa', 'soa', 'tpe', 'random'])
+    algorithms = [algorithm_map[name] for name in algorithms_to_run_names if name in algorithm_map]
     
     results = []
-    for opt_class, name in tqdm(algorithms, desc="HPO Benchmarks"):
+    print() # Spacing from command
+    for opt_class, name in tqdm(algorithms, desc="Hyperparameter Tuning Benchmarks", leave=True, dynamic_ncols=True):
         results.append(run_tuning(opt_class, name, search_space, n_trials, pop_size))
     
     df = pd.DataFrame(results)
@@ -85,26 +113,16 @@ def main():
     print(df.to_string(index=False))
     print("======================================================")
     
-    os.makedirs("reports/mosoa", exist_ok=True)
-    df.to_csv("reports/mosoa/benchmark_hpo_results.csv", index=False)
+    out_dir = "reports/mosoa/hpo"
+    os.makedirs(out_dir, exist_ok=True)
+    df.to_csv(os.path.join(out_dir, "hpo_results.csv"), index=False)
     
     try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        
-        plt.figure(figsize=(10, 6))
-        sns.barplot(data=df, x='Algorithm', y='Best Val Loss')
-        plt.title('Stage 2: Hyperparameter Tuning Performance (Lower is Better)')
-        plt.ylabel('Validation Loss')
-        plt.tight_layout()
-        plt.savefig("reports/mosoa/hpo_performance_comparison.png", dpi=300)
-        plt.close()
-    except ImportError:
-        pass
-
-    print("Results saved to reports/mosoa/")
+        # Add a small progress bar for the plotting phase as requested
+        for _ in tqdm(range(1), desc="Generating Performance Plot", leave=True, dynamic_ncols=True):
+            plot_hpo_performance(df, os.path.join(out_dir, "hpo_performance_comparison.png"))
+    except Exception as e:
+        print(f"Visualization error: {e}")
 
 if __name__ == "__main__":
     main()

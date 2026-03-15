@@ -66,6 +66,7 @@ class MoSOA(BaseOptimizer):
         it = 0
         
         pbar = tqdm(total=t_max, disable=not verbose, desc="MoSOA Optimization", leave=False)
+        history = []
         while it < t_max:
             # 1. Evaluate fitness
             for i in range(self.pop_size):
@@ -82,6 +83,8 @@ class MoSOA(BaseOptimizer):
                 if current_fitness < self.g_best_fitness:
                     self.g_best_fitness = current_fitness
                     self.g_best_position = np.copy(self.positions[i])
+            
+            history.append(self.g_best_fitness)
 
             # 2. Adaptive Parameters
             # Eq. 33-34: Nonlinear convergence factor A
@@ -134,4 +137,8 @@ class MoSOA(BaseOptimizer):
             pbar.set_postfix(best=f"{self.g_best_fitness:.6f}")
 
         pbar.close()
-        return {name: self.g_best_position[j] for j, name in enumerate(self.param_names)}
+        return {
+            'best_params': {name: self.g_best_position[j] for j, name in enumerate(self.param_names)},
+            'history': history,
+            'best_fitness': self.g_best_fitness
+        }

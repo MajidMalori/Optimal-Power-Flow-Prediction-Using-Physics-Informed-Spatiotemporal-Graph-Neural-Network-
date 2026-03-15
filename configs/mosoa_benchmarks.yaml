@@ -1,0 +1,36 @@
+# MoSOA Benchmark Configuration
+
+# Settings for Mathematical Function Benchmarks (F1-F23)
+mathematical:
+  num_runs: 10
+  iterations: 10
+  pop_size: 30
+  default_dim: 30
+  plot_subset: "all" # set to "all" to plot all 23, or a list like ["F1", "F5"]
+
+# Settings for Perturbation Strategy Ablation (Roadmap 3.2)
+perturbation:
+  num_runs: 10
+  iterations: 10
+  pop_size: 30
+  conv_plot_subset: ["F1", "F9", "F14", "F21"]
+
+# Settings for Hyperparameter Tuning (HPO) Benchmarks
+hpo:
+  iterations: 200
+  pop_size: 10
+  num_runs: 1 # Usually 1 for HPO as it's expensive
+
+# Visualization Aesthetics
+visualization:
+  linewidth: 2.0
+  dpi: 300
+  colors:
+    MoSOA: "#E91E63"
+    ESOA:  "#2ecc71"
+    PSO:   "#FF9800"
+    GWO:   "#2980b9"
+    GA:    "#8e44ad"
+    TSA:   "#f1c40f"
+    SOA*:  "#d35400"
+    HGSO:  "#2c3e50"
