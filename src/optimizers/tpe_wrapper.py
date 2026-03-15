@@ -22,12 +22,15 @@ class TPEOptimizer(BaseOptimizer):
         if optuna is None:
             print("Warning: optuna is not installed. Please run 'pip install optuna'.")
 
-    def optimize(self, objective_fn: Callable[[Dict[str, Any]], float], n_trials: int) -> Dict[str, Any]:
+    def optimize(self, objective_fn: Callable[[Dict[str, Any]], float], n_trials: int, verbose: bool = True) -> Dict[str, Any]:
         """
         Execute Optuna TPE optimization.
         """
         if optuna is None:
             raise ImportError("Optuna is not installed.")
+
+        if not verbose:
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         # Create study
         sampler = optuna.samplers.TPESampler(seed=self.seed)
@@ -42,5 +45,5 @@ class TPEOptimizer(BaseOptimizer):
                     params[name] = trial.suggest_float(name, limits[0], limits[1])
             return objective_fn(params)
 
-        study.optimize(optuna_objective, n_trials=n_trials)
+        study.optimize(optuna_objective, n_trials=n_trials, show_progress_bar=verbose)
         return study.best_params

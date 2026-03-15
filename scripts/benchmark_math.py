@@ -1,5 +1,4 @@
 """
-Runner script for Stage 1 Math Benchmarks.
 Compares MoSOA vs SOA on standard test functions.
 """
 import time
@@ -9,6 +8,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from typing import Dict, Any
 
 from src.benchmarks.functions import BENCHMARKS
@@ -18,33 +18,26 @@ from src.optimizers.soa import SOA
 
 def run_benchmark(optimizer_class: type, func_name: str, num_runs: int = 30, 
                   n_trials: int = 500, pop_size: int = 30, dim: int = 30):
-    """
-    Runs an optimizer on a specific function multiple times.
-    """
+    """Runs an optimizer on a specific function multiple times."""
     benchmark = BENCHMARKS[func_name]
     _obj_fn = benchmark['fn']
     bounds = benchmark['bounds']
-    
-    # Create search space for the given dimension
     search_space = {f'x_{i}': bounds for i in range(dim)}
     
-    # Wrapper to convert dict back to numpy array for math functions
     def obj_fn(params: Dict[str, Any]) -> float:
         x_array = np.array([params[f'x_{i}'] for i in range(dim)])
         return _obj_fn(x_array)
     
     results = []
-    
-    print(f"\nRunning {optimizer_class.__name__} on {func_name} ({num_runs} runs)...")
     start_time = time.time()
     
     for run in range(num_runs):
         opt = optimizer_class(
             search_space=search_space, 
-            seed=run + 42, # Different seed per run
+            seed=run + 42,
             pop_size=pop_size
         )
-        best_params = opt.optimize(obj_fn, n_trials=n_trials)
+        best_params = opt.optimize(obj_fn, n_trials=n_trials, verbose=False)
         best_val = obj_fn(best_params)
         results.append(best_val)
         
@@ -57,20 +50,19 @@ def run_benchmark(optimizer_class: type, func_name: str, num_runs: int = 30,
         'Worst': np.max(results),
         'Mean': np.mean(results),
         'Std': np.std(results),
-        'Time (s)': execution_time
+        'Time (s)': round(execution_time, 3)
     }
 
 def main():
-    # Only test a few functions for the demo to save time
     test_funcs = ['F1', 'F5', 'F9', 'F10'] 
+    optimizers = [SOA, MoSOA]
     
     all_results = []
+    tasks = [(fn, opt) for fn in test_funcs for opt in optimizers]
     
-    for fn_name in test_funcs:
-        for opt_class in [SOA, MoSOA]:
-            # Using 10 runs and 300 evaluations for faster testing
-            res = run_benchmark(opt_class, fn_name, num_runs=10, n_trials=300, dim=10)
-            all_results.append(res)
+    for fn_name, opt_class in tqdm(tasks, desc="Math Benchmarks"):
+        res = run_benchmark(opt_class, fn_name, num_runs=10, n_trials=300, dim=10)
+        all_results.append(res)
             
     df = pd.DataFrame(all_results)
     
@@ -78,12 +70,12 @@ def main():
     print(df.to_string(index=False))
     print("=====================================================")
     
-    # Save to CSV
     os.makedirs("reports/mosoa", exist_ok=True)
     df.to_csv("reports/mosoa/benchmark_math_results.csv", index=False)
     
-    # Generate Plots
     try:
+        import matplotlib
+        matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import seaborn as sns
         
@@ -94,11 +86,11 @@ def main():
         plt.ylabel('Mean Fitness (Log Scale)')
         plt.tight_layout()
         plt.savefig("reports/mosoa/math_benchmark_comparison.png", dpi=300)
-        print("Generated plot at reports/mosoa/math_benchmark_comparison.png")
+        plt.close()
     except ImportError:
-        print("matplotlib/seaborn not installed. Skipping plot generation.")
+        pass
 
-    print("Results saved to reports/mosoa/benchmark_math_results.csv")
+    print("Results saved to reports/mosoa/")
 
 if __name__ == "__main__":
     main()

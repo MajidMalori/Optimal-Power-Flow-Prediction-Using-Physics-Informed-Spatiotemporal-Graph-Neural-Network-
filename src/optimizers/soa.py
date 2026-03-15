@@ -40,13 +40,15 @@ class SOA(BaseOptimizer):
             pos[i] = np.clip(pos[i], limits[0], limits[1])
         return pos
 
-    def optimize(self, objective_fn: Callable[[Dict[str, Any]], float], n_trials: int) -> Dict[str, Any]:
+    def optimize(self, objective_fn: Callable[[Dict[str, Any]], float], n_trials: int, verbose: bool = True) -> Dict[str, Any]:
         """
         Execute standard SOA optimization loop.
         """
+        from tqdm import tqdm
         t_max = n_trials // self.pop_size
         it = 0
         
+        pbar = tqdm(total=t_max, disable=not verbose, desc="SOA Optimization", leave=False)
         while it < t_max:
             # 1. Evaluate fitness
             for i in range(self.pop_size):
@@ -83,6 +85,8 @@ class SOA(BaseOptimizer):
 
             self.positions = new_positions
             it += 1
-            print(f"SOA Iteration {it}/{t_max} - Best Fitness: {self.g_best_fitness:.6f}")
+            pbar.update(1)
+            pbar.set_postfix(best=f"{self.g_best_fitness:.6f}")
 
+        pbar.close()
         return {name: self.g_best_position[j] for j, name in enumerate(self.param_names)}
