@@ -1,0 +1,29 @@
+# Hyperparameter Search Space for Benchmarking
+# Format: [min, max]
+# Int values are sampled as integers, float values are sampled as floats
+hpo_space:
+  # General Training HPs
+  learning_rate: [0.0001, 0.05]
+  weight_decay: [0.00001, 0.01]
+  batch_size: [16, 128]        # Will be cast to closest power of 2 in runner if needed
+  
+  # Structural Architecture HPs
+  num_layers: [1, 6]           # Affects GCN layers or ResNet blocks
+  gcn_hidden: [16, 128]        # Graph Convolution hidden dimension
+  lstm_hidden: [16, 128]       # LSTM hidden dimension (for PIGCLSTM / PIResnetGCLSTM)
+  gru_hidden: [16, 128]        # GRU hidden dimension (for PIGCGRU / PIResnetGCGRU)
+  dropout: [0.0, 0.5]          # Dropout rate across all models
+
+  # Physics-Informed Loss Weights (Optional to tune, but powerful)
+  # lambda_power_balance: [0.01, 1.0]
+  # lambda_voltage_limit: [0.001, 0.1]
+  # lambda_branch_capacity: [0.001, 0.1]
+
+benchmark_settings:
+  pop_size: 15                 # Seagull population size
+  n_trials: 50                 # Total number of iterations per algorithm
+  algorithms:
+    - mosoa
+    - soa
+    - tpe
+    - random
