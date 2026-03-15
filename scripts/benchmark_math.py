@@ -79,8 +79,26 @@ def main():
     print("=====================================================")
     
     # Save to CSV
-    df.to_csv("reports/benchmarks/benchmark_math_results.csv", index=False)
-    print("Results saved to reports/benchmarks/benchmark_math_results.csv")
+    os.makedirs("reports/mosoa", exist_ok=True)
+    df.to_csv("reports/mosoa/benchmark_math_results.csv", index=False)
+    
+    # Generate Plots
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        plt.figure(figsize=(12, 8))
+        sns.barplot(data=df, x='Function', y='Mean', hue='Algorithm')
+        plt.yscale('log')
+        plt.title('MoSOA vs SOA: Mean Fitness on Math Benchmarks (Lower is Better)')
+        plt.ylabel('Mean Fitness (Log Scale)')
+        plt.tight_layout()
+        plt.savefig("reports/mosoa/math_benchmark_comparison.png", dpi=300)
+        print("Generated plot at reports/mosoa/math_benchmark_comparison.png")
+    except ImportError:
+        print("matplotlib/seaborn not installed. Skipping plot generation.")
+
+    print("Results saved to reports/mosoa/benchmark_math_results.csv")
 
 if __name__ == "__main__":
     main()

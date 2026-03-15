@@ -135,12 +135,29 @@ def main():
             all_results.append(res)
             
     df = pd.DataFrame(all_results)
-    print("\\n\\n======= PERTURBATION STRATEGY COMPARISON =======")
+    print("\n\n======= PERTURBATION STRATEGY COMPARISON =======")
     print(df.to_string(index=False))
     print("================================================")
     
-    df.to_csv("src/benchmarks/perturbation_results.csv", index=False)
-    print("Results saved to src/benchmarks/perturbation_results.csv")
+    os.makedirs("reports/mosoa", exist_ok=True)
+    df.to_csv("reports/mosoa/benchmark_perturbation_results.csv", index=False)
+    
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        plt.figure(figsize=(10, 6))
+        sns.barplot(data=df, x='Function', y='Mean', hue='Strategy')
+        plt.yscale('log')
+        plt.title('Perturbation Strategy Comparison (Log Scale)')
+        plt.ylabel('Mean Fitness')
+        plt.tight_layout()
+        plt.savefig("reports/mosoa/perturbation_comparison.png", dpi=300)
+        print("Generated plot at reports/mosoa/perturbation_comparison.png")
+    except ImportError:
+        pass
+
+    print("Results saved to reports/mosoa/benchmark_perturbation_results.csv")
 
 if __name__ == "__main__":
     main()

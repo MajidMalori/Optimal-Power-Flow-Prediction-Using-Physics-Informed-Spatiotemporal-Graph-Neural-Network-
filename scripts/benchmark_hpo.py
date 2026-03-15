@@ -100,8 +100,24 @@ def main():
     print(df.to_string(index=False))
     print("======================================================")
     
-    df.to_csv("reports/benchmarks/benchmark_hpo_results.csv", index=False)
-    print("Results saved to reports/benchmarks/benchmark_hpo_results.csv")
+    os.makedirs("reports/mosoa", exist_ok=True)
+    df.to_csv("reports/mosoa/benchmark_hpo_results.csv", index=False)
+    
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        plt.figure(figsize=(10, 6))
+        sns.barplot(data=df, x='Algorithm', y='Best Val Loss')
+        plt.title('Stage 2: Hyperparameter Tuning Performance (Lower Loss is Better)')
+        plt.ylabel('Validation Loss')
+        plt.tight_layout()
+        plt.savefig("reports/mosoa/hpo_performance_comparison.png", dpi=300)
+        print("Generated plot at reports/mosoa/hpo_performance_comparison.png")
+    except ImportError:
+        pass
+
+    print("Results saved to reports/mosoa/benchmark_hpo_results.csv")
 
 if __name__ == "__main__":
     main()
