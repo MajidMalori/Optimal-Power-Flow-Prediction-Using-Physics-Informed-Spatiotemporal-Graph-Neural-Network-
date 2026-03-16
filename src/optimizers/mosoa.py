@@ -12,7 +12,8 @@ class MoSOA(BaseOptimizer):
 
     def __init__(self, search_space: Dict[str, Any], seed: int = 42, 
                  pop_size: int = 30, f_c: float = 2.0, 
-                 c1: float = 1.5, c2: float = 1.5):
+                 c1: float = 1.5, c2: float = 1.5,
+                 p_beta: float = 5.0, sigma_max: float = 1.0):
         """
         Initialize MoSOA.
 
@@ -29,6 +30,8 @@ class MoSOA(BaseOptimizer):
         self.f_c = f_c
         self.c1 = c1
         self.c2 = c2
+        self.p_beta = p_beta
+        self.sigma_max = sigma_max
         self.dim = len(search_space)
         self.param_names = list(search_space.keys())
         
@@ -51,10 +54,17 @@ class MoSOA(BaseOptimizer):
         return pop
 
     def _normalize_position(self, pos: np.ndarray) -> np.ndarray:
-        """Clip position to search space bounds."""
+        """Handle boundary conditions using reflective strategy (less 'cheating' than clamping)."""
         for i, name in enumerate(self.param_names):
-            limits = self.search_space[name]
-            pos[i] = np.clip(pos[i], limits[0], limits[1])
+            low, high = self.search_space[name]
+            # Reflective boundary handling: Bounces once, then clips if still out
+            if pos[i] < low:
+                pos[i] = 2 * low - pos[i]
+            if pos[i] > high:
+                pos[i] = 2 * high - pos[i]
+            
+            # Final safety clip
+            pos[i] = np.clip(pos[i], low, high)
         return pos
 
     def optimize(self, objective_fn: Callable[[Dict[str, Any]], float], n_trials: int, verbose: bool = True) -> Dict[str, Any]:
@@ -86,17 +96,15 @@ class MoSOA(BaseOptimizer):
             
             history.append(self.g_best_fitness)
 
-            # 2. Adaptive Parameters
             # Eq. 33-34: Nonlinear convergence factor A
-            # Simple adaptive decay for demonstration
-            sigma = 1.0 + (np.std(self.fitness) / (np.mean(self.fitness) + 1e-6))
+            sigma = self.sigma_max + (np.std(self.fitness) / (np.mean(self.fitness) + 1e-6))
             a = self.f_c * (1 - (it / t_max))**sigma
             
             # Eq. 36: Inertia weight w
             w = 0.95 - (it / t_max) * (0.95 - 0.35)
             
             # Eq. 39: Exponential perturbation decay beta
-            beta = np.exp(-5 * it / t_max)
+            beta = np.exp(-self.p_beta * it / t_max)
 
             # 3. Position Update Loop
             new_positions = np.zeros_like(self.positions)

@@ -1,9 +1,15 @@
 # MoSOA Benchmark Configuration
 
+# Core Algorithm Hyperparameters (Optimized for 200 iterations)
+mosoa_params:
+  f_c: 2.0             # Optimal point for most functions
+  p_beta: 10.0         # Faster decay helps stability in late iterations (Sensitivity global minimum)
+  sigma_max: 1.0       # Standard nonlinear factor
+
 # Settings for Mathematical Function Benchmarks (F1-F23)
 mathematical:
   num_runs: 10
-  iterations: 10
+  iterations: 200
   pop_size: 30
   default_dim: 30
   plot_subset: "all" # set to "all" to plot all 23, or a list like ["F1", "F5"]
@@ -13,7 +19,7 @@ perturbation:
   num_runs: 10
   iterations: 10
   pop_size: 30
-  conv_plot_subset: ["F1", "F9", "F14", "F21"]
+  conv_plot_subset: "all"
 
 # Settings for Hyperparameter Tuning (HPO) Benchmarks
 hpo:

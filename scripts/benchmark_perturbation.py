@@ -1,6 +1,7 @@
 import time
 import sys
 import os
+import yaml
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
@@ -20,13 +21,14 @@ from src.visualization.plot_mosoa import (
 class MoSOAPerturbationVariant(MoSOA):
     """MoSOA variant that allows overriding the perturbation decay strategy."""
     def __init__(self, search_space: Dict[str, Any], seed: int = 42, 
-                 pop_size: int = 30, strategy: str = 'exponential'):
-        super().__init__(search_space, seed, pop_size=pop_size)
+                 pop_size: int = 30, strategy: str = 'exponential', **kwargs):
+        super().__init__(search_space, seed, pop_size=pop_size, **kwargs)
         self.strategy = strategy
 
     def optimize(self, objective_fn, n_trials: int, verbose: bool = True) -> Dict[str, Any]:
         t_max = n_trials // self.pop_size
         it = 0
+        self.history = []
         
         while it < t_max:
             for i in range(self.pop_size):
@@ -77,13 +79,15 @@ class MoSOAPerturbationVariant(MoSOA):
                 new_positions[i] = self._normalize_position(p_learned + noise + (p_attack - p_learned) * (it/t_max))
 
             self.positions = new_positions
+            self.history.append(self.g_best_fitness)
             it += 1
 
-        return {name: self.g_best_position[j] for j, name in enumerate(self.param_names)}
+        best_params = {name: self.g_best_position[j] for j, name in enumerate(self.param_names)}
+        return best_params, self.history
 
 
 def run_strategy_benchmark(strategy: str, func_name: str, num_runs: int = 15, 
-                            n_trials: int = 300, default_dim: int = 10):
+                            n_trials: int = 300, default_dim: int = 10, **mosoa_params):
     benchmark = BENCHMARKS[func_name]
     _obj_fn = benchmark['fn']
     bounds = benchmark['bounds']
@@ -104,7 +108,7 @@ def run_strategy_benchmark(strategy: str, func_name: str, num_runs: int = 15,
     all_histories = []
 
     for _ in range(num_runs):
-        opt = MoSOAPerturbationVariant(search_space=search_space, strategy=strategy)
+        opt = MoSOAPerturbationVariant(search_space=search_space, strategy=strategy, **mosoa_params)
         best_params, history = opt.optimize(obj_fn, n_trials=n_trials, verbose=False)
         best_fitnesses.append(obj_fn(best_params))
         all_histories.append(history)
@@ -124,9 +128,11 @@ def main():
     # 1. Load Config
     config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
     config = {}
-    if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f).get('perturbation', {})
+    # Load mosoa_params from config
+    with open(config_path, 'r') as f:
+        full_conf = yaml.safe_load(f)
+        mosoa_params = full_conf.get('mosoa_params', {})
+        config = full_conf.get('perturbation', {})
     
     num_runs = config.get('num_runs', 10)
     iterations = config.get('iterations', 200)
@@ -152,7 +158,7 @@ def main():
     
     print() # Spacing from command
     for fn_name, strat in tqdm(tasks, desc="Perturbation Strategy Ablation", leave=True, dynamic_ncols=True):
-        res, avg_hist = run_strategy_benchmark(strat, fn_name, num_runs=num_runs, n_trials=n_trials)
+        res, avg_hist = run_strategy_benchmark(strat, fn_name, num_runs=num_runs, n_trials=n_trials, **mosoa_params)
         all_results.append(res)
         
         if fn_name in conv_plot_subset:

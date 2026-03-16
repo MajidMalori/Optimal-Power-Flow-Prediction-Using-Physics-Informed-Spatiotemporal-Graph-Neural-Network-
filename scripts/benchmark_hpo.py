@@ -33,7 +33,7 @@ def mock_training_pipeline(params: Dict[str, Any]) -> float:
     return max(0.1, lr_err + dim_err + drop_err + layers_err + noise)
 
 def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any], 
-               n_trials: int, pop_size: int = 10):
+               n_trials: int, pop_size: int = 10, verbose: bool = True, **mosoa_params):
     start_time = time.time()
     
     if optimizer_class is None:  # Random Search baseline
@@ -50,8 +50,10 @@ def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any],
                 best_val = val
     else:
         kwargs = {"pop_size": pop_size} if optimizer_class in [MoSOA, SOA] else {}
+        if optimizer_class == MoSOA:
+            kwargs.update(mosoa_params)
         opt = optimizer_class(search_space=search_space, seed=42, **kwargs)
-        best_params = opt.optimize(mock_training_pipeline, n_trials=n_trials, verbose=False)
+        best_params = opt.optimize(mock_training_pipeline, n_trials=n_trials, verbose=verbose)
         best_val = mock_training_pipeline(best_params)
         
     execution_time = time.time() - start_time
@@ -70,9 +72,12 @@ def main():
     # 1. Load Execution Config
     config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
     exec_config = {}
+    mosoa_params = {}
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
-            exec_config = yaml.safe_load(f).get('hpo', {})
+            full_conf = yaml.safe_load(f)
+            exec_config = full_conf.get('hpo', {})
+            mosoa_params = full_conf.get('mosoa_params', {})
             
     iterations = exec_config.get('iterations', 200)
     pop_size = exec_config.get('pop_size', 10)
@@ -105,8 +110,10 @@ def main():
     
     results = []
     print() # Spacing from command
-    for opt_class, name in tqdm(algorithms, desc="Hyperparameter Tuning Benchmarks", leave=True, dynamic_ncols=True):
-        results.append(run_tuning(opt_class, name, search_space, n_trials, pop_size))
+    for opt_class, name in tqdm(algorithms, desc="HPO Comparison", leave=True, dynamic_ncols=True):
+        extra_args = mosoa_params if name == "MoSOA" else {}
+        res = run_tuning(opt_class, name, search_space, n_trials=n_trials, pop_size=pop_size, verbose=False, **extra_args)
+        results.append(res)
     
     df = pd.DataFrame(results)
     print("\n\n================ HPO PIPELINE RESULTS ================")

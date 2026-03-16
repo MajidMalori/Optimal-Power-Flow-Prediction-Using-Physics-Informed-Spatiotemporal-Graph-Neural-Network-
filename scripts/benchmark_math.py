@@ -26,7 +26,7 @@ from src.visualization.plot_mosoa import plot_mosoa_ranks, plot_convergence_curv
 # ============================================================
 # MoSOA runner (uses our custom implementation)
 # ============================================================
-def run_mosoa(func_name: str, num_runs: int, n_trials: int, pop_size: int, dim: int):
+def run_mosoa(func_name: str, num_runs: int, n_trials: int, pop_size: int, dim: int, mosoa_params: Dict[str, Any]):
     benchmark = BENCHMARKS[func_name]
     _obj_fn = benchmark['fn']
     bounds = benchmark['bounds']
@@ -44,7 +44,8 @@ def run_mosoa(func_name: str, num_runs: int, n_trials: int, pop_size: int, dim: 
     fitness_results = []
     histories = []
     for run in range(num_runs):
-        res = MoSOA(search_space=search_space, seed=run + 42, pop_size=pop_size).optimize(obj_fn, n_trials=n_trials, verbose=False)
+        opt = MoSOA(search_space=search_space, seed=run + 42, pop_size=pop_size, **mosoa_params)
+        res = opt.optimize(obj_fn, n_trials=n_trials, verbose=False)
         fitness_results.append(res['best_fitness'])
         histories.append(res['history'])
     
@@ -103,6 +104,10 @@ def main():
     n_trials = iterations * pop_size
     default_dim = config.get('default_dim', 30)
     
+    # Load MoSOA specific params
+    with open(config_path, 'r') as f:
+        mosoa_params = yaml.safe_load(f).get('mosoa_params', {})
+    
     # 2. Clear previous results to avoid stale files
     base_dir = "reports/mosoa/mathematical"
     if os.path.exists(base_dir):
@@ -132,7 +137,7 @@ def main():
         start_time = time.time()
 
         if algo_name == 'MoSOA':
-            fitnesses, avg_hist = run_mosoa(fn_name, num_runs, n_trials, pop_size, dim)
+            fitnesses, avg_hist = run_mosoa(fn_name, num_runs, n_trials, pop_size, dim, mosoa_params)
         else:
             fitnesses, avg_hist = run_mealpy(algo_name, fn_name, num_runs, n_trials, pop_size, dim)
 

@@ -30,10 +30,10 @@ class TPEOptimizer(BaseOptimizer):
             raise ImportError("Optuna is not installed.")
 
         if not verbose:
-            optuna.logging.set_verbosity(optuna.logging.WARNING)
+            optuna.logging.set_verbosity(optuna.logging.ERROR)
 
-        # Create study
-        sampler = optuna.samplers.TPESampler(seed=self.seed)
+        # Create study with faster settings for HPO benchmarking
+        sampler = optuna.samplers.TPESampler(seed=self.seed, multivariate=False)
         study = optuna.create_study(direction="minimize", sampler=sampler)
 
         def optuna_objective(trial):

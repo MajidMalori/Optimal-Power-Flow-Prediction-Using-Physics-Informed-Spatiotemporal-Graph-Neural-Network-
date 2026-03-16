@@ -150,6 +150,9 @@ pert:
 hpo:
 	python scripts/benchmark_hpo.py
 
+sense:
+	python scripts/analyze_sensitivity.py
+
 # Full pipeline for all cases
 full-33: gen-33 prep-33 test train-33 eval-33 unc-33
 full-57: gen-57 prep-57 test train-57 eval-57 unc-57
