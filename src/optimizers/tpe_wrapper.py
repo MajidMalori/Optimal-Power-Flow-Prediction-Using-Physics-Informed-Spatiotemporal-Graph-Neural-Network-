@@ -29,8 +29,8 @@ class TPEOptimizer(BaseOptimizer):
         if optuna is None:
             raise ImportError("Optuna is not installed.")
 
-        if not verbose:
-            optuna.logging.set_verbosity(optuna.logging.ERROR)
+        # Always suppress noisy Optuna trial INFO logs; we only want the clean progress bar if verbose=True
+        optuna.logging.set_verbosity(optuna.logging.ERROR)
 
         # Create study with faster settings for HPO benchmarking
         sampler = optuna.samplers.TPESampler(seed=self.seed, multivariate=False)

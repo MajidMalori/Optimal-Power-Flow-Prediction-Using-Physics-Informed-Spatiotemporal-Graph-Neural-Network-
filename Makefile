@@ -150,6 +150,30 @@ pert:
 hpo:
 	python scripts/benchmark_hpo.py
 
+true-hpo-33:
+	python scripts/benchmark_true_hpo.py --case case33
+	python src/visualization/plot_true_hpo.py
+
+true-hpo-57:
+	python scripts/benchmark_true_hpo.py --case case57
+	python src/visualization/plot_true_hpo.py
+
+true-hpo-118:
+	python scripts/benchmark_true_hpo.py --case case118
+	python src/visualization/plot_true_hpo.py
+
+true-hpo-all-33:
+	python scripts/benchmark_true_hpo.py --case case33 --all-models
+	python src/visualization/plot_true_hpo.py
+
+true-hpo-all-57:
+	python scripts/benchmark_true_hpo.py --case case57 --all-models
+	python src/visualization/plot_true_hpo.py
+
+true-hpo-all-118:
+	python scripts/benchmark_true_hpo.py --case case118 --all-models
+	python src/visualization/plot_true_hpo.py
+
 sense:
 	python scripts/analyze_sensitivity.py
 

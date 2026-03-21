@@ -126,7 +126,7 @@ def run_strategy_benchmark(strategy: str, func_name: str, num_runs: int = 15,
 
 def main():
     # 1. Load Config
-    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa.yaml")
     config = {}
     # Load mosoa_params from config
     with open(config_path, 'r') as f:
@@ -202,11 +202,23 @@ def main():
         # Also keep a "Full" overview but warn that it might be zoomed out
         plot_perturbation_ablation(df, os.path.join(out_dir, "ablation_full_overview.png"), title_suffix="Full Overview")
         
-        # 4. Strategy Convergence Plots (New)
-        pbar_desc = "Generating Strategy Convergence Plots"
-        for fn_name, histories in tqdm(convergence_histories.items(), desc=pbar_desc, leave=True, dynamic_ncols=True):
-            fname = f"convergence_ablation_{fn_name}.png"
-            plot_perturbation_convergence(histories, fn_name, os.path.join(out_dir, fname), num_runs=num_runs)
+        # 4. Strategy Convergence Plots (Grouped by category)
+        print("\nGenerating Grouped Convergence Plots...")
+        
+        unimodal_conv = {fn: convergence_histories[fn] for fn in unimodal if fn in convergence_histories}
+        multimodal_conv = {fn: convergence_histories[fn] for fn in multimodal if fn in convergence_histories}
+        fixed_dim_conv = {fn: convergence_histories[fn] for fn in fixed_dim if fn in convergence_histories}
+        
+        from src.visualization.plot_mosoa import plot_categorical_convergence
+        if unimodal_conv:
+            plot_categorical_convergence(unimodal_conv, "Perturbation Convergence: Unimodal (F1-F7)",
+                                         os.path.join(out_dir, "convergence_ablation_unimodal.png"), num_runs=num_runs)
+        if multimodal_conv:
+            plot_categorical_convergence(multimodal_conv, "Perturbation Convergence: Multimodal (F8-F13)",
+                                         os.path.join(out_dir, "convergence_ablation_multimodal.png"), num_runs=num_runs)
+        if fixed_dim_conv:
+            plot_categorical_convergence(fixed_dim_conv, "Perturbation Convergence: Fixed-Dim (F14-F23)",
+                                         os.path.join(out_dir, "convergence_ablation_fixed_dim.png"), num_runs=num_runs)
             
     except Exception as e:
         print(f"Visualization error: {e}")

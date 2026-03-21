@@ -12,6 +12,8 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
 from typing import Dict, Any, List
 import shutil
@@ -20,7 +22,7 @@ import yaml
 from src.benchmarks.functions import BENCHMARKS
 from src.optimizers.mosoa import MoSOA
 from src.optimizers.mealpy_wrapper import run_mealpy_optimizer, MEALPY_ALGORITHMS
-from src.visualization.plot_mosoa import plot_mosoa_ranks, plot_convergence_curves
+from src.visualization.plot_mosoa import plot_mosoa_ranks, plot_categorical_convergence
 
 
 # ============================================================
@@ -92,7 +94,7 @@ def run_mealpy(algo_name: str, func_name: str, num_runs: int, n_trials: int, pop
 # ============================================================
 def main():
     # 1. Load Config
-    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa.yaml")
     config = {}
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
@@ -182,30 +184,90 @@ def main():
     save_category(fixed_dim_fns, "results_fixed_dim_F14_F23.csv")
     df.to_csv(os.path.join(csv_dir, "results_full_benchmark.csv"), index=False)
 
-    # 2. Average Rank Summary
+    # 2. Average Rank Summary + Speed (4 tables: per-category + overall)
+    avg_times = df.groupby('Algorithm')['Time (s)'].mean().round(2)
+    
+    def print_rank_table(sub_df, title):
+        if sub_df.empty: return None
+        rank_df = sub_df.pivot(index='Function', columns='Algorithm', values='Mean')
+        ranks = rank_df.rank(axis=1, method='min')
+        avg = ranks.mean().sort_values()
+        print(f"\n{'=' * 60}")
+        print(f"  {title}")
+        print(f"{'=' * 60}")
+        for algo, rank in avg.items():
+            speed = avg_times.get(algo, 0)
+            print(f"  {algo:<12}: Rank {rank:.2f}  |  Avg Time: {speed:.2f}s")
+        return avg
+    
+    df_uni = df[df['Function'].isin(unimodal_fns)]
+    df_multi = df[df['Function'].isin(multimodal_fns)]
+    df_fixed = df[df['Function'].isin(fixed_dim_fns)]
+    
+    print_rank_table(df_uni, "UNIMODAL (F1-F7)")
+    print_rank_table(df_multi, "MULTIMODAL (F8-F13)")
+    print_rank_table(df_fixed, "FIXED-DIMENSION (F14-F23)")
+    
     rank_df = df.pivot(index='Function', columns='Algorithm', values='Mean')
     ranks = rank_df.rank(axis=1, method='min')
     avg_ranks = ranks.mean().sort_values()
+    print_rank_table(df, "OVERALL AVERAGE (F1-F23)")
+    print(f"{'=' * 60}")
     
-    print("\n================ AVERAGE RANK SUMMARY ================")
-    summary_list = []
-    for algo, rank in avg_ranks.items():
-        line = f"  {algo:<12}: {rank:.2f}"
-        print(line)
-        summary_list.append({'Algorithm': algo, 'Avg Rank': rank})
-    print("======================================================")
     avg_ranks.to_csv(os.path.join(csv_dir, "average_ranks_summary.csv"))
 
     # 3. Visualization
     try:
         plot_mosoa_ranks(avg_ranks, os.path.join(plot_dir, "math_rank_comparison.png"))
         
-        plot_tasks = list(convergence_histories.items())
-        for fn_name, histories in tqdm(plot_tasks, desc="Generating Convergence Plots", leave=True, dynamic_ncols=True):
-            benchmark = BENCHMARKS[fn_name]
-            dim = benchmark['dim'] if benchmark['dim'] is not None else default_dim
-            plot_convergence_curves(histories, fn_name, os.path.join(plot_dir, f"convergence_{fn_name}.png"), 
-                                    num_runs=num_runs, dim=dim)
+        # Speed comparison bar chart
+        from src.visualization.plot_mosoa import set_premium_mosoa_aesthetics
+        set_premium_mosoa_aesthetics()
+        
+        speed_df = avg_times.reset_index()
+        speed_df.columns = ['Algorithm', 'Avg Time (s)']
+        speed_df = speed_df.sort_values('Avg Time (s)')
+        
+        plt.figure(figsize=(10, 6))
+        colors = ['#E91E63' if a == 'MoSOA' else '#3498db' for a in speed_df['Algorithm']]
+        sns.barplot(data=speed_df, x='Algorithm', y='Avg Time (s)', palette=colors)
+        plt.title('Average Execution Time per Function (F1-F23)', fontweight='bold', pad=20)
+        plt.ylabel('Avg Time (s)', fontweight='bold')
+        plt.xlabel('Algorithm', fontweight='bold')
+        plt.xticks(rotation=45)
+        plt.grid(True, linestyle='--', alpha=0.3, axis='y')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_dir, "math_speed_comparison.png"), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("\nGenerating Categorical Convergence Plots...")
+        
+        # Unimodal
+        unimodal_hist = {fn: convergence_histories[fn] for fn in unimodal_fns if fn in convergence_histories}
+        if unimodal_hist:
+            plot_categorical_convergence(unimodal_hist, "Unimodal Functions (F1-F7)", 
+                                         os.path.join(plot_dir, "convergence_unimodal.png"), num_runs=num_runs, default_dim=default_dim)
+                                         
+        # Multimodal
+        multimodal_hist = {fn: convergence_histories[fn] for fn in multimodal_fns if fn in convergence_histories}
+        if multimodal_hist:
+            plot_categorical_convergence(multimodal_hist, "Multimodal Functions (F8-F13)", 
+                                         os.path.join(plot_dir, "convergence_multimodal.png"), num_runs=num_runs, default_dim=default_dim)
+                                         
+        # Fixed-dimension Multimodal (split into two for readability)
+        fixed_dim_a = [f'F{i}' for i in range(14, 20)]
+        fixed_dim_b = [f'F{i}' for i in range(20, 24)]
+        
+        fixed_hist_a = {fn: convergence_histories[fn] for fn in fixed_dim_a if fn in convergence_histories}
+        if fixed_hist_a:
+            plot_categorical_convergence(fixed_hist_a, "Fixed-Dimension Multimodal (F14-F19)", 
+                                         os.path.join(plot_dir, "convergence_fixed_dim_F14_F19.png"), num_runs=num_runs, default_dim=default_dim)
+        
+        fixed_hist_b = {fn: convergence_histories[fn] for fn in fixed_dim_b if fn in convergence_histories}
+        if fixed_hist_b:
+            plot_categorical_convergence(fixed_hist_b, "Fixed-Dimension Multimodal (F20-F23)", 
+                                         os.path.join(plot_dir, "convergence_fixed_dim_F20_F23.png"), num_runs=num_runs, default_dim=default_dim)
+                                         
     except Exception as e:
         print(f"Visualization error: {e}")
 

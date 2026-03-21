@@ -16,7 +16,7 @@ from src.optimizers.soa import SOA
 from src.optimizers.tpe_wrapper import TPEOptimizer
 from src.visualization.plot_mosoa import plot_hpo_performance
 
-def load_hpo_config(config_path="configs/hpo_space.yaml"):
+def load_hpo_config(config_path="configs/mosoa.yaml"):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
@@ -70,7 +70,7 @@ def main():
     args = parser.parse_args()
 
     # 1. Load Execution Config
-    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa_benchmarks.yaml")
+    config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa.yaml")
     exec_config = {}
     mosoa_params = {}
     if os.path.exists(config_path):
@@ -90,7 +90,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # 3. Load Search Space Config
-    space_path = os.path.join(os.path.dirname(__file__), "..", "configs", "hpo_space.yaml")
+    space_path = os.path.join(os.path.dirname(__file__), "..", "configs", "mosoa.yaml")
     with open(space_path, 'r') as f:
         space_config = yaml.safe_load(f)
     

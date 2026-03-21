@@ -6,8 +6,8 @@ import pandas as pd
 import yaml
 
 def load_viz_config():
-    """Load visualization settings from mosoa_benchmarks.yaml if exists."""
-    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "mosoa_benchmarks.yaml")
+    """Load visualization settings from mosoa.yaml if exists."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "mosoa.yaml")
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
             full_config = yaml.safe_load(f)
@@ -105,7 +105,8 @@ def plot_convergence_curves(history_dict, func_name, output_path, num_runs=10, d
         
         # Standard plot (no staircase) as requested for higher iterations
         plt.plot(range(len(history_arr)), history_arr, 
-                 label=algo, linewidth=linewidth, color=color, alpha=alpha)
+                 label=algo, linewidth=linewidth, color=color, alpha=alpha,
+                 marker='o', markersize=4, markevery=max(1, len(history_arr)//20))
         
         if np.any(history_arr <= 1e-12):
             has_zero_or_negative = True
@@ -125,9 +126,87 @@ def plot_convergence_curves(history_dict, func_name, output_path, num_runs=10, d
     # Place legend outside to the right
     plt.legend(bbox_to_anchor=(1.04, 1), loc='upper left', frameon=True, shadow=True)
     
-    plt.grid(True, which="both", ls="-", alpha=0.3)
-    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_categorical_convergence(category_histories, category_name, output_path, num_runs=10, default_dim=30):
+    """
+    Generate a grid of convergence curves for a specific category of mathematical functions.
+    category_histories: {fn_name: {algo_name: list_of_fitness_values}}
+    """
+    set_premium_mosoa_aesthetics()
     
+    num_plots = len(category_histories)
+    if num_plots == 0: return
+    
+    cols = 3 if num_plots > 4 else min(num_plots, 3)
+    rows = int(np.ceil(num_plots / cols))
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
+    
+    if rows == 1 and cols == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+        
+    viz_config = load_viz_config()
+    color_map = viz_config.get('colors', {
+        'MoSOA': '#E91E63', 'PSO': '#FF9800', 'GWO': '#2980b9', 
+        'GA': '#8e44ad', 'TSA': '#f1c40f', 'SOA*': '#d35400', 
+        'ESOA': '#2ecc71', 'HGSO': '#2c3e50'
+    })
+    default_linewidth = viz_config.get('linewidth', 2.0)
+    
+    algorithms_seen = set()
+    
+    for idx, (func_name, history_dict) in enumerate(category_histories.items()):
+        ax = axes[idx]
+        min_val = np.inf
+        has_zero_or_negative = False
+        
+        for i, (algo, history) in enumerate(history_dict.items()):
+            algorithms_seen.add(algo)
+            linewidth = default_linewidth
+            alpha = 1.0 if algo == 'MoSOA' else 0.8
+            color = color_map.get(algo, sns.color_palette("tab10")[i % 10])
+            
+            history_arr = np.array(history)
+            ax.plot(range(len(history_arr)), history_arr, 
+                    linewidth=linewidth, color=color, alpha=alpha,
+                    marker='o', markersize=3, markevery=max(1, len(history_arr)//20))
+                    
+            if np.any(history_arr <= 1e-12):
+                has_zero_or_negative = True
+            min_val = min(min_val, np.min(history_arr))
+            
+        if not has_zero_or_negative and min_val > 0:
+            ax.set_yscale('log')
+            
+        ax.set_title(func_name, fontweight='bold')
+        ax.grid(True, linestyle='--', alpha=0.7)
+        if idx % cols == 0:
+            ax.set_ylabel('Fitness')
+        if idx >= num_plots - cols:
+            ax.set_xlabel('Iterations')
+            
+    for idx in range(num_plots, len(axes)):
+        fig.delaxes(axes[idx])
+        
+    fig.suptitle(f'{category_name} ({num_runs} Runs)', fontweight='bold', fontsize=18, y=1.02)
+    
+    handles = []
+    labels = []
+    for algo in sorted(list(algorithms_seen)):
+        color = color_map.get(algo, 'black')
+        alpha = 1.0 if algo == 'MoSOA' else 0.8
+        line = plt.Line2D([0], [0], color=color, linewidth=default_linewidth, alpha=alpha, marker='o', markersize=3)
+        handles.append(line)
+        labels.append(algo)
+        
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -max(0.05, 0.1/rows)), ncol=min(8, len(labels)), frameon=True, shadow=True)
+    
+    plt.tight_layout()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
@@ -204,7 +283,8 @@ def plot_perturbation_convergence(history_dict, func_name, output_path, num_runs
         
         history_arr = np.array(history)
         plt.plot(range(len(history_arr)), history_arr, 
-                 label=f"MoSOA ({strat})", linewidth=linewidth, color=color)
+                 label=f"MoSOA ({strat})", linewidth=linewidth, color=color,
+                 marker='o', markersize=4, markevery=max(1, len(history_arr)//20))
         
         if np.any(history_arr <= 1e-12):
             has_zero_or_negative = True
@@ -220,7 +300,7 @@ def plot_perturbation_convergence(history_dict, func_name, output_path, num_runs
               fontweight='bold', pad=20)
     plt.xlabel('Iterations', fontweight='bold')
     plt.legend(loc='best', frameon=True, shadow=True)
-    plt.grid(True, which="both", ls="-", alpha=0.3)
+    plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
