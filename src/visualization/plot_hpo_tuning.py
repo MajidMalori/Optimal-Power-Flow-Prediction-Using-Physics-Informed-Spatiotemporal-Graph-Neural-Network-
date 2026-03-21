@@ -17,7 +17,9 @@ def plot_convergence_time(df, out_path):
         
     plt.xlabel('Cumulative Time Elapsed (s)', fontweight='bold')
     plt.ylabel('Best Validation Loss', fontweight='bold')
-    plt.title('Computational Efficiency: Accuracy vs. Computation Time', fontweight='bold', pad=20)
+    case_name = out_path.split(os.sep)[-2] if os.sep in out_path else ""
+    title_prefix = f"[{case_name}] " if case_name else ""
+    plt.title(f'{title_prefix}Computational Efficiency: Accuracy vs. Computation Time', fontweight='bold', pad=20)
     plt.legend(frameon=True, shadow=True)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
@@ -36,7 +38,9 @@ def plot_convergence_trials(df, out_path):
         
     plt.xlabel('Number of Evaluated Trials', fontweight='bold')
     plt.ylabel('Best Validation Loss', fontweight='bold')
-    plt.title('Sample Efficiency: Accuracy vs. Number of Trials', fontweight='bold', pad=20)
+    case_name = out_path.split(os.sep)[-2] if os.sep in out_path else ""
+    title_prefix = f"[{case_name}] " if case_name else ""
+    plt.title(f'{title_prefix}Sample Efficiency: Accuracy vs. Number of Trials', fontweight='bold', pad=20)
     plt.legend(frameon=True, shadow=True)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
@@ -69,7 +73,9 @@ def plot_parallel_coordinates(df, out_path):
     
     parallel_coordinates(normalized_df, 'Performance', colormap='coolwarm', alpha=0.6)
     
-    plt.title('MoSOA Hyperparameter Exploration Landscape (Normalized)')
+    case_name = out_path.split(os.sep)[-2] if os.sep in out_path else ""
+    title_prefix = f"[{case_name}] " if case_name else ""
+    plt.title(f'{title_prefix}MoSOA Hyperparameter Exploration Landscape (Normalized)')
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
@@ -91,7 +97,9 @@ def plot_tradeoff_scatter(df, out_path):
                  
     plt.xlabel('Total Execution Time (s)')
     plt.ylabel('Minimum Validation Loss')
-    plt.title('Executive Summary: Time vs Accuracy Trade-off', fontweight='bold', pad=20)
+    case_name = out_path.split(os.sep)[-2] if os.sep in out_path else ""
+    title_prefix = f"[{case_name}] " if case_name else ""
+    plt.title(f'{title_prefix}Executive Summary: Time vs Accuracy Trade-off', fontweight='bold', pad=20)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
@@ -112,7 +120,9 @@ def plot_cross_model_comparison(df, out_path):
         plt.ylabel('Best Validation Loss', fontweight='bold')
         
     plt.xlabel('Model Architecture', fontweight='bold')
-    plt.title('Tuner Performance Comparison Across All Models', fontweight='bold', pad=20)
+    case_name = out_path.split(os.sep)[-2] if os.sep in out_path else ""
+    title_prefix = f"[{case_name}] " if case_name else ""
+    plt.title(f'{title_prefix}Tuner Performance Comparison Across All Models', fontweight='bold', pad=20)
     plt.legend(title='Optimizer', frameon=True, shadow=True, bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.grid(True, linestyle='--', alpha=0.3)
     plt.tight_layout()
@@ -121,18 +131,10 @@ def plot_cross_model_comparison(df, out_path):
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close()
 
-def main():
-    parser = argparse.ArgumentParser(description='Plot True HPO Benchmarking Results')
-    parser.add_argument('--input', type=str, default='reports/mosoa/true_hpo/real_hpo_history.csv')
-    args = parser.parse_args()
-    
-    if not os.path.exists(args.input):
-        print(f"Error: {args.input} not found. Run benchmark_true_hpo.py first.")
-        return
-        
-    df = pd.read_csv(args.input)
-    out_dir = os.path.dirname(args.input)
-    
+def run_hpo_plotting(df, out_dir):
+    """
+    Core plotting logic that can be called from other scripts.
+    """
     # Generate the requested multi-model grouped bar chart if multiple models exist
     if len(df['Model'].unique()) > 1:
         plot_cross_model_comparison(df, os.path.join(out_dir, 'cross_model_tuning_comparison.png'))
@@ -149,6 +151,25 @@ def main():
         plot_tradeoff_scatter(model_df, os.path.join(out_dir, f'{prefix}tradeoff_scatter.png'))
     
     print(f"Plots saved to {out_dir}")
+
+def main():
+    parser = argparse.ArgumentParser(description='Plot HPO Tuning Results')
+    parser.add_argument('--input', type=str, default=None, help='Direct path to CSV file')
+    parser.add_argument('--case', type=str, default='case33', help='Power system case to plot')
+    args = parser.parse_args()
+    
+    csv_path = args.input
+    if csv_path is None:
+        csv_path = os.path.join('reports', 'mosoa', 'hpo_tuning', args.case, 'real_hpo_history.csv')
+    
+    if not os.path.exists(csv_path):
+        print(f"Error: {csv_path} not found. Run benchmark_hpo_tuning.py for {args.case} first.")
+        return
+        
+    df = pd.read_csv(csv_path)
+    out_dir = os.path.dirname(csv_path)
+    
+    run_hpo_plotting(df, out_dir)
 
 if __name__ == '__main__':
     main()

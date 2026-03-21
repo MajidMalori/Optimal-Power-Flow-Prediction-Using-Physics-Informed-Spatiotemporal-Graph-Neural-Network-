@@ -17,14 +17,14 @@ mathematical:
 # Settings for Perturbation Strategy Ablation (Roadmap 3.2)
 perturbation:
   num_runs: 10
-  iterations: 10
+  iterations: 100
   pop_size: 30
   conv_plot_subset: "all"
 
-# True HPO Benchmark Settings (PISTGNN Tuning)
-true_hpo:
-  trials: 30                # Total trials per algorithm
-  epochs: 10                # Max epochs per trial
+# HPO Tuning Benchmark Settings (PISTGNN)
+hpo_tuning:
+  trials: 2                # Total trials per algorithm
+  epochs: 5                # Max epochs per trial
   patience: 3               # Early stopping patience during HPO
   pop_size: 10              # Swarm population size for MoSOA/SOA
   seed: 42                  # Random seed for optimizers
@@ -33,24 +33,9 @@ true_hpo:
   space:
     learning_rate: [0.0001, 0.05]
     gcn_hidden: [16, 128]
+    lstm_hidden: [16, 128]       # Used by PIGCLSTM, PIResnetGCLSTM
+    gru_hidden: [16, 128]        # Used by PIGCGRU, PIResnetGCGRU
     num_layers: [2, 5]
-    dropout: [0.0, 0.5]
-
-# Legacy Proxy HPO Search Space
-hpo_space:
-  learning_rate: [0.0001, 0.05]
-  weight_decay: [0.00001, 0.01]
-  batch_size: [16, 128]
-  num_layers: [1, 6]
-  gcn_hidden: [16, 128]
-  lstm_hidden: [16, 128]
-  gru_hidden: [16, 128]
-  dropout: [0.0, 0.5]
-
-hpo:
-  iterations: 200
-  pop_size: 10
-  num_runs: 1
 
 # Visualization Aesthetics
 visualization:

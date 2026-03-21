@@ -35,6 +35,7 @@ from src.models import MODEL_REGISTRY, SPATIAL_MODELS, RECURRENT_MODELS, PowerFl
 from src.optimizers.mosoa import MoSOA
 from src.optimizers.soa import SOA
 from src.optimizers.tpe_wrapper import TPEOptimizer
+from src.visualization.plot_hpo_tuning import run_hpo_plotting
 
 # Global registry to store history of all HPO trials
 TRIAL_RECORDS = []
@@ -177,7 +178,7 @@ def run_random_search(objective_fn, search_space, n_trials, seed=42):
     return best_params
 
 def main():
-    parser = argparse.ArgumentParser(description='True HPO Benchmark for PISTGNN')
+    parser = argparse.ArgumentParser(description='HPO Tuning Benchmark for PISTGNN')
     parser.add_argument('--case', type=str, default='case33', help='Power system case')
     parser.add_argument('--model', type=str, default='StandardGCN', help='Model to tune')
     parser.add_argument('--all-models', action='store_true', help='Benchmark all available models')
@@ -187,9 +188,9 @@ def main():
 
     # Load MoSOA config
     mosoa_config = load_config("configs/mosoa.yaml")
-    if 'true_hpo' not in mosoa_config:
-        raise KeyError("true_hpo not found in configs/mosoa.yaml")
-    hpo_config = mosoa_config['true_hpo']
+    if 'hpo_tuning' not in mosoa_config:
+        raise KeyError("hpo_tuning not found in configs/mosoa.yaml")
+    hpo_config = mosoa_config['hpo_tuning']
     search_space = hpo_config['space']
     
     epochs = args.epochs if args.epochs > 0 else hpo_config.get('epochs', 10)
@@ -207,7 +208,7 @@ def main():
         models_to_run = [args.model]
 
     for current_model in models_to_run:
-        print(f"\n{'='*85}\n Starting True HPO Benchmark | Model: {current_model} | Case: {args.case} | Trials: {trials} \n{'='*85}\n")
+        print(f"\n{'='*85}\n Starting HPO Benchmark | Model: {current_model} | Case: {args.case} | Trials: {trials} \n{'='*85}\n")
         
         # Run Random Search
         print("\n>>> Running Random Search...")
@@ -237,7 +238,7 @@ def main():
 
     # Export History
     df = pd.DataFrame(TRIAL_RECORDS)
-    out_dir = os.path.join("reports", "mosoa", "true_hpo")
+    out_dir = os.path.join("reports", "mosoa", "hpo_tuning", args.case)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "real_hpo_history.csv")
     df.to_csv(out_path, index=False)
@@ -261,6 +262,10 @@ def main():
     
     print(best_results[display_cols].sort_values(['Model', 'Val_Loss']).to_string(index=False))
     print("=" * 85 + "\n")
+    
+    # Trigger plotting automatically
+    print("Generating HPO performance plots...")
+    run_hpo_plotting(df, out_dir)
 
 if __name__ == "__main__":
     main()

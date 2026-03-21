@@ -210,15 +210,31 @@ def main():
         fixed_dim_conv = {fn: convergence_histories[fn] for fn in fixed_dim if fn in convergence_histories}
         
         from src.visualization.plot_mosoa import plot_categorical_convergence
-        if unimodal_conv:
-            plot_categorical_convergence(unimodal_conv, "Perturbation Convergence: Unimodal (F1-F7)",
-                                         os.path.join(out_dir, "convergence_ablation_unimodal.png"), num_runs=num_runs)
+        
+        # Unimodal: split F1-F4 and F5-F7
+        uni_a = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(1, 5)] if fn in convergence_histories}
+        uni_b = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(5, 8)] if fn in convergence_histories}
+        if uni_a:
+            plot_categorical_convergence(uni_a, "Perturbation Convergence: Unimodal (F1-F4)",
+                                         os.path.join(out_dir, "convergence_ablation_unimodal_F1_F4.png"), num_runs=num_runs)
+        if uni_b:
+            plot_categorical_convergence(uni_b, "Perturbation Convergence: Unimodal (F5-F7)",
+                                         os.path.join(out_dir, "convergence_ablation_unimodal_F5_F7.png"), num_runs=num_runs)
+
+        # Multimodal: 6 functions fits nicely in one 2x3 grid
         if multimodal_conv:
             plot_categorical_convergence(multimodal_conv, "Perturbation Convergence: Multimodal (F8-F13)",
                                          os.path.join(out_dir, "convergence_ablation_multimodal.png"), num_runs=num_runs)
-        if fixed_dim_conv:
-            plot_categorical_convergence(fixed_dim_conv, "Perturbation Convergence: Fixed-Dim (F14-F23)",
-                                         os.path.join(out_dir, "convergence_ablation_fixed_dim.png"), num_runs=num_runs)
+        
+        # Fixed-dim: split F14-F19 and F20-F23
+        fix_a = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(14, 20)] if fn in convergence_histories}
+        fix_b = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(20, 24)] if fn in convergence_histories}
+        if fix_a:
+            plot_categorical_convergence(fix_a, "Perturbation Convergence: Fixed-Dim (F14-F19)",
+                                         os.path.join(out_dir, "convergence_ablation_fixed_dim_F14_F19.png"), num_runs=num_runs)
+        if fix_b:
+            plot_categorical_convergence(fix_b, "Perturbation Convergence: Fixed-Dim (F20-F23)",
+                                         os.path.join(out_dir, "convergence_ablation_fixed_dim_F20_F23.png"), num_runs=num_runs)
             
     except Exception as e:
         print(f"Visualization error: {e}")

@@ -307,19 +307,3 @@ def plot_perturbation_convergence(history_dict, func_name, output_path, num_runs
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
-
-def plot_hpo_performance(df, output_path):
-    """
-    Bar plot for HPO tuning performance.
-    """
-    set_premium_mosoa_aesthetics()
-    
-    plt.figure(figsize=(10, 6))
-    sns.barplot(data=df, x='Algorithm', y='Best Val Loss', palette='viridis')
-    plt.title('Hyperparameter Tuning Performance', fontweight='bold', pad=20)
-    plt.ylabel('Validation Loss (Lower is Better)', fontweight='bold')
-    plt.tight_layout()
-    
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()

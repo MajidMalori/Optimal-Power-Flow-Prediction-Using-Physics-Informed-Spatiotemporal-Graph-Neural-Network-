@@ -204,9 +204,9 @@ def main():
     df_multi = df[df['Function'].isin(multimodal_fns)]
     df_fixed = df[df['Function'].isin(fixed_dim_fns)]
     
-    print_rank_table(df_uni, "UNIMODAL (F1-F7)")
-    print_rank_table(df_multi, "MULTIMODAL (F8-F13)")
-    print_rank_table(df_fixed, "FIXED-DIMENSION (F14-F23)")
+    avg_uni = print_rank_table(df_uni, "UNIMODAL (F1-F7)")
+    avg_multi = print_rank_table(df_multi, "MULTIMODAL (F8-F13)")
+    avg_fixed = print_rank_table(df_fixed, "FIXED-DIMENSION (F14-F23)")
     
     rank_df = df.pivot(index='Function', columns='Algorithm', values='Mean')
     ranks = rank_df.rank(axis=1, method='min')
@@ -218,7 +218,15 @@ def main():
 
     # 3. Visualization
     try:
-        plot_mosoa_ranks(avg_ranks, os.path.join(plot_dir, "math_rank_comparison.png"))
+        # Categorical Rank Plots
+        if avg_uni is not None:
+            plot_mosoa_ranks(avg_uni, os.path.join(plot_dir, "math_rank_unimodal.png"))
+        if avg_multi is not None:
+            plot_mosoa_ranks(avg_multi, os.path.join(plot_dir, "math_rank_multimodal.png"))
+        if avg_fixed is not None:
+            plot_mosoa_ranks(avg_fixed, os.path.join(plot_dir, "math_rank_fixed_dim.png"))
+            
+        plot_mosoa_ranks(avg_ranks, os.path.join(plot_dir, "math_rank_overall.png"))
         
         # Speed comparison bar chart
         from src.visualization.plot_mosoa import set_premium_mosoa_aesthetics
@@ -242,11 +250,15 @@ def main():
         
         print("\nGenerating Categorical Convergence Plots...")
         
-        # Unimodal
-        unimodal_hist = {fn: convergence_histories[fn] for fn in unimodal_fns if fn in convergence_histories}
-        if unimodal_hist:
-            plot_categorical_convergence(unimodal_hist, "Unimodal Functions (F1-F7)", 
-                                         os.path.join(plot_dir, "convergence_unimodal.png"), num_runs=num_runs, default_dim=default_dim)
+        # Unimodal: split F1-F4 and F5-F7
+        uni_a = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(1, 5)] if fn in convergence_histories}
+        uni_b = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(5, 8)] if fn in convergence_histories}
+        if uni_a:
+            plot_categorical_convergence(uni_a, "Unimodal Functions (F1-F4)", 
+                                         os.path.join(plot_dir, "convergence_unimodal_F1_F4.png"), num_runs=num_runs, default_dim=default_dim)
+        if uni_b:
+            plot_categorical_convergence(uni_b, "Unimodal Functions (F5-F7)", 
+                                         os.path.join(plot_dir, "convergence_unimodal_F5_F7.png"), num_runs=num_runs, default_dim=default_dim)
                                          
         # Multimodal
         multimodal_hist = {fn: convergence_histories[fn] for fn in multimodal_fns if fn in convergence_histories}
