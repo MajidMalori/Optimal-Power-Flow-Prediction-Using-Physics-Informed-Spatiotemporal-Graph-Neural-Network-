@@ -87,7 +87,7 @@ class MoSOAPerturbationVariant(MoSOA):
 
 
 def run_strategy_benchmark(strategy: str, func_name: str, num_runs: int = 15, 
-                            n_trials: int = 300, default_dim: int = 10, **mosoa_params):
+                            n_trials: int = 300, default_dim: int = 10, pop_size: int = 30, **mosoa_params):
     benchmark = BENCHMARKS[func_name]
     _obj_fn = benchmark['fn']
     bounds = benchmark['bounds']
@@ -108,7 +108,7 @@ def run_strategy_benchmark(strategy: str, func_name: str, num_runs: int = 15,
     all_histories = []
 
     for _ in range(num_runs):
-        opt = MoSOAPerturbationVariant(search_space=search_space, strategy=strategy, **mosoa_params)
+        opt = MoSOAPerturbationVariant(search_space=search_space, strategy=strategy, pop_size=pop_size, **mosoa_params)
         best_params, history = opt.optimize(obj_fn, n_trials=n_trials, verbose=False)
         best_fitnesses.append(obj_fn(best_params))
         all_histories.append(history)
@@ -139,12 +139,16 @@ def main():
     pop_size = config.get('pop_size', 30)
     n_trials = iterations * pop_size
     
-    # 2. Clear previous results
-    out_dir = "reports/mosoa/perturbation"
-    if os.path.exists(out_dir):
-        shutil.rmtree(out_dir)
-    os.makedirs(out_dir, exist_ok=True)
-
+    # 2. Clear    # Restructure paths
+    base_dir = "reports/mosoa/perturbation"
+    if os.path.exists(base_dir):
+        import shutil
+        shutil.rmtree(base_dir)
+        
+    csv_dir = os.path.join(base_dir, "csv")
+    plot_dir = os.path.join(base_dir, "plots")
+    os.makedirs(csv_dir, exist_ok=True)
+    os.makedirs(plot_dir, exist_ok=True)
     test_funcs = [f'F{i}' for i in range(1, 24)] 
     strategies = ['linear', 'cosine', 'quadratic', 'exponential']
     tasks = [(fn, strat) for fn in test_funcs for strat in strategies]
@@ -153,12 +157,14 @@ def main():
     all_results = []
     convergence_histories = {} # {fn_name: {strategy: history}}
     
-    # Subset of functions for convergence plots
-    conv_plot_subset = config.get('conv_plot_subset', ['F1', 'F9', 'F14', 'F21'])
+    # Subset of functions for convergence plots - Expanded to include ALL for research grade grids
+    conv_plot_subset = config.get('conv_plot_subset', test_funcs)
+    if conv_plot_subset == "all":
+        conv_plot_subset = test_funcs
     
     print() # Spacing from command
     for fn_name, strat in tqdm(tasks, desc="Perturbation Strategy Ablation", leave=True, dynamic_ncols=True):
-        res, avg_hist = run_strategy_benchmark(strat, fn_name, num_runs=num_runs, n_trials=n_trials, **mosoa_params)
+        res, avg_hist = run_strategy_benchmark(strat, fn_name, num_runs=num_runs, n_trials=n_trials, pop_size=pop_size, **mosoa_params)
         all_results.append(res)
         
         if fn_name in conv_plot_subset:
@@ -171,44 +177,17 @@ def main():
     print(df.to_string(index=False))
     print("================================================")
     
-    out_dir = "reports/mosoa/perturbation"
-    os.makedirs(out_dir, exist_ok=True)
-    df.to_csv(os.path.join(out_dir, "perturbation_results.csv"), index=False)
+    # 3. Save Results
+    df.to_csv(os.path.join(csv_dir, "perturbation_results.csv"), index=False)
     
     try:
         # Categorize functions for separate plotting
-        # 1. Unimodal (F1-F7)
         unimodal = [f'F{i}' for i in range(1, 8)]
-        df_uni = df[df['Function'].isin(unimodal)]
-        
-        # 2. Multimodal (F8-F13)
         multimodal = [f'F{i}' for i in range(8, 14)]
-        df_multi = df[df['Function'].isin(multimodal)]
-        
-        # 3. Fixed-Dimension (F14-F23)
         fixed_dim = [f'F{i}' for i in range(14, 24)]
-        df_fixed = df[df['Function'].isin(fixed_dim)]
-
-        # Generating categorized plots
-        pbar_desc = "Generating Categorized Ablation Plots"
-        for df_subset, label, fname in tqdm([
-            (df_uni, "Unimodal", "ablation_unimodal_F1_F7.png"),
-            (df_multi, "Multimodal", "ablation_multimodal_F8_F13.png"),
-            (df_fixed, "Fixed-Dimension", "ablation_fixed_dim_F14_F23.png")
-        ], desc=pbar_desc, leave=True, dynamic_ncols=True):
-            if not df_subset.empty:
-                plot_perturbation_ablation(df_subset, os.path.join(out_dir, fname), title_suffix=label)
-            
-        # Also keep a "Full" overview but warn that it might be zoomed out
-        plot_perturbation_ablation(df, os.path.join(out_dir, "ablation_full_overview.png"), title_suffix="Full Overview")
         
-        # 4. Strategy Convergence Plots (Grouped by category)
-        print("\nGenerating Grouped Convergence Plots...")
-        
-        unimodal_conv = {fn: convergence_histories[fn] for fn in unimodal if fn in convergence_histories}
-        multimodal_conv = {fn: convergence_histories[fn] for fn in multimodal if fn in convergence_histories}
-        fixed_dim_conv = {fn: convergence_histories[fn] for fn in fixed_dim if fn in convergence_histories}
-        
+        # 4. Strategy Convergence Plots (Grouped by category - LINE GRAPHS ONLY AS REQUESTED)
+        print("\nGenerating Research-Grade Convergence Grids (Line Plots)...")
         from src.visualization.plot_mosoa import plot_categorical_convergence
         
         # Unimodal: split F1-F4 and F5-F7
@@ -216,25 +195,26 @@ def main():
         uni_b = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(5, 8)] if fn in convergence_histories}
         if uni_a:
             plot_categorical_convergence(uni_a, "Perturbation Convergence: Unimodal (F1-F4)",
-                                         os.path.join(out_dir, "convergence_ablation_unimodal_F1_F4.png"), num_runs=num_runs)
+                                         os.path.join(plot_dir, "convergence_ablation_unimodal_F1_F4.png"), num_runs=num_runs)
         if uni_b:
             plot_categorical_convergence(uni_b, "Perturbation Convergence: Unimodal (F5-F7)",
-                                         os.path.join(out_dir, "convergence_ablation_unimodal_F5_F7.png"), num_runs=num_runs)
+                                         os.path.join(plot_dir, "convergence_ablation_unimodal_F5_F7.png"), num_runs=num_runs)
 
         # Multimodal: 6 functions fits nicely in one 2x3 grid
+        multimodal_conv = {fn: convergence_histories[fn] for fn in multimodal if fn in convergence_histories}
         if multimodal_conv:
             plot_categorical_convergence(multimodal_conv, "Perturbation Convergence: Multimodal (F8-F13)",
-                                         os.path.join(out_dir, "convergence_ablation_multimodal.png"), num_runs=num_runs)
+                                         os.path.join(plot_dir, "convergence_ablation_multimodal.png"), num_runs=num_runs)
         
         # Fixed-dim: split F14-F19 and F20-F23
         fix_a = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(14, 20)] if fn in convergence_histories}
         fix_b = {fn: convergence_histories[fn] for fn in [f'F{i}' for i in range(20, 24)] if fn in convergence_histories}
         if fix_a:
             plot_categorical_convergence(fix_a, "Perturbation Convergence: Fixed-Dim (F14-F19)",
-                                         os.path.join(out_dir, "convergence_ablation_fixed_dim_F14_F19.png"), num_runs=num_runs)
+                                         os.path.join(plot_dir, "convergence_ablation_fixed_dim_F14_F19.png"), num_runs=num_runs)
         if fix_b:
             plot_categorical_convergence(fix_b, "Perturbation Convergence: Fixed-Dim (F20-F23)",
-                                         os.path.join(out_dir, "convergence_ablation_fixed_dim_F20_F23.png"), num_runs=num_runs)
+                                         os.path.join(plot_dir, "convergence_ablation_fixed_dim_F20_F23.png"), num_runs=num_runs)
             
     except Exception as e:
         print(f"Visualization error: {e}")

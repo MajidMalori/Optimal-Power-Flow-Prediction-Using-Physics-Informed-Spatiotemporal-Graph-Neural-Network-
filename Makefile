@@ -157,6 +157,13 @@ tune-57:
 tune-118:
 	python scripts/benchmark_hpo_tuning.py --case case118 --all-models
 
+# Expanded Visualization and Mathematical HPO
+landscapes:
+	python scripts/visualize_landscapes.py
+
+tune-math:
+	python scripts/benchmark_math_hpo.py
+
 sense:
 	python scripts/analyze_sensitivity.py
 

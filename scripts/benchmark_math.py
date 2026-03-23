@@ -164,6 +164,10 @@ def main():
     
     # Restructure paths
     base_dir = "reports/mosoa/mathematical"
+    if os.path.exists(base_dir):
+        import shutil
+        shutil.rmtree(base_dir)
+    
     csv_dir = os.path.join(base_dir, "csv")
     plot_dir = os.path.join(base_dir, "plots")
     os.makedirs(csv_dir, exist_ok=True)

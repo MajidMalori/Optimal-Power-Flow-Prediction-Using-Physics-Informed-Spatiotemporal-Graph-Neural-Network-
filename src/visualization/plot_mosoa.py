@@ -2,6 +2,8 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
 import pandas as pd
 import yaml
 
@@ -156,6 +158,15 @@ def plot_categorical_convergence(category_histories, category_name, output_path,
         'GA': '#8e44ad', 'TSA': '#f1c40f', 'SOA*': '#d35400', 
         'ESOA': '#2ecc71', 'HGSO': '#2c3e50'
     })
+    
+    # Inject Perturbation Strategy Colors
+    color_map.update({
+        'linear': '#34495e',
+        'cosine': '#3498db',
+        'quadratic': '#9b59b6',
+        'exponential': '#E91E63'  # Match MoSOA Magenta
+    })
+    
     default_linewidth = viz_config.get('linewidth', 2.0)
     
     algorithms_seen = set()
@@ -167,8 +178,8 @@ def plot_categorical_convergence(category_histories, category_name, output_path,
         
         for i, (algo, history) in enumerate(history_dict.items()):
             algorithms_seen.add(algo)
-            linewidth = default_linewidth
-            alpha = 1.0 if algo == 'MoSOA' else 0.8
+            linewidth = 2.5 if algo in ['MoSOA', 'exponential'] else default_linewidth
+            alpha = 1.0 if algo in ['MoSOA', 'exponential'] else 0.8
             color = color_map.get(algo, sns.color_palette("tab10")[i % 10])
             
             history_arr = np.array(history)
@@ -199,8 +210,9 @@ def plot_categorical_convergence(category_histories, category_name, output_path,
     labels = []
     for algo in sorted(list(algorithms_seen)):
         color = color_map.get(algo, 'black')
-        alpha = 1.0 if algo == 'MoSOA' else 0.8
-        line = plt.Line2D([0], [0], color=color, linewidth=default_linewidth, alpha=alpha, marker='o', markersize=3)
+        alpha = 1.0 if algo in ['MoSOA', 'exponential'] else 0.8
+        linewidth = 2.5 if algo in ['MoSOA', 'exponential'] else default_linewidth
+        line = plt.Line2D([0], [0], color=color, linewidth=linewidth, alpha=alpha, marker='o', markersize=3)
         handles.append(line)
         labels.append(algo)
         
@@ -305,5 +317,100 @@ def plot_perturbation_convergence(history_dict, func_name, output_path, num_runs
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+def plot_3d_landscape(fn_lambda, bounds, title, output_path, resolution=100, target_dim=2):
+    """
+    Generates a high-fidelity 3D surface plot for a given function.
+    target_dim: Total dimensions the function expects (pads with zeros if > 2)
+    """
+    set_premium_mosoa_aesthetics()
+    
+    x = np.linspace(bounds[0], bounds[1], resolution)
+    y = np.linspace(bounds[0], bounds[1], resolution)
+    X, Y = np.meshgrid(x, y)
+    
+    Z = np.zeros_like(X)
+    for i in range(resolution):
+        for j in range(resolution):
+            # Create a point of target_dim size
+            point = np.zeros(target_dim)
+            point[0] = X[i, j]
+            point[1] = Y[i, j]
+            Z[i, j] = fn_lambda(point)
+            
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Use viridis with a slight transparency for better mesh visibility
+    surf = ax.plot_surface(X, Y, Z, cmap='viridis', 
+                          antialiased=True, alpha=0.9,
+                          linewidth=0.1, edgecolors='gray', shade=True)
+    
+    # Add contours on the floor for better depth perception
+    offset = np.min(Z) - (np.max(Z)-np.min(Z))*0.15
+    ax.contourf(X, Y, Z, zdir='z', offset=offset, cmap='viridis', alpha=0.3)
+    
+    ax.set_title(title, fontweight='bold', pad=30, fontsize=16)
+    ax.set_xlabel('X1', fontweight='bold', labelpad=15)
+    ax.set_ylabel('X2', fontweight='bold', labelpad=15)
+    ax.set_zlabel('Objective/Loss', fontweight='bold', labelpad=15)
+    
+    # Premium lighting and view angle
+    ax.view_init(elev=35, azim=-45)
+    
+    fig.colorbar(surf, ax=ax, shrink=0.5, aspect=15, label='Objective Value')
+    
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_categorical_landscapes_grid(fn_list, names, bounds_list, title, output_path, target_dims, resolution=60):
+    """
+    Groups 3D landscapes into a grid image (max 4-6 panels).
+    fn_list: List of function lambdas
+    names: List of strings (F1, F2...)
+    bounds_list: List of tuples (min, max)
+    target_dims: List of integers (2, 30...)
+    """
+    set_premium_mosoa_aesthetics()
+    
+    num_fns = len(fn_list)
+    cols = 2
+    rows = (num_fns + 1) // 2
+    
+    fig = plt.figure(figsize=(14, 6 * rows))
+    plt.suptitle(title, fontweight='bold', fontsize=20, y=0.98)
+    
+    for idx, (fn, name, bounds, t_dim) in enumerate(zip(fn_list, names, bounds_list, target_dims)):
+        ax = fig.add_subplot(rows, cols, idx + 1, projection='3d')
+        
+        x = np.linspace(bounds[0], bounds[1], resolution)
+        y = np.linspace(bounds[0], bounds[1], resolution)
+        X, Y = np.meshgrid(x, y)
+        Z = np.zeros_like(X)
+        
+        for i in range(resolution):
+            for j in range(resolution):
+                p = np.zeros(t_dim)
+                p[0] = X[i, j]
+                p[1] = Y[i, j]
+                Z[i, j] = fn(p)
+                
+        surf = ax.plot_surface(X, Y, Z, cmap='viridis', antialiased=True, alpha=0.9, linewidth=0.1, edgecolors='gray')
+        
+        # Consistent depth cue
+        offset = np.min(Z) - (np.max(Z)-np.min(Z))*0.15
+        ax.contourf(X, Y, Z, zdir='z', offset=offset, cmap='viridis', alpha=0.3)
+        
+        ax.set_title(f"Landscape: {name}", fontweight='bold', pad=10, fontsize=14)
+        ax.set_xlabel('X1', fontsize=10)
+        ax.set_ylabel('X2', fontsize=10)
+        ax.view_init(elev=30, azim=-45)
+        
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight') # Lower DPI for grids to save memory/space
     plt.close()
 

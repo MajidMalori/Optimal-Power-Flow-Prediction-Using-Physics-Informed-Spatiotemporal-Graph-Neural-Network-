@@ -16,7 +16,7 @@ mathematical:
 
 # Settings for Perturbation Strategy Ablation (Roadmap 3.2)
 perturbation:
-  num_runs: 10
+  num_runs: 30
   iterations: 100
   pop_size: 30
   conv_plot_subset: "all"
@@ -36,6 +36,20 @@ hpo_tuning:
     lstm_hidden: [16, 128]       # Used by PIGCLSTM, PIResnetGCLSTM
     gru_hidden: [16, 128]        # Used by PIGCGRU, PIResnetGCGRU
     num_layers: [2, 5]
+
+# Mathematical HPO Search Space
+mathematical_hpo_space:
+  learning_rate: [0.0001, 0.05]
+  gcn_hidden: [16, 128]
+  lstm_hidden: [16, 128]
+  gru_hidden: [16, 128]
+  dropout: [0.0, 0.5]
+  num_layers: [2, 5]
+
+mathematical_hpo:
+  iterations: 20            # EXACTLY 1000 iterations total (20 * 50)
+  pop_size: 50              
+  num_runs: 30               
 
 # Visualization Aesthetics
 visualization:

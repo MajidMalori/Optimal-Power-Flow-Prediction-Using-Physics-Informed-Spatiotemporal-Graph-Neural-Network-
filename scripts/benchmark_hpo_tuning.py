@@ -239,6 +239,9 @@ def main():
     # Export History
     df = pd.DataFrame(TRIAL_RECORDS)
     out_dir = os.path.join("reports", "mosoa", "hpo_tuning", args.case)
+    if os.path.exists(out_dir):
+        import shutil
+        shutil.rmtree(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "real_hpo_history.csv")
     df.to_csv(out_path, index=False)

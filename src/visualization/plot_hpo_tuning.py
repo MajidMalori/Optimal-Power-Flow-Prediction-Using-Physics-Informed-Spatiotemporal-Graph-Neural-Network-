@@ -12,8 +12,29 @@ def plot_convergence_time(df, out_path):
     
     for alg in algorithms:
         alg_df = df[df['Algorithm'] == alg].sort_values('Time_Elapsed_s')
-        alg_df['Cum_Min'] = alg_df['Val_Loss'].cummin()
-        plt.plot(alg_df['Time_Elapsed_s'], alg_df['Cum_Min'], label=alg, marker='o', markersize=4, linewidth=2)
+        
+        # If multiple runs exist, group and calculate mean/std for shaded region
+        if 'Run' in alg_df.columns and len(alg_df['Run'].unique()) > 1:
+            mean_df = alg_df.groupby('Trial').agg(
+                Mean_Loss=('Val_Loss', 'mean'),
+                Std_Loss=('Val_Loss', 'std'),
+                Mean_Time=('Time_Elapsed_s', 'mean')
+            ).reset_index()
+            
+            mean_df['Cum_Min'] = mean_df['Mean_Loss'].cummin()
+            std_err = mean_df['Std_Loss'].cummin() # Rough estimate for shading
+            
+            # Shaded uncertainty region (Standard Deviation)
+            plt.fill_between(mean_df['Mean_Time'], 
+                            mean_df['Cum_Min'] - std_err, 
+                            mean_df['Cum_Min'] + std_err, 
+                            alpha=0.15)
+            
+            # Professional Mean line
+            plt.plot(mean_df['Mean_Time'], mean_df['Cum_Min'], label=f"{alg} (Avg)", linewidth=2.5)
+        else:
+            alg_df['Cum_Min'] = alg_df['Val_Loss'].cummin()
+            plt.plot(alg_df['Time_Elapsed_s'], alg_df['Cum_Min'], label=alg, marker='o', markersize=4, linewidth=2)
         
     plt.xlabel('Cumulative Time Elapsed (s)', fontweight='bold')
     plt.ylabel('Best Validation Loss', fontweight='bold')
@@ -89,14 +110,21 @@ def plot_tradeoff_scatter(df, out_path):
         Best_Val_Loss=('Val_Loss', 'min')
     ).reset_index()
     
-    sns.scatterplot(data=summary, x='Total_Time', y='Best_Val_Loss', hue='Algorithm', s=200, style='Algorithm')
+    sns.scatterplot(data=summary, x='Total_Time', y='Best_Val_Loss', hue='Algorithm', s=200, style='Algorithm', palette='magma')
     
+    plt.xlabel('Total Execution Time (s)', fontweight='bold')
+    plt.ylabel('Minimum Validation Loss', fontweight='bold')
+    
+    # Improved labeling to avoid overlap with markers (No Arrows as requested)
     for i in range(summary.shape[0]):
-        plt.text(summary['Total_Time'][i] * 1.05, summary['Best_Val_Loss'][i], 
-                 summary['Algorithm'][i], horizontalalignment='left', size='medium', color='black', weight='semibold')
-                 
-    plt.xlabel('Total Execution Time (s)')
-    plt.ylabel('Minimum Validation Loss')
+        plt.annotate(summary['Algorithm'][i], 
+                     (summary['Total_Time'][i], summary['Best_Val_Loss'][i]),
+                     textcoords="offset points", 
+                     xytext=(10,10), 
+                     ha='left', 
+                     fontsize=10, 
+                     fontweight='bold',
+                     color='darkred')
     case_name = out_path.split(os.sep)[-2] if os.sep in out_path else ""
     title_prefix = f"[{case_name}] " if case_name else ""
     plt.title(f'{title_prefix}Executive Summary: Time vs Accuracy Trade-off', fontweight='bold', pad=20)
@@ -110,10 +138,17 @@ def plot_cross_model_comparison(df, out_path):
     
     summary = df.groupby(['Model', 'Algorithm']).agg(Best_Val_Loss=('Val_Loss', 'min')).reset_index()
     
-    sns.barplot(data=summary, x='Model', y='Best_Val_Loss', hue='Algorithm', palette='viridis')
+    # Sort by performance for clarity
+    summary = summary.sort_values(['Model', 'Best_Val_Loss'])
     
+    ax = sns.barplot(data=summary, x='Model', y='Best_Val_Loss', hue='Algorithm', palette='viridis')
+    
+    # Annotate with ranks using robust container API
+    for container in ax.containers:
+        ax.bar_label(container, fmt='%.2f', padding=3, fontweight='bold', fontsize=9)
+
     min_val = summary['Best_Val_Loss'].min()
-    if min_val > 1e-12:
+    if min_val > 0 and (summary['Best_Val_Loss'].max() / min_val) > 100:
         plt.yscale('log')
         plt.ylabel('Best Validation Loss (Log Scale)', fontweight='bold')
     else:
@@ -134,23 +169,30 @@ def plot_cross_model_comparison(df, out_path):
 def run_hpo_plotting(df, out_dir):
     """
     Core plotting logic that can be called from other scripts.
+    Groups results by 'Model' and compares 'Algorithms'.
     """
-    # Generate the requested multi-model grouped bar chart if multiple models exist
-    if len(df['Model'].unique()) > 1:
-        plot_cross_model_comparison(df, os.path.join(out_dir, 'cross_model_tuning_comparison.png'))
+    os.makedirs(out_dir, exist_ok=True)
     
-    # Automatically generate specific convergence plots for every model independently
+    # 1. Executive Summary: Trade-off Scatter (All results in df)
+    plot_tradeoff_scatter(df, os.path.join(out_dir, 'algorithm_tradeoff_comparison.png'))
+    
+    # 2. Performance Comparison Bar Chart (All models in df)
+    plot_cross_model_comparison(df, os.path.join(out_dir, 'cross_model_tuning_comparison.png'))
+    
+    # 3. Model-specific convergence and detailed analysis
     for model_name in df['Model'].unique():
         model_df = df[df['Model'] == model_name].copy()
         
+        # If there are multiple models, prefix filenames for clarity
         prefix = f"{model_name}_" if len(df['Model'].unique()) > 1 else ""
         
         plot_convergence_time(model_df, os.path.join(out_dir, f'{prefix}convergence_vs_time.png'))
         plot_convergence_trials(model_df, os.path.join(out_dir, f'{prefix}convergence_vs_trials.png'))
+        
+        # Parallel coordinates (MoSOA high-dimensional analysis)
         plot_parallel_coordinates(model_df, os.path.join(out_dir, f'{prefix}mosoa_parallel_coordinates.png'))
-        plot_tradeoff_scatter(model_df, os.path.join(out_dir, f'{prefix}tradeoff_scatter.png'))
     
-    print(f"Plots saved to {out_dir}")
+    print(f"Research-grade HPO plots saved to {out_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description='Plot HPO Tuning Results')
