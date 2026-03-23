@@ -95,8 +95,17 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
     # 4. Evaluation Loop
     with torch.no_grad():
         for batch in test_loader:
-            # Move batch to device
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            # Move batch to device (handle tensor, list-of-tensors, list-of-lists-of-tensors)
+            def _to_device(v, dev):
+                if isinstance(v, torch.Tensor):
+                    return v.to(dev)
+                if isinstance(v, list) and v:
+                    if isinstance(v[0], torch.Tensor):
+                        return [t.to(dev) for t in v]
+                    if isinstance(v[0], list):  # e.g. edge_index_seq: [batch][time]
+                        return [[t.to(dev) for t in inner] for inner in v]
+                return v
+            batch = {k: _to_device(v, device) for k, v in batch.items()}
             
             x = batch["features"]
             targets = batch["targets"]
@@ -282,7 +291,7 @@ def main():
                 
                 results.append(res)
             except Exception as e:
-                pass # Silently continue on errors
+                print(f"  [ERROR] {model_name}: {type(e).__name__}: {e}")
                 
         # Final Tabular Summary Report for the current case
         case_res = [r for r in results if r['case'] == case]
