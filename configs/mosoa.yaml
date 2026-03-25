@@ -24,7 +24,7 @@ perturbation:
 # HPO Tuning Benchmark Settings (PISTGNN)
 hpo_tuning:
   trials: 30                # Total trials per algorithm (Research Grade)
-  epochs: 100               # Max epochs per trial (with early stopping)
+  epochs: 30               # Max epochs per trial (with early stopping)
   patience: 5               # Early stopping patience during HPO
   pop_size: 10              # Swarm population size for MoSOA/SOA
   seed: 42                  # Random seed for optimizers
