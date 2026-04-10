@@ -24,7 +24,7 @@ physics_loss:
 
 trainer:
   seed: 42
-  max_epochs: 100
+  max_epochs: 1
   accelerator: "auto"
   devices: "auto"
   log_every_n_steps: 10

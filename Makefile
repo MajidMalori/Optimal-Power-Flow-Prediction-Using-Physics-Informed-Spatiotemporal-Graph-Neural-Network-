@@ -28,6 +28,10 @@ test-topology:
 test-e2e:
 	pytest tests/test_training_e2e.py
 
+# Runs only the end-to-end warmstart tests
+test-warmstart:
+	pytest tests/test_warmstart_e2e.py -v -s
+
 # Runs only the data preprocessing tests
 test-preprocessing:
 	pytest tests/test_preprocessing.py
@@ -139,6 +143,19 @@ unc-118:
 
 unc-all:
 	python scripts/analyze_uncertainty.py --case all
+
+# Warm-Start benchmarking runs
+warmstart-33:
+	python scripts/benchmark_warmstart.py --case case33 --model all
+
+warmstart-57:
+	python scripts/benchmark_warmstart.py --case case57 --model all
+
+warmstart-118:
+	python scripts/benchmark_warmstart.py --case case118 --model all
+
+warmstart-all:
+	python scripts/benchmark_warmstart.py --case all --model all
 
 # MoSOA Benchmarks:
 math:
