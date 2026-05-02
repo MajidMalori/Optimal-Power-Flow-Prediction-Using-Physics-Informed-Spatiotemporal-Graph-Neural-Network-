@@ -28,6 +28,7 @@ This repository outlines the detailed study of Graph Neural Network (GNN) archit
   - [Makefile Reference](#makefile-reference)
 - [Configuration](#configuration)
 - [Evaluation and Benchmarking](#evaluation-and-benchmarking)
+- [Warm-Start Benchmark Suite](#warm-start-benchmark-suite)
 - [Testing](#testing)
 - [Experiment Tracking](#experiment-tracking)
 
@@ -370,12 +371,29 @@ The preprocessing script (`scripts/preprocess_data.py`):
 ├── scripts/
 │   ├── generate_data.py          # Data generation (pandapower simulation)
 │   ├── preprocess_data.py        # Normalization and train/val/test splitting
+│   ├── generate_benchmark_states.py  # Canonical warm-start benchmark state export
 │   ├── train.py                  # Model training with Lightning + W&B
 │   ├── evaluate.py               # Benchmark evaluation (accuracy, physics, speed)
 │   ├── analyze_uncertainty.py    # Test-Time Augmentation uncertainty analysis
+│   ├── benchmark_ws_speed.py     # Warm-start speed benchmark
+│   ├── benchmark_ws_feasibility.py  # Warm-start feasibility benchmark
+│   ├── benchmark_ws_rescue.py    # Warm-start rescue benchmark
 │   └── animate_grid_dynamics.py  # Grid topology animation
 ├── src/
 │   ├── constants.py              # Feature indices, physical constants, load profiles
+│   ├── benchmarks/
+│   │   ├── warm_start_evaluator.py   # Solver-in-the-loop warm-start evaluator
+│   │   ├── warmstart_protocol.py     # Shared method/rule definitions
+│   │   ├── benchmark_state.py        # Canonical benchmark state schema
+│   │   ├── benchmark_dataset.py      # JSONL save/load for benchmark states
+│   │   ├── state_builder.py          # Conversion from tensors to canonical states
+│   │   ├── speed_runtime.py          # Runtime adapter for speed benchmark
+│   │   ├── speed_runner.py           # Speed benchmark aggregation runner
+│   │   ├── feasibility_runtime.py    # Runtime adapter for feasibility benchmark
+│   │   ├── feasibility_runner.py     # Feasibility benchmark aggregation runner
+│   │   ├── rescue_runtime.py         # Runtime adapter for rescue benchmark
+│   │   │                              # (flat-fail candidate gate)
+│   │   └── rescue_runner.py          # Rescue benchmark aggregation runner
 │   ├── models/
 │   │   ├── __init__.py           # Model registry
 │   │   ├── gcn.py                # Model 1: StandardGCN
@@ -404,7 +422,18 @@ The preprocessing script (`scripts/preprocess_data.py`):
 │   ├── test_preprocessing.py     # Normalization and splitting tests
 │   ├── test_topology.py          # Switching event verification
 │   ├── test_evaluation.py        # Evaluation pipeline tests
-│   └── test_training_e2e.py      # End-to-end training smoke tests
+│   ├── test_training_e2e.py      # End-to-end training smoke tests
+│   ├── test_warmstart_protocol.py
+│   ├── test_benchmark_state.py
+│   ├── test_benchmark_dataset.py
+│   ├── test_state_builder.py
+│   ├── test_benchmark_metrics.py
+│   ├── test_speed_runtime.py
+│   ├── test_speed_runner.py
+│   ├── test_feasibility_runtime.py
+│   ├── test_feasibility_runner.py
+│   ├── test_rescue_runtime.py
+│   └── test_rescue_runner.py
 ├── reports/                      # Generated plots and CSVs
 ├── logs/                         # Pipeline execution logs
 ├── Makefile                      # Convenience targets for all pipeline steps
@@ -420,7 +449,7 @@ The preprocessing script (`scripts/preprocess_data.py`):
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11.x (recommended; project tested with 3.11.9)
 - CUDA 12.x (for GPU training; CPU-only is supported)
 
 ### Setup
@@ -531,6 +560,14 @@ DO_CLEAN_PROCESSED_DATA=true
 | `make clean-training` | Remove only logs, checkpoints, and W&B data |
 | `make clean-reports` | Remove only report directories |
 | `make sync` | Upload offline W&B runs to the cloud |
+| `make gen-bench-33` | Build canonical benchmark states for Case 33 |
+| `make ws-speed-33` | Run warm-start speed benchmark on Case 33 |
+| `make ws-feas-33` | Run warm-start feasibility benchmark on Case 33 |
+| `make ws-rescue-33` | Run warm-start rescue benchmark on Case 33 |
+| `make ws-all-33` | Full warm-start benchmark pipeline for Case 33 |
+| `make ws-all-57` | Full warm-start benchmark pipeline for Case 57 |
+| `make ws-all-118` | Full warm-start benchmark pipeline for Case 118 |
+| `make ws-smoke-33` | 5-sample smoke test for warm-start benchmarks |
 
 ---
 
@@ -591,6 +628,195 @@ The evaluation script (`scripts/evaluate.py`) benchmarks each trained model on t
 The uncertainty analysis (`scripts/analyze_uncertainty.py`) uses Test-Time Augmentation (TTA) by injecting 5% proportional Gaussian noise into load and renewable power features. Inference is then repeated `num_tta_samples` times, and the variance of these predictions across the augmented inputs is used to measure how sensitive the model is to input perturbations.
 
 Results are saved to `reports/benchmarks/<case>/` and `reports/uncertainty/<case>/`.
+
+---
+
+## Warm-Start Benchmark Suite
+
+This benchmark suite evaluates a specific scientific question:
+
+**Does a learned voltage initializer place Newton-Raphson closer to the convergence region, thereby improving convergence speed, physical quality of converged solutions, and recovery on difficult operating points?**
+
+The design is solver-in-the-loop and mirrors operational usage: at each timestep, the neural initializer and Newton-Raphson receive the same network state.
+
+### Problem Formulation
+
+At timestep `t`, define the grid state:
+
+$$s_t = (G_t, P_t, Q_t, \xi_t)$$
+
+where:
+- `G_t` is active topology (graph, line statuses),
+- `P_t, Q_t` are active/reactive injections from load/gen/renewables,
+- `ξ_t` represents measurement context (noise, PMU sparsity, missingness pattern where applicable).
+
+The initializer predicts bus voltage magnitude and angle:
+
+$$\hat{x}_t = (\hat{V}_{m,t}, \hat{\theta}_t)$$
+
+The AC power-flow solver then solves:
+
+$$F(x_t; s_t) = 0$$
+
+with one of three initialization schemes:
+- flat start (`init="flat"`),
+- DC start (`init="dc"`),
+- neural warm-start (`init="results"` using `\hat{x}_t`).
+
+### Operational Consistency Requirement
+
+For each sample, the same canonical state is used in both paths:
+
+1. **Neural path:** `s_t -> \hat{x}_t`
+2. **NR path:** `s_t + init -> x_t^*` (if converged)
+
+This prevents hidden confounders and ensures performance differences come from initialization quality, not data mismatch.
+
+### Canonical State Representation
+
+Benchmark states are exported to:
+
+```text
+data/benchmark/<case>/states.jsonl
+```
+
+Each state stores:
+- identity: `sample_id`, `case_name`, `timestep`
+- scenario metadata: `renewable_fraction`, `topology_id`
+- per-bus feature tensor (`features`) matching model input schema
+- active edges (`active_edges`) used to reconstruct line on/off statuses
+- auxiliary metadata (`metadata`)
+
+### Realism Assumptions Carried from Data Pipeline
+
+Benchmark states are intended to preserve the same realism used for model-facing data:
+- renewable penetration scheduling (`0.0 ... 1.0`),
+- topology switching / contingencies,
+- measurement noise assumptions,
+- PMU-coverage driven observability assumptions,
+- preprocessing-compatible feature layout.
+
+This is the core reason the benchmark state builder is separated from training code but aligned with the same data conventions.
+
+### Benchmark Pillars
+
+#### 1) Speed (`scripts/benchmark_ws_speed.py`)
+
+For each state, run all three initializations and record:
+- convergence flag,
+- solve time (ms),
+- iterations to convergence.
+
+Reported statistics include:
+- per-method mean runtime,
+- per-method mean iterations,
+- success rate,
+- warm-start speedup relative to flat start.
+
+#### 2) Feasibility (`scripts/benchmark_ws_feasibility.py`)
+
+Feasibility is evaluated on each method's own converged network result (`flat`, `dc`, `warmstart` separately).
+
+Validation checks include:
+- voltage magnitude limits,
+- angle and loading plausibility,
+- slack/generator/inverter-related operational checks from `validation.py`.
+
+Case-specific voltage limits follow `SYSTEM_PHYSICS`:
+- `case33`: `[0.85, 1.15]` p.u.
+- `case57`: `[0.90, 1.10]` p.u.
+- `case118`: `[0.90, 1.10]` p.u.
+
+#### 3) Rescue (`scripts/benchmark_ws_rescue.py`)
+
+Rescue candidates are defined by **flat-start failure**:
+1. run flat first,
+2. if flat converges, sample is excluded from rescue pool,
+3. if flat fails, evaluate recovery under DC and warm-start on that same state.
+
+This yields a direct answer to: *on hard cases, does warm-start recover more often than classical initialization?*
+
+### Metric Definitions
+
+For `T` evaluated states, let `CT_t^{flat}` and `CT_t^{ws}` be solve times for flat and warm-start:
+
+$$\text{Speedup}_{ws/flat} = \frac{\frac{1}{T}\sum_{t=1}^T CT_t^{flat}}{\frac{1}{T}\sum_{t=1}^T CT_t^{ws}}$$
+
+Feasibility rate:
+
+$$\text{Feasibility Rate}(\%) = \frac{n_f}{n_r} \times 100$$
+
+Constraint satisfaction rate:
+
+$$\text{Constraint Satisfaction}(\%) = \frac{n_s}{n_c} \times 100$$
+
+where:
+- `n_f`: feasible solutions,
+- `n_r`: total evaluated solutions,
+- `n_s`: satisfied constraints,
+- `n_c`: total constraints assessed.
+
+Rescue recovery rate (for each method `m` in `{dc, warmstart}`):
+
+$$\text{Recovery Rate}_m(\%) = \frac{n_{rec,m}}{n_{cand}} \times 100$$
+
+where:
+- `n_cand`: number of flat-failed rescue candidates,
+- `n_rec,m`: number of candidates recovered by method `m`.
+
+### End-to-End Runbook
+
+#### Case-specific full run
+
+```bash
+make ws-all-33
+make ws-all-57
+make ws-all-118
+```
+
+#### Fast smoke validation (recommended before full runs)
+
+```bash
+make ws-smoke-33
+```
+
+#### Stepwise manual execution
+
+```bash
+# 1) Build benchmark states
+make gen-bench-33
+
+# 2) Speed benchmark
+make ws-speed-33
+
+# 3) Feasibility benchmark
+make ws-feas-33
+
+# 4) Rescue benchmark
+make ws-rescue-33
+```
+
+### Output Artifacts
+
+```text
+reports/warmstart/
+├── speed/<case>/
+│   ├── <case>_speed_records.json
+│   └── <case>_speed_summary.json
+├── feasibility/<case>/
+│   ├── <case>_feasibility_records.json
+│   └── <case>_feasibility_summary.json
+└── rescue/<case>/
+    ├── <case>_rescue_records.json
+    └── <case>_rescue_summary.json
+```
+
+### Reproducibility Notes
+
+- Keep the same prepared dataset version for state generation and benchmarking.
+- Compare methods on the exact same canonical states per case.
+- Run smoke targets before long runs to validate environment and paths.
+- Record Python version and dependency set when reporting benchmark results.
 
 ---
 

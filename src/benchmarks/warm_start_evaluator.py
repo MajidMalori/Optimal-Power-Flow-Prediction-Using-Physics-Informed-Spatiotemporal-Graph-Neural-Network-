@@ -15,7 +15,20 @@ class WarmStartEvaluator:
         self.tolerance = tolerance
         self.base_mva = SYSTEM_PHYSICS.get(case_name, SYSTEM_PHYSICS['default'])['base_mva']
 
-    def evaluate_sample(self, p_load, q_load, p_gen, p_ren, q_ren, active_edges, pred_vm, pred_va, target_vm, target_va):
+    def evaluate_sample(
+        self,
+        p_load,
+        q_load,
+        p_gen,
+        p_ren,
+        q_ren,
+        active_edges,
+        pred_vm,
+        pred_va,
+        target_vm,
+        target_va,
+        include_nets: bool = False,
+    ):
         """
         Runs NR solver with Flat, DC, and Neural Warm Start.
         """
@@ -109,5 +122,7 @@ class WarmStartEvaluator:
                 "mae_vm": mae_vm,
                 "success": success
             }
+            if include_nets:
+                results[init_type]["net"] = net_test if success else None
             
         return results
