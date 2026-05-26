@@ -34,7 +34,9 @@ warnings.filterwarnings("ignore", message=".*findfont: Font family.*")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.models import MODEL_REGISTRY, PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS
+from src.models import PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS, get_model_registry
+
+MODEL_REGISTRY = get_model_registry()
 from src.constants import TargetIndices
 from src.visualization.plot_uncertainty import plot_spatial_comparison_grid, plot_temporal_comparison_curves
 

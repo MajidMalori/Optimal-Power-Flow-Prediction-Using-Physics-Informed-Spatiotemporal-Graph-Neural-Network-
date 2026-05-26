@@ -31,7 +31,9 @@ from lightning.pytorch.callbacks import EarlyStopping
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.models import MODEL_REGISTRY, SPATIAL_MODELS, RECURRENT_MODELS, PowerFlowDataModule
+from src.models import SPATIAL_MODELS, RECURRENT_MODELS, PowerFlowDataModule, get_model_registry
+
+MODEL_REGISTRY = get_model_registry()
 from src.optimizers.mosoa import MoSOA
 from src.optimizers.soa import SOA
 from src.optimizers.tpe_wrapper import TPEOptimizer

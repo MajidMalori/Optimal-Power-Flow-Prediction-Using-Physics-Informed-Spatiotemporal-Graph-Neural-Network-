@@ -17,6 +17,7 @@ torchmetrics==1.8.2
 # Data & Science
 numpy==1.26.0
 scipy==1.16.3
+numba==0.60.0
 pandas>=2.0.0
 matplotlib==3.10.8
 seaborn==0.13.2

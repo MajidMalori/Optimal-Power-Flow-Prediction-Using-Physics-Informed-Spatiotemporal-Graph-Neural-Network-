@@ -42,6 +42,8 @@ def run_all_methods_for_state_feasibility(
     load_network_fn=None,
     evaluator_cls=None,
     validate_outputs_fn=None,
+    pred_vm=None,
+    pred_va=None,
 ) -> Dict[str, SolverRunResult]:
     if load_network_fn is None:
         from src.processing.topology import load_network as load_network_fn
@@ -52,7 +54,11 @@ def run_all_methods_for_state_feasibility(
 
     net = load_network_fn(state.case_name)
     evaluator = evaluator_cls(net=net, case_name=state.case_name, max_iter=max_iter, tolerance=tolerance)
-    p_load, q_load, p_gen, p_ren, q_ren, pred_vm, pred_va = _features_to_arrays(state)
+    p_load, q_load, p_gen, p_ren, q_ren, vm_guess, va_guess = _features_to_arrays(state)
+    if pred_vm is None:
+        pred_vm = vm_guess
+    if pred_va is None:
+        pred_va = va_guess
     active_edges = _edge_set(state)
     target_vm = pred_vm.copy()
     target_va = pred_va.copy()

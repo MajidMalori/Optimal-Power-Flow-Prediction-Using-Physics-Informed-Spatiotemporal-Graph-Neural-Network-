@@ -63,39 +63,78 @@ class WarmStartEvaluator:
         methods = ["flat", "dc", "results"]
         # Randomize order to avoid library initialization bias appearing in the first method
         import random
+        original_order = methods.copy()
         random.shuffle(methods)
+        print(f"[DEBUG] warm_start_evaluator: Method order: {methods} (original: {original_order})")
 
-        for init_type in methods:
+        for i, init_type in enumerate(methods):
+            print(f"[DEBUG] warm_start_evaluator: Running method {i+1}/3: {init_type}")
             net_test = copy.deepcopy(net)
             
             if init_type == "results":
-                # 1. First, we must create/pre-allocate the res_bus table using a dummy run
-                # max_iteration=0 creates the tables but doesn't solve.
-                try:
-                    pp.runpp(net_test, algorithm="nr", init="flat", max_iteration=0)
-                except Exception: pass
-                
-                # 2. Inject prediction into the results table
-                # Ensure we match by index
+                # Pandapower docs: for robust custom warm starts, prefer init="auto"
+                # with init_vm_pu / init_va_degree arrays. Sanitize the neural guesses
+                # to avoid non-physical starts (e.g., Vm==0 on unobserved buses).
+                vm_init = np.asarray(pred_vm, dtype=float).copy()
+                va_init_deg = np.rad2deg(np.asarray(pred_va, dtype=float).copy())
+
+                # Replace invalid / extreme values with neutral fallback.
+                vm_bad = (~np.isfinite(vm_init)) | (vm_init < 0.8) | (vm_init > 1.2)
+                va_bad = ~np.isfinite(va_init_deg)
+                vm_init[vm_bad] = 1.0
+                va_init_deg[va_bad] = 0.0
+
+                # Anchor slack buses to ext_grid setpoints.
                 slack_buses = set(net_test.ext_grid.bus.values)
                 for i, bus_idx in enumerate(net_test.bus.index):
                     if bus_idx in slack_buses:
-                        # Force Slack Bus to exact physical setpoints (reference)
-                        # This prevents the solver from wasting iterations rotating the entire grid's phase
-                        net_test.res_bus.loc[bus_idx, 'vm_pu'] = net_test.ext_grid.vm_pu.values[0] if len(net_test.ext_grid) > 0 else 1.0
-                        net_test.res_bus.loc[bus_idx, 'va_degree'] = net_test.ext_grid.va_degree.values[0] if len(net_test.ext_grid) > 0 else 0.0
-                    else:
-                        net_test.res_bus.loc[bus_idx, 'vm_pu'] = pred_vm[i]
-                        net_test.res_bus.loc[bus_idx, 'va_degree'] = np.rad2deg(pred_va[i])
-                
-                solver_init = "results" # Tells pandapower to use the res_bus table as starting point
+                        vm_init[i] = net_test.ext_grid.vm_pu.values[0] if len(net_test.ext_grid) > 0 else 1.0
+                        va_init_deg[i] = net_test.ext_grid.va_degree.values[0] if len(net_test.ext_grid) > 0 else 0.0
+
+                solver_init = "auto"
             else:
                 solver_init = init_type
                 
             try:
+                print(f"[DEBUG] warm_start_evaluator: Starting pp.runpp with init={solver_init}")
                 start_time = time.perf_counter()
-                pp.runpp(net_test, algorithm="nr", init=solver_init, max_iteration=self.max_iter, tolerance_mva=self.tolerance)
-                solve_time = (time.perf_counter() - start_time) * 1000  # ms
+                
+                # Add timeout protection around pandapower solver (Unix-only)
+                import signal
+                import multiprocessing
+                
+                has_alarm = hasattr(signal, 'alarm') and hasattr(signal, 'SIGALRM')
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"pandapower solver timed out after {self.max_iter * 2} seconds")
+                
+                if has_alarm:
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(self.max_iter * 2)
+                
+                try:
+                    if init_type == "results":
+                        pp.runpp(
+                            net_test,
+                            algorithm="nr",
+                            init=solver_init,
+                            init_vm_pu=vm_init,
+                            init_va_degree=va_init_deg,
+                            max_iteration=self.max_iter,
+                            tolerance_mva=self.tolerance,
+                        )
+                    else:
+                        pp.runpp(net_test, algorithm="nr", init=solver_init, max_iteration=self.max_iter, tolerance_mva=self.tolerance)
+                    
+                    if has_alarm:
+                        signal.alarm(0)
+                    solve_time = (time.perf_counter() - start_time) * 1000  # ms
+                    print(f"[DEBUG] warm_start_evaluator: pp.runpp completed in {solve_time:.2f}ms")
+                    
+                except TimeoutError as e:
+                    solve_time = (time.perf_counter() - start_time) * 1000
+                    print(f"[DEBUG] warm_start_evaluator: pp.runpp TIMED OUT after {solve_time:.2f}ms - {e}")
+                    raise pp.LoadflowNotConverged(f"Solver timeout: {e}")
                 
                 iterations = net_test._ppc['iterations']
                 
@@ -111,6 +150,13 @@ class WarmStartEvaluator:
                 
                 success = True
             except pp.LoadflowNotConverged:
+                solve_time = np.nan
+                iterations = self.max_iter
+                mae_vm = np.nan
+                success = False
+            except Exception:
+                # Numerical failures (e.g., singular Jacobian factorization) should
+                # be counted as non-converged samples, not crash the whole benchmark.
                 solve_time = np.nan
                 iterations = self.max_iter
                 mae_vm = np.nan

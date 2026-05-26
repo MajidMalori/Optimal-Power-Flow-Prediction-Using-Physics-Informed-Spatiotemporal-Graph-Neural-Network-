@@ -29,25 +29,42 @@ def run_all_methods_for_state(
     tolerance: float = 1e-5,
     load_network_fn=None,
     evaluator_cls=None,
+    pred_vm=None,
+    pred_va=None,
 ) -> Dict[str, SolverRunResult]:
     """
     Real NR execution for speed benchmark using existing evaluator.
-    Warmstart prediction is currently feature-derived Vm/Va guess.
+    Supports model prediction warmstart or falls back to feature-derived guess.
     """
+    import time
+    print(f"[DEBUG] speed_runtime: Starting for state {state.sample_id}")
+    
+    start_time = time.time()
     if load_network_fn is None:
         from src.processing.topology import load_network as load_network_fn
     if evaluator_cls is None:
         from src.benchmarks.warm_start_evaluator import WarmStartEvaluator as evaluator_cls
 
+    print(f"[DEBUG] speed_runtime: Loading network...")
     net = load_network_fn(state.case_name)
+    print(f"[DEBUG] speed_runtime: Creating evaluator...")
     evaluator = evaluator_cls(net=net, case_name=state.case_name, max_iter=max_iter, tolerance=tolerance)
-    p_load, q_load, p_gen, p_ren, q_ren, pred_vm, pred_va = _features_to_arrays(state)
+    
+    load_time = time.time() - start_time
+    print(f"[DEBUG] speed_runtime: Setup completed in {load_time:.2f}s")
+    p_load, q_load, p_gen, p_ren, q_ren, vm_guess, va_guess = _features_to_arrays(state)
+    if pred_vm is None:
+        pred_vm = vm_guess
+    if pred_va is None:
+        pred_va = va_guess
     active_edges = _edge_set(state)
 
     # Speed pillar focuses on convergence/time/iterations; targets are placeholders.
     target_vm = pred_vm.copy()
     target_va = pred_va.copy()
 
+    print(f"[DEBUG] speed_runtime: Calling evaluator.evaluate_sample...")
+    eval_start = time.time()
     out = evaluator.evaluate_sample(
         p_load=p_load,
         q_load=q_load,
@@ -60,6 +77,8 @@ def run_all_methods_for_state(
         target_vm=target_vm,
         target_va=target_va,
     )
+    eval_elapsed = time.time() - eval_start
+    print(f"[DEBUG] speed_runtime: evaluator.evaluate_sample completed in {eval_elapsed:.2f}s")
 
     return {
         "flat": SolverRunResult("flat", bool(out["flat"]["success"]), float(out["flat"]["time_ms"]), int(out["flat"]["iterations"])),

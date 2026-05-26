@@ -16,6 +16,7 @@ import copy
 import inspect
 import argparse
 import logging
+import json
 from datetime import datetime
 
 # ── Suppress noisy warnings (must happen before library imports) ─────────────
@@ -38,14 +39,25 @@ import wandb
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import WandbLogger, CSVLogger
 
 logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
-from src.models import (
-    MODEL_REGISTRY, SPATIAL_MODELS, RECURRENT_MODELS,
-    PowerFlowDataModule
+from src.models import SPATIAL_MODELS, RECURRENT_MODELS, PowerFlowDataModule, get_model_registry
+from src.training.metrics_recorder import RecorderPaths, TrainingMetricsRecorder
+from src.visualization.plot_training import (
+    build_case_training_metrics_csv,
+    plot_case_final_metrics,
+    plot_case_loss_overlay,
+    plot_loss_curves,
+    plot_publication_summary,
+    plot_lr_curve,
+    plot_test_metrics,
+    plot_timing,
+    write_summary_index,
 )
+
+MODEL_REGISTRY = get_model_registry()
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "prep")
@@ -126,7 +138,11 @@ def train_single_model(model_name, case_name, config, group_name):
     # 2. Model
     model = build_model(run_config)
 
-    # 3. Logger
+    # 3. Outputs
+    paths = RecorderPaths.for_run(PROJECT_ROOT, case_name, model_name)
+    paths.ensure()
+
+    # 4. Loggers
     wandb_logger = WandbLogger(
         project=logger_cfg.get('project', 'powerflow-pinn'),
         name=f"{model_name}_{case_name}",
@@ -137,7 +153,20 @@ def train_single_model(model_name, case_name, config, group_name):
         anonymous=False
     )
 
-    # 4. Callbacks (Professional separation: Checkpoints vs Logs)
+    csv_logger = CSVLogger(save_dir=paths.logs_dir, name="lightning")
+
+    run_meta = {
+        "case": case_name,
+        "model": model_name,
+        "group": group_name,
+        "wandb_mode": os.environ.get("WANDB_MODE", ""),
+        "max_epochs": trainer_cfg.get("max_epochs", 100),
+        "seq_len": actual_seq_len,
+        "batch_size": run_config["data"]["batch_size"],
+    }
+    recorder_cb = TrainingMetricsRecorder(paths=paths, run_meta=run_meta)
+
+    # 5. Callbacks (checkpoints + early stop + recorder)
     # Each session gets its own folder to prevent accidental overwriting.
     ckpt_dir = os.path.join("checkpoints", group_name, f"{model_name}_{case_name}")
 
@@ -150,10 +179,10 @@ def train_single_model(model_name, case_name, config, group_name):
     )
     early_stop_cb = EarlyStopping(**run_config['callbacks']['early_stopping'])
 
-    # 5. Trainer (all settings from YAML)
+    # 6. Trainer (all settings from YAML)
     trainer = L.Trainer(
-        logger=wandb_logger,
-        callbacks=[checkpoint_cb, early_stop_cb],
+        logger=[wandb_logger, csv_logger],
+        callbacks=[checkpoint_cb, early_stop_cb, recorder_cb],
         max_epochs=trainer_cfg.get('max_epochs', 100),
         accelerator=trainer_cfg.get('accelerator', 'auto'),
         devices=trainer_cfg.get('devices', 'auto'),
@@ -163,37 +192,31 @@ def train_single_model(model_name, case_name, config, group_name):
         num_sanity_val_steps=0
     )
 
-    # 6. Train
+    # 7. Train
     trainer.fit(model, datamodule=dm)
 
-    # 7. Test
+    # 8. Test (scalar metrics only)
     test_results = trainer.test(model, datamodule=dm, ckpt_path="best")
     
     if test_results:
         import pandas as pd
-        report_dir = os.path.join(PROJECT_ROOT, "reports", "training", case_name)
-        os.makedirs(report_dir, exist_ok=True)
-        
-        # Create CSV subfolder for metrics
-        csv_dir = os.path.join(report_dir, "csv")
-        os.makedirs(csv_dir, exist_ok=True)
-        
         # Convert list of dicts to DataFrame
         df_test = pd.DataFrame(test_results)
         # Add identifying columns
         df_test.insert(0, "case", case_name)
         df_test.insert(0, "model", model_name)
-        
-        # We append to a master file so all models for this case end up in one table
-        csv_path = os.path.join(csv_dir, f"{case_name}_training_metrics.csv")
-        
-        # If file exists, append without header; else write with header
-        if os.path.exists(csv_path):
-            df_test.to_csv(csv_path, mode='a', header=False, index=False)
-        else:
-            df_test.to_csv(csv_path, index=False)
 
-    # 8. Close W&B run cleanly before starting the next model
+        per_model_test_csv = os.path.join(paths.csv_dir, "test_metrics.csv")
+        df_test.to_csv(per_model_test_csv, index=False)
+
+    # 9. Plots (training-only)
+    metrics_csv = recorder_cb.metrics_csv_path
+    plot_loss_curves(metrics_csv, os.path.join(paths.figures_dir, "loss_curves.png"))
+    plot_lr_curve(metrics_csv, os.path.join(paths.figures_dir, "lr.png"))
+    plot_timing(metrics_csv, os.path.join(paths.figures_dir, "timing.png"))
+    plot_test_metrics(os.path.join(paths.csv_dir, "test_metrics.csv"), os.path.join(paths.figures_dir, "test_metrics.png"))
+
+    # 10. Close W&B run cleanly before starting the next model
     wandb.finish()
 
 
@@ -248,7 +271,7 @@ def main():
     current = 0
     group_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    print(f"\n📋 Training {total} model(s) | Mode: {wandb_mode} | Cases: {', '.join(cases)}")
+    print(f"\nTraining {total} model(s) | Mode: {wandb_mode} | Cases: {', '.join(cases)}")
 
     import shutil
     for case_name in cases:
@@ -266,14 +289,53 @@ def main():
             try:
                 train_single_model(model_name, case_name, config, group_name)
             except Exception as e:
-                print(f"\n❌ {model_name} on {case_name} failed: {e}")
+                print(f"\nERROR: {model_name} on {case_name} failed: {e}")
                 wandb.finish(exit_code=1)
                 continue
+
+        # Case summary (training-only)
+        case_dir = os.path.join(PROJECT_ROOT, "reports", "training", case_name)
+        summary_dir = os.path.join(case_dir, "summary")
+        os.makedirs(summary_dir, exist_ok=True)
+        per_model_metrics = {}
+        per_model_tests = {}
+        for model_name in models_to_train:
+            run_paths = RecorderPaths.for_run(PROJECT_ROOT, case_name, model_name)
+            per_model_metrics[model_name] = os.path.join(run_paths.csv_dir, "metrics_epoch.csv")
+            per_model_tests[model_name] = os.path.join(run_paths.csv_dir, "test_metrics.csv")
+
+        case_csv_dir = os.path.join(case_dir, "csv")
+        os.makedirs(case_csv_dir, exist_ok=True)
+        master_csv = os.path.join(case_csv_dir, f"{case_name}_training_metrics.csv")
+        build_case_training_metrics_csv(per_model_tests, master_csv)
+
+        loss_overlay = plot_case_loss_overlay(per_model_metrics, os.path.join(summary_dir, "loss_overlay.png"))
+        test_loss_comp = plot_case_final_metrics(per_model_tests, "test_loss", os.path.join(summary_dir, "test_loss_comparison.png"))
+        publication_summary = plot_publication_summary(
+            per_model_tests,
+            per_model_metrics,
+            os.path.join(summary_dir, "publication_summary.png"),
+        )
+
+        write_summary_index(
+            os.path.join(summary_dir, "index.json"),
+            {
+                "case": case_name,
+                "models": models_to_train,
+                "generated_at": datetime.now().isoformat(),
+                "files": {
+                    "case_metrics_csv": master_csv,
+                    "loss_overlay": loss_overlay,
+                    "test_loss_comparison": test_loss_comp,
+                    "publication_summary": publication_summary,
+                },
+            },
+        )
 
     print(f"\n{'='*60}")
     print(f"  All done! ({current}/{total} completed)")
     if wandb_mode == "offline":
-        print(f"  💡 Sync to cloud: wandb sync {config.get('logger', {}).get('save_dir', 'wandb_logs')}/wandb/latest-run")
+        print(f"  Sync to cloud: wandb sync {config.get('logger', {}).get('save_dir', 'wandb_logs')}/wandb/latest-run")
     print(f"{'='*60}\n")
 
 

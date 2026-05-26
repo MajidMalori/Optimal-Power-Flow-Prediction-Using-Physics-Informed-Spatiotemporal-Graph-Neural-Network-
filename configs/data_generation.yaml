@@ -1,6 +1,6 @@
 # Directories
 output_dir: "data/raw"
-reports_dir: "reports/data"
+reports_dir: "reports/data/raw"
 
 # Simulation Core
 random_seed: 42

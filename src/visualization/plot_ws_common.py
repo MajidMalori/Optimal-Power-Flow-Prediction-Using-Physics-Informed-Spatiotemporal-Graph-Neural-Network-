@@ -27,6 +27,4 @@ def apply_ws_style() -> None:
 def save_pub_figure(fig, output_dir: str, stem: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     png = os.path.join(output_dir, f"{stem}.png")
-    pdf = os.path.join(output_dir, f"{stem}.pdf")
     fig.savefig(png, dpi=600, bbox_inches="tight")
-    fig.savefig(pdf, bbox_inches="tight")

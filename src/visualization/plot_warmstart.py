@@ -36,11 +36,11 @@ def plot_warmstart_metrics(df, case_name, output_dir):
     setup_premium_style()
     
     # Pre-map the hues for a clean, professional legend
-    hue_order = ["Flat Start", "DC Initialization", "Neural Warm Start"]
+    hue_order = ["Generic Flat Start (1.0 p.u., 0°)", "Linearized DC Start", "Physics-Informed GNN"]
     palette = {
-        "Flat Start": THEME_COLORS["palette"][0],
-        "DC Initialization": THEME_COLORS["palette"][1],
-        "Neural Warm Start": THEME_COLORS["palette"][2]
+        "Generic Flat Start (1.0 p.u., 0°)": THEME_COLORS["palette"][0],
+        "Linearized DC Start": THEME_COLORS["palette"][1],
+        "Physics-Informed GNN": THEME_COLORS["palette"][2]
     }
 
     # 1. Convergence Rate (Robustness Plot)
@@ -121,11 +121,11 @@ def plot_cross_case_scaling(df_global, output_dir):
     df_plot['GridNodes'] = df_plot['Case'].str.extract('(\d+)').astype(int)
     df_plot = df_plot[df_plot['Success'] == True]
     
-    hue_order = ["Flat Start", "DC Initialization", "Neural Warm Start"]
+    hue_order = ["Generic Flat Start (1.0 p.u., 0°)", "Linearized DC Start", "Physics-Informed GNN"]
     palette = {
-        "Flat Start": THEME_COLORS["palette"][0],
-        "DC Initialization": THEME_COLORS["palette"][1],
-        "Neural Warm Start": THEME_COLORS["palette"][2]
+        "Generic Flat Start (1.0 p.u., 0°)": THEME_COLORS["palette"][0],
+        "Linearized DC Start": THEME_COLORS["palette"][1],
+        "Physics-Informed GNN": THEME_COLORS["palette"][2]
     }
 
     plt.figure(figsize=(9, 6))

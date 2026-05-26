@@ -13,11 +13,14 @@ import warnings
 warnings.filterwarnings("ignore")
 import logging
 logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+import pandapower as pp
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.models import MODEL_REGISTRY, PowerFlowDataModule
+from src.models import PowerFlowDataModule, get_model_registry
+
+MODEL_REGISTRY = get_model_registry()
 from src.constants import TargetIndices, FeatureIndices
 from src.processing.topology import load_network
 from src.benchmarks.warm_start_evaluator import WarmStartEvaluator
@@ -208,9 +211,9 @@ def main():
                         
                         # Map internal keys to concise professional labels
                         METHOD_MAP = {
-                            "FLAT": "Flat Start",
-                            "DC": "DC Initialization",
-                            "RESULTS": "Neural Warm Start"
+                            "FLAT": "Generic Flat Start (1.0 p.u., 0°)",
+                            "DC": "Linearized DC Start",
+                            "RESULTS": "Physics-Informed GNN"
                         }
                         
                         for init_method, metrics in res.items():

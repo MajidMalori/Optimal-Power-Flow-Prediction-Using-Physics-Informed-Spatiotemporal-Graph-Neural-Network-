@@ -40,23 +40,23 @@ test-preprocessing:
 
 # Runs pylint on all Python files (full check)
 pylint:
-	pylint src/data/*.py src/models/*.py tests/*.py
+	pylint src/**/*.py scripts/*.py tests/*.py
 
 # Categorized Linting
 lint-imports:
-	pylint --disable=all --enable=imports,wrong-import-order,unused-import,reimported,cyclic-import data/*.py models/*.py tests/*.py
+	pylint --disable=all --enable=imports,wrong-import-order,unused-import,reimported,cyclic-import src/**/*.py scripts/*.py tests/*.py
 
 lint-unused:
-	pylint --disable=all --enable=unused-variable,unused-argument,unused-import,unused-wildcard-import data/*.py models/*.py tests/*.py
+	pylint --disable=all --enable=unused-variable,unused-argument,unused-import,unused-wildcard-import src/**/*.py scripts/*.py tests/*.py
 
 lint-duplication:
-	pylint --disable=all --enable=duplicate-code data/*.py models/*.py tests/*.py
+	pylint --disable=all --enable=duplicate-code src/**/*.py scripts/*.py tests/*.py
 
 lint-naming:
-	pylint --disable=all --enable=invalid-name,blacklisted-name data/*.py models/*.py tests/*.py
+	pylint --disable=all --enable=invalid-name,blacklisted-name src/**/*.py scripts/*.py tests/*.py
 
 lint-complexity:
-	pylint --disable=all --enable=too-many-branches,too-many-statements,too-many-locals,too-many-arguments data/*.py models/*.py tests/*.py
+	pylint --disable=all --enable=too-many-branches,too-many-statements,too-many-locals,too-many-arguments src/**/*.py scripts/*.py tests/*.py
 
 # Generate 96 timestep data for case 33:
 gen-33:
@@ -105,7 +105,7 @@ train-33-online:
 
 # Sync wandb logs to cloud
 sync:
-	wandb sync wandb_logs/wandb/offline-run-*
+	wandb sync logs/wandb_logs/wandb/offline-run-*
 
 # Generate animations for all fractions
 anim-33:
@@ -267,18 +267,19 @@ clean-checkpoints:
 
 # Clean up W&B logs
 clean-wandb:
-	@rm -rf wandb_logs/
+	@rm -rf logs/wandb_logs/
 
 # Clean up ALL training sessions (checkpoints and logs)
 clean-training: clean-logs clean-checkpoints clean-wandb
 
 # Clean up only report directories
 clean-reports:
-	@rm -rf reports/raw_data/
-	@rm -rf reports/prep_data/
+	@rm -rf reports/data/raw/
+	@rm -rf reports/data/prep/
 	@rm -rf reports/animations/
 	@rm -rf reports/evaluation/
 	@rm -rf reports/figures/
+	@rm -rf reports/warmstart/
 	@rm -rf reports/training/
 
 # Clean up raw and processed data
