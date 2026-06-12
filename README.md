@@ -29,6 +29,7 @@ This repository outlines the detailed study of Graph Neural Network (GNN) archit
 - [Configuration](#configuration)
 - [Evaluation and Benchmarking](#evaluation-and-benchmarking)
 - [Warm-Start Benchmark Suite](#warm-start-benchmark-suite)
+- [Hyperparameter Optimization (MoSOA)](#hyperparameter-optimization-mosoa)
 - [Testing](#testing)
 - [Experiment Tracking](#experiment-tracking)
 
@@ -447,6 +448,8 @@ The preprocessing script (`scripts/preprocess_data.py`):
 
 ## Installation
 
+For a comprehensive step-by-step setup guide including virtual environments, CUDA, Weights & Biases configuration, and troubleshooting, please refer to the [Setup Guide](docs/setup_guide.md).
+
 ### Prerequisites
 
 - Python 3.11.x (recommended; project tested with 3.11.9)
@@ -633,6 +636,8 @@ Results are saved to `reports/benchmarks/<case>/` and `reports/uncertainty/<case
 
 ## Warm-Start Benchmark Suite
 
+For a detailed mathematical and theoretical introduction, including our warm-start paradigm (soft physical constraints vs. hard numerical projections), convergence bounds, dynamic topology adaptability, and PMU noise reconstruction, see the full [Warm-Start Benchmark Documentation](docs/warmstart_benchmark.md).
+
 This benchmark suite evaluates a specific scientific question:
 
 **Does a learned voltage initializer place Newton-Raphson closer to the convergence region, thereby improving convergence speed, physical quality of converged solutions, and recovery on difficult operating points?**
@@ -817,6 +822,26 @@ reports/warmstart/
 - Compare methods on the exact same canonical states per case.
 - Run smoke targets before long runs to validate environment and paths.
 - Record Python version and dependency set when reporting benchmark results.
+
+---
+
+## Hyperparameter Optimization (MoSOA)
+
+This repository includes a next-generation population-based metaheuristic optimizer called the **Modified Seagull Optimization Algorithm (MoSOA)**, developed specifically to handle high-dimensional, non-convex hyperparameter landscapes for physics-informed spatiotemporal models.
+
+For the mathematical definition of the four core modifications, the complete position update cycle, and comparative benchmark results against PSO, GWO, and other algorithms, please refer to the [MoSOA HPO Documentation](docs/mosoa.md).
+
+### HPO Runbook
+
+You can run the optimization benchmarks and ablation studies using the following convenience targets:
+
+```bash
+make math          # Benchmark MoSOA vs. standard optimizers on math functions (F1-F23)
+make pert          # Run MoSOA perturbation ablation studies
+make tune-math     # Run mathematical HPO tuning
+make tune-33       # Run hyperparameter optimization for Case 33 PISTGNNs
+make landscapes    # Generate 3D mathematical landscape visualization plots
+```
 
 ---
 
