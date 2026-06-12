@@ -285,7 +285,7 @@ The profile has two peaks: a morning peak around 9:00–10:00 and an evening glo
 
 A bell-curve peaking at 12:00 (noon), modulated by a seasonal factor and a stochastic weather model:
 
-$$P_{solar}(h) = P_{base}(h) \cdot \text{cloud\_factor} \cdot \text{season\_factor}$$
+$$P_{\text{solar}}(h) = P_{\text{base}}(h) \cdot \text{cloud factor} \cdot \text{season factor}$$
 
 - `season_factor = 0.85 + 0.15 · sin(2π · (day - 80) / 365)`, peaking around the summer solstice.
 - `cloud_factor` is sampled from a weather-state-dependent range:

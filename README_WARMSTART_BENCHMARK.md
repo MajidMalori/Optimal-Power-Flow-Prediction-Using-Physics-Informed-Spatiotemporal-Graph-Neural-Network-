@@ -107,7 +107,7 @@ Our evaluation suite evaluates these initializers across three essential operati
 ### Pillar 2: Physical Solution Feasibility
 * **Objective:** Verifies that converged states respect voltage constraints and branch capacities.
 * **Metrics:** Constraint Satisfaction Rate (CSR):
-  $$\text{CSR} = \frac{N_{\text{satisfied}}}{N_{\text{total\_constraints}}} \times 100\%$$
+  $$\text{CSR} = \frac{N_{\text{satisfied}}}{N_{\text{total constraints}}} \times 100\%$$
 * **Artifacts:**
   * `case33_feasibility_rate.png`: Convergence rate under strict physical conditions.
   * `case33_constraint_satisfaction_trajectory.png`: Timestep-by-timestep physical feasibility profile.
