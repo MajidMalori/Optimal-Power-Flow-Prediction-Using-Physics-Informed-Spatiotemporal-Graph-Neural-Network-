@@ -4,7 +4,7 @@ from src.benchmarks.warmstart_protocol import SolverRunResult
 
 
 def test_rescue_runtime_returns_only_flat_when_flat_converges(monkeypatch):
-    def _run_all(_state, max_iter=100, tolerance=1e-5):
+    def _run_all(_state, max_iter=100, tolerance=1e-5, pred_vm=None, pred_va=None):
         return {
             "flat": SolverRunResult("flat", True, 20.0, 8),
             "dc": SolverRunResult("dc", True, 16.0, 7),
@@ -27,7 +27,7 @@ def test_rescue_runtime_returns_only_flat_when_flat_converges(monkeypatch):
 
 
 def test_rescue_runtime_returns_recovery_methods_when_flat_fails(monkeypatch):
-    def _run_all(_state, max_iter=100, tolerance=1e-5):
+    def _run_all(_state, max_iter=100, tolerance=1e-5, pred_vm=None, pred_va=None):
         return {
             "flat": SolverRunResult("flat", False, 20.0, 100),
             "dc": SolverRunResult("dc", False, 16.0, 100),

@@ -1,5 +1,7 @@
 import os
 import pytest
+import matplotlib
+matplotlib.use('Agg')
 
 PROCESSED_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'prep')
 

@@ -132,7 +132,7 @@ def create_animation(case_name: str, data_dir: str, output_path: str, frac: floa
         active_edges = []
         inactive_edges = []
         
-        # We need to map PandaPower line index to NetworkX edge
+        # Map PandaPower line index to NetworkX edge
         # NetworkX edges from pandapower are tuples of bus indices
         for i, row in net.line.iterrows():
             u, v = row.from_bus, row.to_bus

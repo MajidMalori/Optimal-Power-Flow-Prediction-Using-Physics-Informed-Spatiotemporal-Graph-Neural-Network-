@@ -5,6 +5,7 @@
 #   make test PYTHON_MAIN=.venv/Scripts/python
 PYTHON_MAIN ?= python
 PYTEST ?= $(PYTHON_MAIN) -m pytest
+MODELS ?= all
 
 # Default test command - runs everything in verbose mode
 test:
@@ -133,6 +134,26 @@ eval-118:
 eval-all:
 	$(PYTHON_MAIN) scripts/evaluate.py --case all
 
+# Export predicted vs true voltages (CSV + JSONL + plots) using final checkpoints
+export-predictions-33:
+	@$(PYTHON_MAIN) scripts/export_inference_predictions.py --case 33 --models $(MODELS) --sample-strategy coverage
+
+export-predictions-57:
+	@$(PYTHON_MAIN) scripts/export_inference_predictions.py --case 57 --models $(MODELS) --sample-strategy coverage
+
+export-predictions-118:
+	@$(PYTHON_MAIN) scripts/export_inference_predictions.py --case 118 --models $(MODELS) --sample-strategy coverage
+
+export-predictions-all:
+	@$(PYTHON_MAIN) scripts/export_inference_predictions.py --case all --models $(MODELS) --sample-strategy coverage
+
+# Export every test sample (90 per case with 96-timestep data)
+export-predictions-full-118:
+	@$(PYTHON_MAIN) scripts/export_inference_predictions.py --case 118 --models $(MODELS) --sample-strategy all
+
+export-predictions-full-all:
+	@$(PYTHON_MAIN) scripts/export_inference_predictions.py --case all --models $(MODELS) --sample-strategy all
+
 # Analyze uncertainty on the test set
 unc-33:
 	$(PYTHON_MAIN) scripts/analyze_uncertainty.py --case case33
@@ -218,13 +239,13 @@ ws-feas-118:
 	$(PYTHON_MAIN) scripts/benchmark_ws_feasibility.py --case case118
 
 ws-rescue-33:
-	$(PYTHON_MAIN) scripts/benchmark_ws_rescue.py --case case33
+	$(PYTHON_MAIN) scripts/benchmark_ws_stressed_rescue.py --case case33
 
 ws-rescue-57:
-	$(PYTHON_MAIN) scripts/benchmark_ws_rescue.py --case case57
+	$(PYTHON_MAIN) scripts/benchmark_ws_stressed_rescue.py --case case57
 
 ws-rescue-118:
-	$(PYTHON_MAIN) scripts/benchmark_ws_rescue.py --case case118
+	$(PYTHON_MAIN) scripts/benchmark_ws_stressed_rescue.py --case case118
 
 ws-core-33: gen-bench-33 ws-speed-33 ws-feas-33
 ws-core-57: gen-bench-57 ws-speed-57 ws-feas-57
@@ -238,7 +259,7 @@ ws-smoke-33:
 	$(PYTHON_MAIN) scripts/generate_benchmark_states.py --case case33 --max-samples 5
 	$(PYTHON_MAIN) scripts/benchmark_ws_speed.py --case case33 --max-samples 5
 	$(PYTHON_MAIN) scripts/benchmark_ws_feasibility.py --case case33 --max-samples 5
-	$(PYTHON_MAIN) scripts/benchmark_ws_rescue.py --case case33 --max-samples 5
+	$(PYTHON_MAIN) scripts/benchmark_ws_stressed_rescue.py --case case33 --max-samples 5
 
 # Full pipeline for all cases
 full-33: gen-33 prep-33 test train-33 eval-33 unc-33
@@ -281,6 +302,7 @@ clean-reports:
 	@rm -rf reports/figures/
 	@rm -rf reports/warmstart/
 	@rm -rf reports/training/
+	@rm -rf reports/predictions/
 
 # Clean up raw and processed data
 clean-data-raw:

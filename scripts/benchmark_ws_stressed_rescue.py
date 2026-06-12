@@ -115,8 +115,16 @@ def main():
             print(f"Evaluating {len(states)} grid states under extreme scaling multipliers (1.0x to 3.5x)")
             print(f"Strict Iteration Budget: {args.max_iter} iterations")
 
+            from tqdm import tqdm
             multipliers = np.arange(1.0, 3.6, 0.25)
             records = []
+
+            desc = f"Stressed {case.upper()} ({model_name})"
+            desc = f"{desc:<25}"
+            total_scenarios = len(states) * len(multipliers)
+            pbar = tqdm(total=total_scenarios, desc=desc,
+                        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} scenarios",
+                        unit="scenario")
 
             for state_idx, state in enumerate(states):
                 for lam in multipliers:
@@ -160,6 +168,8 @@ def main():
                             "dc_converged": False,
                             "warmstart_converged": False
                         })
+                    pbar.update(1)
+            pbar.close()
             
             # Save single model CSV logs
             model_output_dir = os.path.join(PROJECT_ROOT, "reports", "warmstart", "rescue", case, model_name)

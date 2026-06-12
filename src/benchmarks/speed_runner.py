@@ -8,6 +8,8 @@ from src.benchmarks.warmstart_protocol import SolverRunResult
 RunAllMethodsFn = Callable[[BenchmarkState], Dict[str, SolverRunResult]]
 
 
+from tqdm import tqdm
+
 def run_speed_benchmark(
     states: List[BenchmarkState],
     run_all_methods_fn: RunAllMethodsFn,
@@ -16,7 +18,12 @@ def run_speed_benchmark(
     Run flat/dc/warmstart for each state and aggregate speed metrics.
     """
     records: List[Dict] = []
-    for state in states:
+    case_name = states[0].case_name.upper() if states else "SPEED"
+    desc = f"Solving {case_name}"
+    desc = f"{desc:<25}"
+    for state in tqdm(states, desc=desc,
+                      bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} states",
+                      unit="state", leave=False):
         results = run_all_methods_fn(state)
         for method in ("flat", "dc", "warmstart"):
             r = results[method]

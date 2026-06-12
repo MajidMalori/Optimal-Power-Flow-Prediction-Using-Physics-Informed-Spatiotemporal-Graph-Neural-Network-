@@ -252,7 +252,7 @@ def plot_temporal_continuity(case_dir: str, case_name: str, output_path: str) ->
               bbox_to_anchor=(1.08, 1), frameon=True, shadow=True)
 
     # Position labels at the very top of the graph using axes coordinates (0-1)
-    # y=1.01 is just above the top spine
+    # Position label above the plot boundary
     ax.text((t_train/2)/t_total, 1.01, 'TRAIN', transform=ax.transAxes, 
             ha='center', fontsize=10, color='green', fontweight='bold')
     ax.text((t_train + t_val/2)/t_total, 1.01, 'VAL', transform=ax.transAxes, 

@@ -11,7 +11,7 @@ def test_warmstart_benchmark_end_to_end():
     This provides an automated end-to-end test the user can click to run.
     """
     
-    # We patch sys.argv to simulate the command line arguments
+    # Patch sys.argv to simulate command line arguments
     test_args = [
         "benchmark_warmstart.py",
         "--case", "case33",

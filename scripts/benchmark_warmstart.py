@@ -92,9 +92,12 @@ def main():
         
         all_results = []
         
-        pbar = tqdm(model_list, desc=f"Evaluating {case}", leave=True, dynamic_ncols=True)
+        desc = f"Evaluating {case}"
+        desc = f"{desc:<25}"
+        pbar = tqdm(model_list, desc=desc, leave=True,
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} models",
+                    unit="model")
         for model_name in pbar:
-            pbar.set_postfix_str(f"Processing {model_name}...")
             ckpt = get_latest_checkpoint(model_name, case)
             if not ckpt:
                 continue
@@ -108,7 +111,13 @@ def main():
             sample_count = 0
             
             with torch.no_grad():
-                for batch in test_loader:
+                batch_size = dm.batch_size
+                total_batches = min(len(test_loader), int(np.ceil(MAX_SAMPLES / batch_size)))
+                desc_batch = f"  {model_name}"
+                desc_batch = f"{desc_batch:<25}"
+                for batch in tqdm(test_loader, desc=desc_batch, total=total_batches, leave=False,
+                                  bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} batches",
+                                  unit="batch"):
                     if sample_count >= MAX_SAMPLES:
                         break
                         

@@ -69,7 +69,7 @@ def apply_configuration_switch(net: pp.pandapowerNet) -> dict:
             
             line_to_open = indices[0]
             net.line.loc[line_to_open, 'in_service'] = False
-            # Now we have one NO line, we can proceed or just return this as the switch
+            # When a normally open (NO) line is available, return it as the switching action
             return {'closed_idx': int(line_to_open), 'opened_idx': int(line_to_open)} # Self-loop switch
         except Exception: return None
 
@@ -99,7 +99,7 @@ def apply_configuration_switch(net: pp.pandapowerNet) -> dict:
             if len(indices) > 0:
                 loop_lines.extend(indices)
         
-        # 4. Filter: We must NOT open the line we just closed (otherwise nothing changed)
+        # 4. Filter: Avoid opening the same line that was just closed to ensure a topology change
         possible_to_open = [idx for idx in loop_lines if idx != line_to_close]
         
         if not possible_to_open:

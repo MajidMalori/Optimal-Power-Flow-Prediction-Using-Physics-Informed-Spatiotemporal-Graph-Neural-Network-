@@ -77,20 +77,20 @@ def test_lightning_fast_dev_run_and_denormalize(case_name):
     num_nodes = preds.shape[1]
     
     # Targets prediction outputs are VM and VA. 
-    # To use `denormalize_predictions`, we need to map the 2 output channels to a full 10-channel array
-    # or just denormalize the VM column (index 0 for our predictions).
+    # To use `denormalize_predictions`, map the 2 output channels to a full 10-channel array
+    # or denormalize the VM column (index 0 for the predictions).
     
     norm_path = os.path.join(PROCESSED_DATA_DIR, case_name, "normalization.json")
     with open(norm_path, "r") as f:
         meta = json.load(f)
         
-    # We construct a dummy output tensor representing the 10-column target format 
-    # where the last 2 columns are VM and VA, just to test the denormalize function logic.
+    # Construct a dummy output tensor representing the 10-column target format 
+    # where the last 2 columns are VM and VA, to test the denormalize function logic.
     mock_full_preds = np.zeros((batch_size, num_nodes, 10))
     mock_full_preds[..., TargetIndices.VM] = preds[..., 0]   # Assign predicted VM deviation
     mock_full_preds[..., TargetIndices.VA] = preds[..., 1]   # Assign predicted VA deviation
     
-    # Let's also mock a power target to see if it gets scaled by s_base
+    # Mock a power target to verify scaling by s_base
     mock_full_preds[..., TargetIndices.P_LOAD] = 0.5  # 0.5 p.u.
     
     # Run Denormalization

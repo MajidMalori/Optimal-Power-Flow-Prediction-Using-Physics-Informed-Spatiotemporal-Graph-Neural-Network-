@@ -117,7 +117,7 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
             tta_preds = torch.stack(tta_preds) # [M, B, N, 2]
             
             # Predictive Uncertainty (Model Doubt)
-            # We use the standard deviation across TTA samples
+            # Standard deviation across TTA samples is computed
             preds_std = tta_preds.std(dim=0) # [B, N, 2]
             # Combined uncertainty: RMS of VM and VA standard deviations
             uncertainty_metric = torch.sqrt(torch.mean(preds_std**2, dim=-1)) # [B, N]
@@ -126,7 +126,7 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
             targets_vm_va = targets[..., TargetIndices.VM:TargetIndices.VA+1]
 
             # Store for uncertainty analysis
-            # We store the TTA-based uncertainty metric
+            # Save the TTA-based uncertainty metric
             all_preds.append(uncertainty_metric.cpu().numpy())
             all_targets.append(targets_vm_va.cpu().numpy()) # Keep for shape matching if needed
 
@@ -157,8 +157,8 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
         # Temporal: Average uncertainty per timestep
         temporal_unc = np.mean(uncertainty, axis=1)
         
-        # We need to map temporal to 24 hours if possible
-        # For simplicity, if we have 96 steps per day, we'll take mean across days
+        # Map temporal values to 24 hours if possible
+        # Compute mean across days assuming 96 steps per day
         steps_per_day = 96
         m_samples = len(temporal_unc)
         

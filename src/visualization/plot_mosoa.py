@@ -236,18 +236,18 @@ def plot_perturbation_ablation(df, output_path, title_suffix=""):
     
     plt.figure(figsize=(15, 8))
     
-    # We use a human-selected palette for strategy distinctness
+    # Define color scheme for visualization strategy distinctness
     strategy_colors = {
         'linear': '#34495e',
         'cosine': '#3498db',
         'quadratic': '#9b59b6',
-        'exponential': '#2ecc71'  # Our champion
+        'exponential': '#2ecc71'  # Best performing strategy
     }
     
     sns.barplot(data=df, x='Function', y='Mean', hue='Strategy', palette=strategy_colors)
     
     # Check if any values are too close to zero for Log Scale
-    # We use a small epsilon for values that are "conceptually" zero but found by optimizer
+    # Use small epsilon for values that are close to zero
     min_val = df['Mean'].min()
     if min_val > 1e-50:
         plt.yscale('log')

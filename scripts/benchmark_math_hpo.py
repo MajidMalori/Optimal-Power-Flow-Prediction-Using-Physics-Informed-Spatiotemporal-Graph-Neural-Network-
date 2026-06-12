@@ -33,13 +33,13 @@ def mock_training_pipeline(params: Dict[str, Any], **kwargs) -> float:
     base_loss = lr_err + gcn_err + lstm_err + gru_err + drop_err + layers_err
     
     # 2. Multimodal Ripples (Non-convexity)
-    # We add a cosine modulation to create local minima every ~scale units
+    # A cosine modulation is added to create local minima every ~scale units
     ripple = 0.0
     for val in params.values():
         ripple += 2.0 * (1.0 - np.cos(5.0 * np.pi * val))
         
     # 3. Stochastic Noise (Training variance)
-    # We add noise for the tuner, but provide a way to get noise-free value for reporting
+    # Noise is added for the tuner, with a clean path provided to retrieve noise-free values for reporting
     noise = kwargs.get('noise', np.random.normal(0, 0.5))
     
     return max(0.1, base_loss + ripple + noise)
@@ -53,6 +53,11 @@ def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any],
         best_val = np.inf
         start_exec = time.time()
         np.random.seed(seed)
+        desc = f"RS {name}"
+        desc = f"{desc:<25}"
+        pbar = tqdm(total=n_trials, desc=desc, leave=False,
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} trials",
+                    unit="trial")
         for i in range(n_trials):
             params = {}
             for k, bounds in search_space.items():
@@ -72,13 +77,20 @@ def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any],
             
             if val < best_val:
                 best_val = val
+            pbar.update(1)
+        pbar.close()
     else:
         # Swarm / Optuna
         opt = optimizer_class(search_space=search_space, seed=seed, **kwargs)
         
-        # We need to capture history for parallel coordinates
+        # Capture trial history for parallel coordinates visualization
         captured_trials = []
         start_exec = time.time()
+        desc = f"{name}"
+        desc = f"{desc:<25}"
+        pbar = tqdm(total=n_trials, desc=desc, leave=False,
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} trials",
+                    unit="trial")
         def wrapped_fn(p):
             res = mock_training_pipeline(p)
             td = p.copy()
@@ -88,17 +100,18 @@ def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any],
             td['Trial'] = len(captured_trials) + 1
             td['Time_Elapsed_s'] = time.time() - start_exec
             captured_trials.append(td)
+            pbar.update(1)
             return res
             
         best_res = opt.optimize(wrapped_fn, n_trials=n_trials, verbose=verbose)
+        pbar.close()
         if isinstance(best_res, dict) and 'best_params' in best_res:
             best_params = best_res['best_params']
         else:
             best_params = best_res
             
-        # For the final results table, we use the BEST VAL observed during search 
-        # to ensure consistency with the plots, OR a noise-free evaluation.
-        # Let's use the actual best recorded during trials.
+        # For the final results table, the actual best recorded value observed during the
+        # search is utilized to guarantee consistency across reporting and plotting metrics.
         best_val = min([t['Val_Loss'] for t in captured_trials])
         all_trials = captured_trials
         
@@ -158,7 +171,10 @@ def main():
     print(f"\nRunning Mathematical HPO Comparison (High-Complexity Landscape, {num_runs} Runs)...")
     print("-" * 75)
     
-    for opt_class, name in tqdm(algorithms, desc=f"{'Tuning Stage':<15}", ncols=100):
+    desc = f"{'Tuning Stage':<25}"
+    for opt_class, name in tqdm(algorithms, desc=desc,
+                                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} stages",
+                                unit="stage"):
         extra_args = mosoa_params if name == "MoSOA" else {}
         run_stats = []
         for run_id in range(num_runs):

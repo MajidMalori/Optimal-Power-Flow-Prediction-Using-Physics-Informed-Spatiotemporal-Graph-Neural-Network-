@@ -100,7 +100,10 @@ def get_objective_function(alg_name: str, model_name: str, case_name: str, base_
     start_time = time.time()
     trial_count = [0]
     best_val_loss = [float('inf')]
-    pbar = tqdm(total=total_trials, desc=f"{alg_name:<15}", leave=True)
+    desc = f"{alg_name:<25}"
+    pbar = tqdm(total=total_trials, desc=desc, leave=True,
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} trials",
+                unit="trial")
     
     actual_seq_len = base_model_cfg.get('seq_len', 4) if model_name in RECURRENT_MODELS else 1
     dm = PowerFlowDataModule(
