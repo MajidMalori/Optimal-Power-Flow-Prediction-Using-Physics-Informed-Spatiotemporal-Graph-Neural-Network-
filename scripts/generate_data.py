@@ -114,7 +114,7 @@ def simulate_time_series(net: pp.pandapowerNet, config: dict, output_dir: str = 
     branch_max_i_ka = net.line.max_i_ka.values.astype(np.float32)
 
     # Calculate branch base current (kA) for per-unit conversion: i_base = s_base / (sqrt(3) * v_base_kv)
-    # We use the 'from' bus kV as the reference voltage for the branch.
+    # The 'from' bus kV is used as the reference voltage for the branch.
     v_base_kv = net.bus.vn_kv.loc[branch_from].values
     branch_i_base = (config.get('physics', {}).get('base_mva', 100.0)) / (np.sqrt(3) * v_base_kv)
     branch_i_base = branch_i_base.astype(np.float32)

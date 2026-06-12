@@ -1,0 +1,66 @@
+# MoSOA System Master Configuration
+
+# Core Algorithm Hyperparameters
+mosoa_params:
+  f_c: 2.0             # Optimal point for most functions
+  p_beta: 10.0         # Faster decay helps stability in late iterations
+  sigma_max: 1.0       # Standard nonlinear factor
+
+# Settings for Mathematical Function Benchmarks (F1-F23)
+mathematical:
+  num_runs: 10           # Repeat each experiment N times for statistical averaging
+  iterations: 100         # Generations per run (total evals = iterations * pop_size)
+  pop_size: 30           # Swarm agents per generation
+  default_dim: 30        # Dimensionality of the search space
+  plot_subset: "all"     # "all" for F1-F23, or a list like ["F1", "F5"]
+
+# Settings for Perturbation Strategy Ablation (Roadmap 3.2)
+perturbation:
+  num_runs: 30
+  iterations: 100
+  pop_size: 30
+  conv_plot_subset: "all"
+
+# HPO Tuning Benchmark Settings (PISTGNN)
+hpo_tuning:
+  trials: 30                # Total trials per algorithm (Research Grade)
+  epochs: 30               # Max epochs per trial (with early stopping)
+  patience: 5               # Early stopping patience during HPO
+  pop_size: 10              # Swarm population size for MoSOA/SOA
+  seed: 42                  # Random seed for optimizers
+  limit_train_batches: 1.0  # Fraction of train data to use per trial
+  limit_val_batches: 1.0    # Fraction of val data to use per trial
+  space:
+    learning_rate: [0.0001, 0.05]
+    gcn_hidden: [16, 128]
+    lstm_hidden: [16, 128]       # Used by PIGCLSTM, PIResnetGCLSTM
+    gru_hidden: [16, 128]        # Used by PIGCGRU, PIResnetGCGRU
+    num_layers: [2, 5]
+
+# Mathematical HPO Search Space
+mathematical_hpo_space:
+  learning_rate: [0.0001, 0.05]
+  gcn_hidden: [16, 128]
+  lstm_hidden: [16, 128]
+  gru_hidden: [16, 128]
+  dropout: [0.0, 0.5]
+  num_layers: [2, 5]
+
+mathematical_hpo:
+  iterations: 20            # EXACTLY 1000 iterations total (20 * 50)
+  pop_size: 50              
+  num_runs: 30               
+
+# Visualization Aesthetics
+visualization:
+  linewidth: 2.0
+  dpi: 300
+  colors:
+    MoSOA: "#E91E63"
+    ESOA:  "#2ecc71"
+    PSO:   "#FF9800"
+    GWO:   "#2980b9"
+    GA:    "#8e44ad"
+    TSA:   "#f1c40f"
+    SOA*:  "#d35400"
+    HGSO:  "#2c3e50"

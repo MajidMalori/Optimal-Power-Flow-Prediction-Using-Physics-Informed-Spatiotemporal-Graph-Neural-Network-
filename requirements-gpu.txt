@@ -15,8 +15,9 @@ pytorch-lightning==2.6.1
 torchmetrics==1.8.2
 
 # Data & Science
-numpy==2.3.5
+numpy==1.26.0
 scipy==1.16.3
+numba==0.60.0
 pandas>=2.0.0
 matplotlib==3.10.8
 seaborn==0.13.2
@@ -31,6 +32,7 @@ tensorboard==2.20.0
 # Utilities
 PyYAML==6.0.3
 tqdm==4.67.3
+mealpy==3.0.3
 
 # Testing
 pytest==9.0.2

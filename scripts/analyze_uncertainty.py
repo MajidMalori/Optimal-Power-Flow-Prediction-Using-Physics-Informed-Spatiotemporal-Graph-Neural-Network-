@@ -34,7 +34,9 @@ warnings.filterwarnings("ignore", message=".*findfont: Font family.*")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.models import MODEL_REGISTRY, PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS
+from src.models import PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS, get_model_registry
+
+MODEL_REGISTRY = get_model_registry()
 from src.constants import TargetIndices
 from src.visualization.plot_uncertainty import plot_spatial_comparison_grid, plot_temporal_comparison_curves
 
@@ -124,7 +126,7 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
             tta_preds = torch.stack(tta_preds) # [M, B, N, 2]
             
             # Predictive Uncertainty (Model Doubt)
-            # We use the standard deviation across TTA samples
+            # Standard deviation across TTA samples is computed
             preds_std = tta_preds.std(dim=0) # [B, N, 2]
             # Combined uncertainty: RMS of VM and VA standard deviations
             uncertainty_metric = torch.sqrt(torch.mean(preds_std**2, dim=-1)) # [B, N]
@@ -133,7 +135,7 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
             targets_vm_va = targets[..., TargetIndices.VM:TargetIndices.VA+1]
 
             # Store for uncertainty analysis
-            # We store the TTA-based uncertainty metric
+            # Save the TTA-based uncertainty metric
             all_preds.append(uncertainty_metric.cpu().numpy())
             all_targets.append(targets_vm_va.cpu().numpy()) # Keep for shape matching if needed
 
@@ -164,8 +166,8 @@ def run_uncertainty_analysis(model_name, case_name, ckpt_path, device, num_tta=1
         # Temporal: Average uncertainty per timestep
         temporal_unc = np.mean(uncertainty, axis=1)
         
-        # We need to map temporal to 24 hours if possible
-        # For simplicity, if we have 96 steps per day, we'll take mean across days
+        # Map temporal values to 24 hours if possible
+        # Compute mean across days assuming 96 steps per day
         steps_per_day = 96
         m_samples = len(temporal_unc)
         
@@ -209,24 +211,21 @@ def main():
     model_list = list(MODEL_REGISTRY.keys()) if args.model.lower() == "all" else [args.model]
 
     for case in cases:
-        print(f"\n{'='*60}")
-        print(f"UNCERTAINTY ANALYSIS PROFILING: {case}")
-        print(f"{'='*60}\n")
+        print(f"\nUncertainty Analysis: {case}")
+        print("-" * 40)
         
-        # Clear previous uncertainty reports for this case
-        uncertainty_dir = os.path.join(PROJECT_ROOT, "reports", "uncertainty", case)
+        # Reports go to reports/evaluation/uncertainty/[case]
+        uncertainty_dir = os.path.join(PROJECT_ROOT, "reports", "evaluation", "uncertainty", case)
         if os.path.exists(uncertainty_dir):
             shutil.rmtree(uncertainty_dir)
         os.makedirs(uncertainty_dir, exist_ok=True)
         
-        # Create CSV subfolder to separate data from images
         csv_dir = os.path.join(uncertainty_dir, "csv")
         os.makedirs(csv_dir, exist_ok=True)
         
         all_results = []
         
-        # Single Unified Progress Bar
-        pbar = tqdm(model_list, desc=f"Analyzing {case}", leave=True)
+        pbar = tqdm(model_list, desc=f"Analyzing {case}", leave=True, dynamic_ncols=True)
         
         for model_name in pbar:
             pbar.set_postfix_str(f"Processing {model_name}... ")

@@ -34,7 +34,9 @@ warnings.filterwarnings("ignore", message=".*findfont: Font family.*")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.models import MODEL_REGISTRY, PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS
+from src.models import PowerFlowDataModule, SPATIAL_MODELS, RECURRENT_MODELS, get_model_registry
+
+MODEL_REGISTRY = get_model_registry()
 from src.constants import TargetIndices
 import pandapower as pp
 from src.processing.topology import load_network
@@ -52,12 +54,9 @@ def get_latest_checkpoint(model_name, case_name):
     return max(files, key=os.path.getmtime)
 
 def run_evaluation(model_name, case_name, ckpt_path, device):
-    # 1. Load Data
-    config_path = os.path.join(PROJECT_ROOT, "configs", "training.yaml")
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Initialize DataModule correctly
     data_dir = os.path.join(PROJECT_ROOT, "data", "prep")
     dm = PowerFlowDataModule(
         data_dir=data_dir,
@@ -68,7 +67,6 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
     dm.setup(stage="test")
     test_loader = dm.test_dataloader()
 
-    # 2. Load Model
     ModelClass = MODEL_REGISTRY[model_name]
     model = ModelClass.load_from_checkpoint(ckpt_path, strict=False)
     model.to(device)
@@ -92,10 +90,9 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
     inference_times = []
     
 
-    # 4. Evaluation Loop
     with torch.no_grad():
         for batch in test_loader:
-            # Move batch to device (handle tensor, list-of-tensors, list-of-lists-of-tensors)
+            # Move batch to device, handling tensors and nested list structures
             def _to_device(v, dev):
                 if isinstance(v, torch.Tensor):
                     return v.to(dev)
@@ -111,16 +108,13 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             targets = batch["targets"]
             topo_ids = batch["topology_ids"]
 
-            # Handle Spatial vs Recurrent batch keys
             is_recurrent = model_name in RECURRENT_MODELS
             edge_index = batch["edge_index_seq"] if is_recurrent else batch["edge_index"]
 
-            # Time inference
             if device.type == "cuda":
                 torch.cuda.synchronize()
             start = time.perf_counter()
             
-            # Forward pass
             preds = model(x, edge_index)
 
             if device.type == "cuda":
@@ -128,7 +122,6 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             end = time.perf_counter()
             inference_times.append((end - start) / x.size(0))
 
-            # MAE & MSE
             from src.constants import TargetIndices
             targets_vm = targets[..., TargetIndices.VM]
             targets_va = targets[..., TargetIndices.VA]
@@ -142,10 +135,8 @@ def run_evaluation(model_name, case_name, ckpt_path, device):
             mse_vm.append((err_vm**2).mean().item())
             mse_va.append((err_va**2).mean().item())
 
-            # Constraints
             physics = model._get_physics_loss(batch)
             
-            # For recurrent models, we evaluate physics on the final timestep of the sequence
             eval_topo_ids = topo_ids[:, -1] if is_recurrent else topo_ids
             
             res = physics.evaluate_constraints(
@@ -255,26 +246,22 @@ def main():
     results = []
     
     for case in cases:
-        print(f"\n{'='*80}")
-        print(f"BENCHMARK EVALUATION PROFILING: {case}")
-        print(f"{'='*80}\n")
+        print(f"\nEvaluation: {case}")
+        print("-" * 40)
         
-        # Clear previous benchmark reports for this case
-        benchmark_dir = os.path.join(PROJECT_ROOT, "reports", "benchmarks", case)
+        # Reports go to reports/evaluation/standard/[case]
+        benchmark_dir = os.path.join(PROJECT_ROOT, "reports", "evaluation", "standard", case)
         if os.path.exists(benchmark_dir):
             shutil.rmtree(benchmark_dir)
         os.makedirs(benchmark_dir, exist_ok=True)
         
-        # Create CSV subfolder to separate data from images
         csv_dir = os.path.join(benchmark_dir, "csv")
         os.makedirs(csv_dir, exist_ok=True)
         
-        # 0. Classical Solver Benchmark (Once per case)
-        print(f"Running classical solver benchmarks for {case}...")
+        print(f"Running benchmarks for {case}...")
         solver_speeds, solver_accuracy = run_solver_benchmark(case, config)
         
-        # Single Unified Progress Bar
-        pbar = tqdm(model_list, desc=f"Evaluating {case}", leave=True)
+        pbar = tqdm(model_list, desc=f"Evaluating {case}", leave=True, dynamic_ncols=True)
         
         for model_name in pbar:
             pbar.set_postfix_str(f"Processing {model_name}... ")
@@ -308,9 +295,9 @@ def main():
             print("")
             
             # GNN Benchmark Table
-            print("="*120)
-            print("GNN BENCHMARK SUMMARY")
-            print("="*120)
+            # Model Performance Comparison
+            print("\nModel Performance Comparison")
+            print("-" * 30)
             
             # Build header with per-solver speedups
             solver_keys = list(first['solver_speeds'].keys())

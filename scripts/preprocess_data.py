@@ -178,9 +178,6 @@ def preprocess_case(case_name: str, raw_dir: str, processed_dir: str, config: di
         return False
 
     case_dir = os.path.join(processed_dir, case_name)
-    if os.path.exists(case_dir):
-        import shutil
-        shutil.rmtree(case_dir)
     os.makedirs(case_dir, exist_ok=True)
 
 
@@ -247,7 +244,7 @@ def preprocess_case(case_name: str, raw_dir: str, processed_dir: str, config: di
     ybus_base, cont_matrices, cont_timesteps, b_from, b_to, b_max, b_ibase = load_ybus_data(raw_dir, case_name)
     if ybus_base is not None:
         # Pandapower's internal Ybus is ALREADY in per-unit. 
-        # We do NOT divide by s_base here to avoid double-normalization.
+        # Division by s_base is avoided here to prevent double-normalization.
         torch.save(torch.from_numpy(ybus_base), os.path.join(case_dir, 'ybus_base.pt'))
         if cont_matrices.size > 0:
             torch.save(torch.from_numpy(cont_matrices), os.path.join(case_dir, 'ybus_contingencies.pt'))
@@ -323,7 +320,7 @@ if __name__ == "__main__":
         print()
         try:
             from src.visualization.plot_preprocessing import generate_all_preprocessing_plots
-            base_reports_dir = os.path.join(root_dir, 'reports', 'prep_data')
+            base_reports_dir = os.path.join(root_dir, 'reports', 'data', 'prep')
             for case in processed_cases:
                 case_dir = os.path.join(PROCESSED_DIR, case)
                 reports_dir = os.path.join(base_reports_dir, case)

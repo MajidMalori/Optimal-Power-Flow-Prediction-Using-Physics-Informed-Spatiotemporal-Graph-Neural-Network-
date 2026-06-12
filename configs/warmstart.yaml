@@ -1,0 +1,29 @@
+# Warm-Start Benchmark Configuration
+
+evaluation:
+  benchmark:
+    cases:
+      - case33
+      - case57
+      - case118
+    solvers:
+      - nr   # Newton-Raphson is the standard target for speedup
+    solver_trials: 3 # Run Newton-Raphson 3 times and average to combat cold-CPU timing spikes
+    max_iterations: 100
+    tolerance: 1e-5
+    max_samples: 50 # Number of test samples to evaluate
+
+
+models:
+  # The models we want to compare
+  - StandardGCN
+  - DynamicGCN
+  - PIGCN
+  - PIGCLSTM
+  - PIGCGRU
+  - PIResnetGCLSTM
+  - PIResnetGCGRU
+
+data:
+  batch_size: 1  # Crucial: Must be 1 to test each sample in sequential pandapower net loops
+  seq_len: 1
