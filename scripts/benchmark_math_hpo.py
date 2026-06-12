@@ -81,7 +81,12 @@ def run_tuning(optimizer_class: type, name: str, search_space: Dict[str, Any],
         pbar.close()
     else:
         # Swarm / Optuna
-        opt = optimizer_class(search_space=search_space, seed=seed, **kwargs)
+        import inspect
+        sig = inspect.signature(optimizer_class.__init__)
+        if 'pop_size' in sig.parameters:
+            opt = optimizer_class(search_space=search_space, seed=seed, pop_size=pop_size, **kwargs)
+        else:
+            opt = optimizer_class(search_space=search_space, seed=seed, **kwargs)
         
         # Capture trial history for parallel coordinates visualization
         captured_trials = []

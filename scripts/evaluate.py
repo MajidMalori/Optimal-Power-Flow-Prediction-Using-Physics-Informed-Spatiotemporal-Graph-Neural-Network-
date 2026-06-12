@@ -54,6 +54,7 @@ def get_latest_checkpoint(model_name, case_name):
     return max(files, key=os.path.getmtime)
 
 def run_evaluation(model_name, case_name, ckpt_path, device):
+    config_path = os.path.join(PROJECT_ROOT, "configs", "training.yaml")
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
