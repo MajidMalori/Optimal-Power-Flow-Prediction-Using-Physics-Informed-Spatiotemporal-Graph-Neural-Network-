@@ -41,6 +41,7 @@ data/prep/
 *.parquet
 *.h5
 *.json
+*.jsonl
 !configs/*.json
 
 # ── Training Artifacts (regenerated via 'make trainTest') ───────────────────
