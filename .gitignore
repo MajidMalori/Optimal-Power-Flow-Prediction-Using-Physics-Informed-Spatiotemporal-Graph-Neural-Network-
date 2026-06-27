@@ -60,7 +60,7 @@ logs/
 *.jpeg
 *.pdf
 reports/
-*.zip
+zips/
 
 # ── Documentation text files ───
 notes/
